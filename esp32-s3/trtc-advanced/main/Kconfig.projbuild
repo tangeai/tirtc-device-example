@@ -1,0 +1,27 @@
+menu "Audio"
+
+config AUDIO_LOCAL_LOOPBACK_TEST
+    bool "Enable temporary local mic-to-speaker loopback test"
+    default n
+
+endmenu
+
+menu "Debug utilities"
+
+config APP_DEBUG_SCREEN_SERVER_ENABLE
+    bool "Enable LAN screen debug web server"
+    default n
+    help
+        Starts a local HTTP server after the display is initialized.
+        The server exposes the current LVGL screen as BMP and accepts
+        debug tap/scroll commands from a browser on the same Wi-Fi LAN.
+        Disable this for production builds to avoid compiling or linking
+        the HTTP debug server.
+
+config APP_DEBUG_SCREEN_SERVER_PORT
+    int "LAN screen debug web server port"
+    range 1024 65534
+    default 8080
+    depends on APP_DEBUG_SCREEN_SERVER_ENABLE
+
+endmenu

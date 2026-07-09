@@ -1,0 +1,2753 @@
+#include "ai_chat.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include "cJSON.h"
+#include "esp_check.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+
+#include "ai_chat_token.h"
+#include "audio_device.h"
+#include "platform/app_task_affinity.h"
+#include "platform_task_reaper.h"
+#include "system_time.h"
+#include "tirtc_session.h"
+#include "tiRTC.h"
+
+static const char *TAG = "ai_chat";
+
+#define AI_CHAT_SIGNALING_CMD         0x2100U
+#define AI_CHAT_AUDIO_STREAM_ID       1U
+#define AI_CHAT_AUDIO_CODEC_NAME      "pcm"
+#define AI_CHAT_START_SESSION_INCLUDE_AUDIO 1
+#define AI_CHAT_AUDIO_SAMPLE_RATE     16000U
+#define AI_CHAT_AUDIO_CHANNELS        1U
+#define AI_CHAT_AUDIO_FRAME_MS        20U
+#define AI_CHAT_AUDIO_FRAME_SAMPLES   (AI_CHAT_AUDIO_SAMPLE_RATE / 50U)
+#define AI_CHAT_AUDIO_FRAME_BYTES     (AI_CHAT_AUDIO_FRAME_SAMPLES * sizeof(int16_t))
+#define AI_CHAT_MEDIA_QUEUE_LEN       10
+#define AI_CHAT_MEDIA_TASK_STACK      (10 * 1024)
+#define AI_CHAT_MEDIA_TASK_PRIORITY   10
+#define AI_CHAT_MEDIA_TASK_CORE       APP_TASK_CORE_RTC
+#define AI_CHAT_MEDIA_ALLOC_CAPS      (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+#define AI_CHAT_TASK_ALLOC_CAPS       (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+#define AI_CHAT_CONTROL_TASK_CORE     APP_TASK_CORE_BACKGROUND
+#define AI_CHAT_MEDIA_TX_LOG_INTERVAL_MS 1000U
+#define AI_CHAT_START_TASK_STACK      (32 * 1024)
+#define AI_CHAT_START_TASK_PRIORITY   5
+#define AI_CHAT_SESSION_TASK_STACK    (12 * 1024)
+#define AI_CHAT_SESSION_TASK_PRIORITY 5
+#define AI_CHAT_START_SESSION_SETTLE_MS 20U
+#define AI_CHAT_HEARTBEAT_TASK_STACK  (8 * 1024)
+#define AI_CHAT_HEARTBEAT_TASK_PRIORITY 5
+#define AI_CHAT_RTC_READY_WAIT_MS     30000U
+#define AI_CHAT_RTC_READY_POLL_MS     200U
+#define AI_CHAT_CONNECT_TIMEOUT_MS    20000U
+#define AI_CHAT_START_SESSION_TIMEOUT_MS    30000U
+#define AI_CHAT_TIMEOUT_GUARD_POLL_MS 100U
+#define AI_CHAT_HEARTBEAT_INTERVAL_MS 30000U
+#define AI_CHAT_START_SESSION_RPC_ID  "start-session-001"
+#define AI_CHAT_SEND_BUFFER_SOFT_DROP_BYTES (128U * 1024U)
+#define AI_CHAT_TASK_REAPER_QUEUE_LEN 8
+#define AI_CHAT_TASK_REAPER_STACK     2048
+#define AI_CHAT_TASK_REAPER_PRIORITY  6
+#ifndef AI_CHAT_VERBOSE_HEAP_LOG
+#define AI_CHAT_VERBOSE_HEAP_LOG      0
+#endif
+#define AI_CHAT_CAPTION_TRACE_TEXT_BYTES 96U
+
+#define AI_CHAT_REST_HINT_PREFIX "\xE5\x85\x88\xE4\xBC\x91\xE6\x81\xAF"
+
+typedef struct {
+    tirtc_conn_t conn;
+    TIRTCFRAMEINFO frame;
+    uint8_t data[AI_CHAT_AUDIO_FRAME_BYTES];
+} ai_chat_media_packet_t;
+
+typedef struct {
+    tirtc_conn_t conn;
+    QueueHandle_t queue;
+    TaskHandle_t task;
+    bool initialized;
+    bool running;
+    bool uplink_enabled;
+    uint32_t next_ts_ms;
+    uint32_t tx_frames;
+    uint32_t tx_failures;
+    uint32_t dropped_frames;
+    TickType_t last_backpressure_log_tick;
+    TickType_t last_format_drop_log_tick;
+    TickType_t last_tx_window_log_tick;
+    uint32_t tx_window_frames;
+    uint32_t tx_window_payload_bytes;
+    uint32_t tx_window_peak_percent;
+    bool tx_started_logged;
+    bool audio_prepared;
+} ai_chat_media_state_t;
+
+typedef struct {
+    int caption_type;
+    int64_t utterance_id;
+    bool final;
+    char text[AI_CHAT_CAPTION_TEXT_MAX];
+} ai_chat_caption_group_t;
+
+typedef enum {
+    AI_CHAT_CAPTION_MERGE_NONE = 0,
+    AI_CHAT_CAPTION_MERGE_REPLACE,
+    AI_CHAT_CAPTION_MERGE_ASR_REPLACE,
+    AI_CHAT_CAPTION_MERGE_EMPTY_COPY,
+    AI_CHAT_CAPTION_MERGE_SAME,
+    AI_CHAT_CAPTION_MERGE_PREFIX_UPDATE,
+    AI_CHAT_CAPTION_MERGE_STALE_PREFIX,
+    AI_CHAT_CAPTION_MERGE_OVERLAP_APPEND,
+    AI_CHAT_CAPTION_MERGE_DIRECT_APPEND,
+} ai_chat_caption_merge_kind_t;
+
+typedef struct {
+    ai_chat_caption_merge_kind_t kind;
+    size_t old_len;
+    size_t incoming_len;
+    size_t result_len;
+    size_t overlap_len;
+} ai_chat_caption_merge_trace_t;
+
+typedef struct {
+    bool initialized;
+    bool observer_registered;
+    uint32_t generation;
+    ai_chat_config_t config;
+    ai_chat_state_t state;
+    tirtc_conn_t conn;
+    bool listening;
+    bool cloud_speaking;
+    bool resting_requested;
+    char role_id[AI_CHAT_ROLE_ID_MAX];
+    char session_id[AI_CHAT_SESSION_ID_MAX];
+    char status[AI_CHAT_STATUS_TEXT_MAX];
+    ai_chat_caption_group_t captions[2];
+    uint8_t message_count;
+    ai_chat_message_t *messages;
+    uint32_t rx_commands;
+    int last_error;
+} ai_chat_state_data_t;
+
+typedef struct {
+    uint32_t generation;
+} ai_chat_start_context_t;
+
+static void *ai_chat_calloc_psram(size_t count, size_t size)
+{
+    void *ptr = heap_caps_calloc(count, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ptr == NULL) {
+        ptr = calloc(count, size);
+    }
+    return ptr;
+}
+
+typedef struct {
+    uint32_t generation;
+} ai_chat_whip_context_t;
+
+typedef struct {
+    uint32_t generation;
+    tirtc_conn_t conn;
+} ai_chat_session_context_t;
+
+typedef struct {
+    uint32_t generation;
+} ai_chat_heartbeat_context_t;
+
+typedef struct {
+    uint32_t generation;
+    int64_t enter_us;
+    int64_t token_start_us;
+    int64_t rtc_ready_us;
+    int64_t token_done_us;
+    int64_t whip_submit_us;
+    int64_t whip_connected_us;
+    int64_t media_ready_us;
+    int64_t start_session_sent_us;
+    int64_t start_ok_us;
+} ai_chat_start_timeline_t;
+
+typedef enum {
+    AI_CHAT_TIMELINE_TOKEN_START = 0,
+    AI_CHAT_TIMELINE_RTC_READY,
+    AI_CHAT_TIMELINE_TOKEN_DONE,
+    AI_CHAT_TIMELINE_WHIP_SUBMIT,
+    AI_CHAT_TIMELINE_WHIP_CONNECTED,
+    AI_CHAT_TIMELINE_MEDIA_READY,
+    AI_CHAT_TIMELINE_START_SESSION_SENT,
+    AI_CHAT_TIMELINE_START_OK,
+} ai_chat_timeline_point_t;
+
+static SemaphoreHandle_t s_lock;
+static ai_chat_state_data_t s_ai = {
+    .state = AI_CHAT_STATE_IDLE,
+    .status = "idle",
+};
+static ai_chat_media_state_t s_media;
+static portMUX_TYPE s_media_lock = portMUX_INITIALIZER_UNLOCKED;
+static TaskHandle_t s_start_task;
+static TaskHandle_t s_session_task;
+static TaskHandle_t s_heartbeat_task;
+static uint32_t s_heartbeat_generation;
+static QueueHandle_t s_task_reaper_queue;
+static TaskHandle_t s_task_reaper_task;
+static StaticQueue_t s_task_reaper_queue_buffer;
+static TaskHandle_t s_task_reaper_items[AI_CHAT_TASK_REAPER_QUEUE_LEN];
+static StaticTask_t s_task_reaper_tcb;
+static StackType_t s_task_reaper_stack[AI_CHAT_TASK_REAPER_STACK];
+static ai_chat_start_timeline_t s_start_timeline;
+static portMUX_TYPE s_start_timeline_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static void ai_chat_start_task(void *ctx);
+static void ai_chat_session_task(void *ctx);
+static void ai_chat_heartbeat_task(void *ctx);
+static void ai_chat_media_task(void *ctx);
+static void ai_chat_task_reaper_task(void *ctx);
+static void ai_chat_media_capture_cb(const uint8_t *data,
+                                     size_t data_len,
+                                     const audio_format_t *format,
+                                     void *ctx);
+
+static uint64_t ai_chat_now_ms(void)
+{
+    return (uint64_t)(esp_timer_get_time() / 1000LL);
+}
+
+static uint32_t ai_chat_elapsed_ms_since(int64_t begin_us)
+{
+    if (begin_us <= 0) {
+        return 0;
+    }
+    int64_t elapsed_us = esp_timer_get_time() - begin_us;
+    return elapsed_us > 0 ? (uint32_t)(elapsed_us / 1000LL) : 0;
+}
+
+static uint32_t ai_chat_delta_ms(int64_t later_us, int64_t earlier_us)
+{
+    if (later_us <= 0 || earlier_us <= 0 || later_us <= earlier_us) {
+        return 0;
+    }
+    return (uint32_t)((later_us - earlier_us) / 1000LL);
+}
+
+static void ai_chat_timeline_reset(uint32_t generation)
+{
+    ai_chat_start_timeline_t timeline = {
+        .generation = generation,
+        .enter_us = esp_timer_get_time(),
+    };
+
+    taskENTER_CRITICAL(&s_start_timeline_lock);
+    s_start_timeline = timeline;
+    taskEXIT_CRITICAL(&s_start_timeline_lock);
+}
+
+static void ai_chat_timeline_mark(uint32_t generation, ai_chat_timeline_point_t point)
+{
+    int64_t now_us = esp_timer_get_time();
+
+    taskENTER_CRITICAL(&s_start_timeline_lock);
+    if (s_start_timeline.generation == generation) {
+        switch (point) {
+        case AI_CHAT_TIMELINE_TOKEN_START:
+            s_start_timeline.token_start_us = now_us;
+            break;
+        case AI_CHAT_TIMELINE_RTC_READY:
+            s_start_timeline.rtc_ready_us = now_us;
+            break;
+        case AI_CHAT_TIMELINE_TOKEN_DONE:
+            s_start_timeline.token_done_us = now_us;
+            break;
+        case AI_CHAT_TIMELINE_WHIP_SUBMIT:
+            s_start_timeline.whip_submit_us = now_us;
+            break;
+        case AI_CHAT_TIMELINE_WHIP_CONNECTED:
+            s_start_timeline.whip_connected_us = now_us;
+            break;
+        case AI_CHAT_TIMELINE_MEDIA_READY:
+            s_start_timeline.media_ready_us = now_us;
+            break;
+        case AI_CHAT_TIMELINE_START_SESSION_SENT:
+            s_start_timeline.start_session_sent_us = now_us;
+            break;
+        case AI_CHAT_TIMELINE_START_OK:
+            s_start_timeline.start_ok_us = now_us;
+            break;
+        default:
+            break;
+        }
+    }
+    taskEXIT_CRITICAL(&s_start_timeline_lock);
+}
+
+static void ai_chat_timeline_log(uint32_t generation)
+{
+    ai_chat_start_timeline_t timeline = {0};
+
+    taskENTER_CRITICAL(&s_start_timeline_lock);
+    if (s_start_timeline.generation == generation) {
+        timeline = s_start_timeline;
+    }
+    taskEXIT_CRITICAL(&s_start_timeline_lock);
+    if (timeline.generation != generation || timeline.enter_us <= 0 || timeline.start_ok_us <= 0) {
+        return;
+    }
+
+    ESP_LOGI(TAG,
+             "AI Chat start timeline: total=%ums token=%ums rtc_wait=%ums whip=%ums media=%ums start_session=%ums first_ready=%ums",
+             (unsigned)ai_chat_delta_ms(timeline.start_ok_us, timeline.enter_us),
+             (unsigned)ai_chat_delta_ms(timeline.token_done_us, timeline.token_start_us),
+             (unsigned)ai_chat_delta_ms(timeline.rtc_ready_us, timeline.token_start_us),
+             (unsigned)ai_chat_delta_ms(timeline.whip_connected_us, timeline.whip_submit_us),
+             (unsigned)ai_chat_delta_ms(timeline.media_ready_us, timeline.whip_connected_us),
+             (unsigned)ai_chat_delta_ms(timeline.start_ok_us, timeline.start_session_sent_us),
+             (unsigned)ai_chat_delta_ms(timeline.start_ok_us, timeline.enter_us));
+}
+
+static void ai_chat_log_heap(const char *stage)
+{
+#if AI_CHAT_VERBOSE_HEAP_LOG
+    ai_chat_state_t state = AI_CHAT_STATE_IDLE;
+    uint32_t generation = 0;
+
+    if (s_lock != NULL) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        state = s_ai.state;
+        generation = s_ai.generation;
+        xSemaphoreGive(s_lock);
+    }
+
+    ESP_LOGI(TAG,
+             "AI Chat heap %s: t_ms=%llu gen=%lu state=%s internal_free=%u internal_largest=%u psram_free=%u psram_largest=%u",
+             stage != NULL ? stage : "unknown",
+             (unsigned long long)ai_chat_now_ms(),
+             (unsigned long)generation,
+             ai_chat_state_name(state),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+#else
+    (void)stage;
+#endif
+}
+
+static void ai_chat_task_reaper_task(void *ctx)
+{
+    (void)ctx;
+
+    while (true) {
+        TaskHandle_t task = NULL;
+        if (xQueueReceive(s_task_reaper_queue, &task, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        if (task == NULL || task == xTaskGetCurrentTaskHandle()) {
+            continue;
+        }
+        vTaskDeleteWithCaps(task);
+    }
+}
+
+static esp_err_t ai_chat_ensure_task_reaper(void)
+{
+    if (s_task_reaper_queue == NULL) {
+        s_task_reaper_queue = xQueueCreateStatic(AI_CHAT_TASK_REAPER_QUEUE_LEN,
+                                                 sizeof(TaskHandle_t),
+                                                 (uint8_t *)s_task_reaper_items,
+                                                 &s_task_reaper_queue_buffer);
+        if (s_task_reaper_queue == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    if (s_task_reaper_task == NULL) {
+        s_task_reaper_task = xTaskCreateStaticPinnedToCore(ai_chat_task_reaper_task,
+                                                           "ai_task_reaper",
+                                                           AI_CHAT_TASK_REAPER_STACK,
+                                                           NULL,
+                                                           AI_CHAT_TASK_REAPER_PRIORITY,
+                                                           s_task_reaper_stack,
+                                                           &s_task_reaper_tcb,
+                                                           AI_CHAT_CONTROL_TASK_CORE);
+        if (s_task_reaper_task == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    return ESP_OK;
+}
+
+static void ai_chat_delete_current_task_with_caps(void)
+{
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+
+    if (s_task_reaper_queue != NULL &&
+        self != NULL &&
+        xQueueSend(s_task_reaper_queue, &self, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        vTaskSuspend(NULL);
+    }
+
+    ESP_LOGE(TAG, "AI Chat task reaper unavailable, deleting task directly");
+    platform_task_reaper_delete_current_with_caps(TAG);
+}
+
+static void ai_chat_trim_utf8_tail(char *text)
+{
+    if (text == NULL || text[0] == '\0') {
+        return;
+    }
+
+    size_t len = strlen(text);
+    while (len > 0U) {
+        char tail = text[len - 1U];
+        if (tail != '\r' && tail != '\n' && tail != '\t' && tail != ' ') {
+            break;
+        }
+        text[--len] = '\0';
+    }
+    if (len == 0U) {
+        return;
+    }
+
+    size_t lead_pos = len - 1U;
+    while (lead_pos > 0U && (((uint8_t)text[lead_pos] & 0xC0U) == 0x80U)) {
+        lead_pos--;
+    }
+
+    uint8_t lead = (uint8_t)text[lead_pos];
+    size_t seq_len = len - lead_pos;
+    size_t expected_len = 0;
+
+    if ((lead & 0x80U) == 0U) {
+        expected_len = 1U;
+    } else if ((lead & 0xE0U) == 0xC0U) {
+        expected_len = 2U;
+    } else if ((lead & 0xF0U) == 0xE0U) {
+        expected_len = 3U;
+    } else if ((lead & 0xF8U) == 0xF0U) {
+        expected_len = 4U;
+    }
+
+    if (expected_len == 0U || seq_len < expected_len) {
+        text[lead_pos] = '\0';
+    }
+}
+
+const char *ai_chat_state_name(ai_chat_state_t state)
+{
+    switch (state) {
+    case AI_CHAT_STATE_IDLE:
+        return "idle";
+    case AI_CHAT_STATE_STARTING:
+        return "starting";
+    case AI_CHAT_STATE_TOKEN:
+        return "token";
+    case AI_CHAT_STATE_CONNECTING:
+        return "connecting";
+    case AI_CHAT_STATE_CONNECTED:
+        return "connected";
+    case AI_CHAT_STATE_STARTING_SESSION:
+        return "starting_session";
+    case AI_CHAT_STATE_IN_SESSION:
+        return "in_session";
+    case AI_CHAT_STATE_STOPPING:
+        return "stopping";
+    case AI_CHAT_STATE_ERROR:
+        return "error";
+    default:
+        return "unknown";
+    }
+}
+
+static void ai_chat_copy_str(char *dst, size_t dst_size, const char *src)
+{
+    if (dst == NULL || dst_size == 0U) {
+        return;
+    }
+    if (src == NULL) {
+        dst[0] = '\0';
+        return;
+    }
+    strlcpy(dst, src, dst_size);
+    ai_chat_trim_utf8_tail(dst);
+}
+
+static esp_err_t ai_chat_ensure_message_history(void)
+{
+    if (s_ai.messages != NULL) {
+        return ESP_OK;
+    }
+
+    ai_chat_message_t *messages =
+        (ai_chat_message_t *)ai_chat_calloc_psram(AI_CHAT_MESSAGE_HISTORY_MAX, sizeof(*messages));
+    if (messages == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_ai.messages == NULL) {
+        s_ai.messages = messages;
+        messages = NULL;
+    }
+    xSemaphoreGive(s_lock);
+
+    free(messages);
+    return ESP_OK;
+}
+
+static void ai_chat_clear_messages_locked(void)
+{
+    if (s_ai.messages != NULL) {
+        memset(s_ai.messages,
+               0,
+               sizeof(s_ai.messages[0]) * AI_CHAT_MESSAGE_HISTORY_MAX);
+    }
+    s_ai.message_count = 0;
+}
+
+static int ai_chat_find_message_locked(int caption_type,
+                                       int64_t utterance_id,
+                                       const char *text)
+{
+    if (s_ai.messages == NULL) {
+        return -1;
+    }
+
+    for (int index = (int)s_ai.message_count - 1; index >= 0; --index) {
+        if ((int)s_ai.messages[index].caption_type == caption_type &&
+            s_ai.messages[index].utterance_id == utterance_id) {
+            if (!s_ai.messages[index].final) {
+                return index;
+            }
+            if (text != NULL && strcmp(s_ai.messages[index].text, text) == 0) {
+                return index;
+            }
+        }
+    }
+    return -1;
+}
+
+static ai_chat_message_t *ai_chat_append_message_locked(int caption_type, int64_t utterance_id)
+{
+    if (s_ai.messages == NULL) {
+        return NULL;
+    }
+
+    if (s_ai.message_count >= AI_CHAT_MESSAGE_HISTORY_MAX) {
+        memmove(&s_ai.messages[0],
+                &s_ai.messages[1],
+                sizeof(s_ai.messages[0]) * (AI_CHAT_MESSAGE_HISTORY_MAX - 1U));
+        s_ai.message_count = AI_CHAT_MESSAGE_HISTORY_MAX - 1U;
+    }
+
+    ai_chat_message_t *message = &s_ai.messages[s_ai.message_count++];
+    memset(message, 0, sizeof(*message));
+    message->caption_type = (uint8_t)caption_type;
+    message->utterance_id = utterance_id;
+    return message;
+}
+
+static void ai_chat_update_message_locked(int caption_type,
+                                          int64_t utterance_id,
+                                          const char *text,
+                                          bool final)
+{
+    int index = ai_chat_find_message_locked(caption_type, utterance_id, text);
+    ai_chat_message_t *message = index >= 0 ?
+        &s_ai.messages[index] :
+        ai_chat_append_message_locked(caption_type, utterance_id);
+
+    if (message == NULL) {
+        return;
+    }
+    message->final = final;
+    ai_chat_copy_str(message->text, sizeof(message->text), text);
+}
+
+static bool ai_chat_text_has_prefix(const char *text, const char *prefix)
+{
+    size_t prefix_len = 0;
+
+    if (text == NULL || prefix == NULL) {
+        return false;
+    }
+
+    prefix_len = strlen(prefix);
+    if (prefix_len == 0U) {
+        return true;
+    }
+
+    return strncmp(text, prefix, prefix_len) == 0;
+}
+
+static const char *ai_chat_caption_type_name(int caption_type)
+{
+    switch (caption_type) {
+    case 0:
+        return "ASR";
+    case 1:
+        return "TTS";
+    default:
+        return "invalid";
+    }
+}
+
+static const char *ai_chat_caption_merge_kind_name(ai_chat_caption_merge_kind_t kind)
+{
+    switch (kind) {
+    case AI_CHAT_CAPTION_MERGE_REPLACE:
+        return "replace";
+    case AI_CHAT_CAPTION_MERGE_ASR_REPLACE:
+        return "asr_replace";
+    case AI_CHAT_CAPTION_MERGE_EMPTY_COPY:
+        return "empty_copy";
+    case AI_CHAT_CAPTION_MERGE_SAME:
+        return "same";
+    case AI_CHAT_CAPTION_MERGE_PREFIX_UPDATE:
+        return "prefix_update";
+    case AI_CHAT_CAPTION_MERGE_STALE_PREFIX:
+        return "stale_prefix";
+    case AI_CHAT_CAPTION_MERGE_OVERLAP_APPEND:
+        return "overlap_append";
+    case AI_CHAT_CAPTION_MERGE_DIRECT_APPEND:
+        return "direct_append";
+    case AI_CHAT_CAPTION_MERGE_NONE:
+    default:
+        return "none";
+    }
+}
+
+static size_t ai_chat_utf8_preview_len(const char *text, size_t max_bytes)
+{
+    size_t len = 0;
+
+    if (text == NULL || max_bytes == 0U) {
+        return 0;
+    }
+
+    while (len < max_bytes && text[len] != '\0') {
+        len++;
+    }
+
+    while (len > 0U &&
+           text[len] != '\0' &&
+           (((uint8_t)text[len] & 0xC0U) == 0x80U)) {
+        len--;
+    }
+
+    return len;
+}
+
+static void ai_chat_caption_trace_begin(ai_chat_caption_merge_trace_t *trace,
+                                        const ai_chat_caption_group_t *group,
+                                        const ai_chat_event_t *event)
+{
+    if (trace == NULL) {
+        return;
+    }
+
+    memset(trace, 0, sizeof(*trace));
+    trace->kind = AI_CHAT_CAPTION_MERGE_NONE;
+    trace->old_len = group != NULL ? strlen(group->text) : 0U;
+    trace->incoming_len = event != NULL ? strlen(event->text) : 0U;
+}
+
+static void ai_chat_caption_trace_finish(ai_chat_caption_merge_trace_t *trace,
+                                         ai_chat_caption_merge_kind_t kind,
+                                         const ai_chat_caption_group_t *group,
+                                         size_t overlap_len)
+{
+    if (trace == NULL) {
+        return;
+    }
+
+    trace->kind = kind;
+    trace->result_len = group != NULL ? strlen(group->text) : 0U;
+    trace->overlap_len = overlap_len;
+}
+
+static bool ai_chat_utf8_is_boundary(const char *text, size_t offset)
+{
+    unsigned char ch = 0;
+
+    if (text == NULL) {
+        return false;
+    }
+    if (offset == 0U || text[offset] == '\0') {
+        return true;
+    }
+
+    ch = (unsigned char)text[offset];
+    return (ch & 0xC0U) != 0x80U;
+}
+
+static size_t ai_chat_text_tail_head_overlap(const char *existing, const char *incoming)
+{
+    size_t existing_len = 0;
+    size_t incoming_len = 0;
+    size_t max_len = 0;
+
+    if (existing == NULL || incoming == NULL) {
+        return 0;
+    }
+
+    existing_len = strlen(existing);
+    incoming_len = strlen(incoming);
+    max_len = existing_len < incoming_len ? existing_len : incoming_len;
+
+    for (size_t overlap = max_len; overlap > 0U; --overlap) {
+        size_t existing_offset = existing_len - overlap;
+        if (!ai_chat_utf8_is_boundary(existing, existing_offset) ||
+            !ai_chat_utf8_is_boundary(incoming, overlap)) {
+            continue;
+        }
+        if (memcmp(existing + existing_offset, incoming, overlap) == 0) {
+            return overlap;
+        }
+    }
+
+    return 0;
+}
+
+static void ai_chat_apply_caption_text(ai_chat_caption_group_t *group,
+                                       const ai_chat_event_t *event,
+                                       ai_chat_caption_merge_trace_t *trace)
+{
+    size_t used = 0;
+    size_t overlap = 0;
+    const char *append_text = NULL;
+
+    if (group == NULL || event == NULL) {
+        return;
+    }
+
+    ai_chat_caption_trace_begin(trace, group, event);
+    used = strlen(group->text);
+
+    if (event->mode != 1) {
+        ai_chat_copy_str(group->text, sizeof(group->text), event->text);
+        ai_chat_caption_trace_finish(trace, AI_CHAT_CAPTION_MERGE_REPLACE, group, 0U);
+        return;
+    }
+
+    if (event->caption_type == 0) {
+        ai_chat_copy_str(group->text, sizeof(group->text), event->text);
+        ai_chat_caption_trace_finish(trace, AI_CHAT_CAPTION_MERGE_ASR_REPLACE, group, 0U);
+        return;
+    }
+
+    if (used == 0U) {
+        ai_chat_copy_str(group->text, sizeof(group->text), event->text);
+        ai_chat_caption_trace_finish(trace, AI_CHAT_CAPTION_MERGE_EMPTY_COPY, group, 0U);
+        return;
+    }
+
+    if (strcmp(group->text, event->text) == 0) {
+        ai_chat_caption_trace_finish(trace, AI_CHAT_CAPTION_MERGE_SAME, group, 0U);
+        return;
+    }
+
+    if (strlen(event->text) > used && ai_chat_text_has_prefix(event->text, group->text)) {
+        ai_chat_copy_str(group->text, sizeof(group->text), event->text);
+        ai_chat_caption_trace_finish(trace, AI_CHAT_CAPTION_MERGE_PREFIX_UPDATE, group, 0U);
+        return;
+    }
+
+    if (strlen(event->text) < used && ai_chat_text_has_prefix(group->text, event->text)) {
+        ai_chat_caption_trace_finish(trace, AI_CHAT_CAPTION_MERGE_STALE_PREFIX, group, 0U);
+        return;
+    }
+
+    overlap = ai_chat_text_tail_head_overlap(group->text, event->text);
+    if (overlap > 0U) {
+        append_text = event->text + overlap;
+        if (append_text[0] == '\0') {
+            return;
+        }
+        if (used < sizeof(group->text) - 1U) {
+            strlcpy(group->text + used, append_text, sizeof(group->text) - used);
+            ai_chat_trim_utf8_tail(group->text);
+        }
+        ai_chat_caption_trace_finish(trace, AI_CHAT_CAPTION_MERGE_OVERLAP_APPEND, group, overlap);
+        return;
+    }
+
+    if (used < sizeof(group->text) - 1U) {
+        strlcpy(group->text + used, event->text, sizeof(group->text) - used);
+        ai_chat_trim_utf8_tail(group->text);
+    }
+    ai_chat_caption_trace_finish(trace, AI_CHAT_CAPTION_MERGE_DIRECT_APPEND, group, 0U);
+}
+
+static bool ai_chat_is_blank(const char *value)
+{
+    return value == NULL || value[0] == '\0';
+}
+
+static bool ai_chat_is_signaling_cmd(uint32_t cmdw)
+{
+    uint32_t low = cmdw & 0xFFFFU;
+
+    return GET_CMD(cmdw) == AI_CHAT_SIGNALING_CMD ||
+           GET_CMD(cmdw & ~RESPONSE_BIT) == AI_CHAT_SIGNALING_CMD ||
+           cmdw == AI_CHAT_SIGNALING_CMD ||
+           (cmdw & ~RESPONSE_BIT) == AI_CHAT_SIGNALING_CMD ||
+           low == AI_CHAT_SIGNALING_CMD ||
+           (low & ~RESPONSE_BIT) == AI_CHAT_SIGNALING_CMD;
+}
+
+static void ai_chat_set_state_locked(ai_chat_state_t state, const char *status)
+{
+    if (s_ai.state != state) {
+        ESP_LOGI(TAG,
+                 "state %s -> %s: t_ms=%llu gen=%lu",
+                 ai_chat_state_name(s_ai.state),
+                 ai_chat_state_name(state),
+                 (unsigned long long)ai_chat_now_ms(),
+                 (unsigned long)s_ai.generation);
+        s_ai.state = state;
+    }
+    if (status != NULL) {
+        ai_chat_copy_str(s_ai.status, sizeof(s_ai.status), status);
+    }
+}
+
+static uint32_t ai_chat_next_generation_locked(void)
+{
+    s_ai.generation++;
+    if (s_ai.generation == 0U) {
+        s_ai.generation = 1U;
+    }
+    return s_ai.generation;
+}
+
+static bool ai_chat_generation_matches_locked(uint32_t generation)
+{
+    return generation != 0U &&
+           generation == s_ai.generation &&
+           s_ai.state != AI_CHAT_STATE_IDLE &&
+           s_ai.state != AI_CHAT_STATE_STOPPING;
+}
+
+static bool ai_chat_generation_matches(uint32_t generation)
+{
+    bool matches = false;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    matches = ai_chat_generation_matches_locked(generation);
+    xSemaphoreGive(s_lock);
+    return matches;
+}
+
+static bool ai_chat_timeout_guard_active(uint32_t generation,
+                                         ai_chat_state_t expected_state,
+                                         tirtc_conn_t expected_conn,
+                                         ai_chat_state_t *state_out,
+                                         tirtc_conn_t *conn_out)
+{
+    ai_chat_state_t state = AI_CHAT_STATE_IDLE;
+    tirtc_conn_t conn = NULL;
+    bool active = false;
+
+    if (s_lock == NULL) {
+        return false;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    state = s_ai.state;
+    conn = s_ai.conn;
+    active = ai_chat_generation_matches_locked(generation) &&
+             state == expected_state &&
+             (expected_conn == NULL || conn == expected_conn);
+    xSemaphoreGive(s_lock);
+
+    if (state_out != NULL) {
+        *state_out = state;
+    }
+    if (conn_out != NULL) {
+        *conn_out = conn;
+    }
+    return active;
+}
+
+static bool ai_chat_wait_timeout_guard(const char *name,
+                                       uint32_t generation,
+                                       ai_chat_state_t expected_state,
+                                       tirtc_conn_t expected_conn,
+                                       uint32_t timeout_ms)
+{
+    const int64_t begin_us = esp_timer_get_time();
+    uint32_t waited_ms = 0;
+
+    while (waited_ms < timeout_ms) {
+        ai_chat_state_t state = AI_CHAT_STATE_IDLE;
+        tirtc_conn_t conn = NULL;
+        if (!ai_chat_timeout_guard_active(generation, expected_state, expected_conn, &state, &conn)) {
+            ESP_LOGD(TAG,
+                     "AI Chat timeout guard released: name=%s elapsed_ms=%u gen=%lu expected=%s state=%s conn=%p expected_conn=%p",
+                     name != NULL ? name : "unknown",
+                     (unsigned)ai_chat_elapsed_ms_since(begin_us),
+                     (unsigned long)generation,
+                     ai_chat_state_name(expected_state),
+                     ai_chat_state_name(state),
+                     conn,
+                     expected_conn);
+            return false;
+        }
+
+        uint32_t step_ms = timeout_ms - waited_ms;
+        if (step_ms > AI_CHAT_TIMEOUT_GUARD_POLL_MS) {
+            step_ms = AI_CHAT_TIMEOUT_GUARD_POLL_MS;
+        }
+        TickType_t step_ticks = pdMS_TO_TICKS(step_ms);
+        vTaskDelay(step_ticks > 0 ? step_ticks : 1);
+        waited_ms += step_ms;
+    }
+
+    ai_chat_state_t state = AI_CHAT_STATE_IDLE;
+    tirtc_conn_t conn = NULL;
+    if (!ai_chat_timeout_guard_active(generation, expected_state, expected_conn, &state, &conn)) {
+        ESP_LOGD(TAG,
+                 "AI Chat timeout guard released: name=%s elapsed_ms=%u gen=%lu expected=%s state=%s conn=%p expected_conn=%p",
+                 name != NULL ? name : "unknown",
+                 (unsigned)ai_chat_elapsed_ms_since(begin_us),
+                 (unsigned long)generation,
+                 ai_chat_state_name(expected_state),
+                 ai_chat_state_name(state),
+                 conn,
+                 expected_conn);
+        return false;
+    }
+
+    ESP_LOGW(TAG,
+             "AI Chat timeout guard expired: name=%s elapsed_ms=%u gen=%lu state=%s conn=%p",
+             name != NULL ? name : "unknown",
+             (unsigned)ai_chat_elapsed_ms_since(begin_us),
+             (unsigned long)generation,
+             ai_chat_state_name(state),
+             conn);
+    return true;
+}
+
+static esp_err_t ai_chat_validate_config(const ai_chat_config_t *config)
+{
+    if (config == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!config->enabled) {
+        return ESP_OK;
+    }
+    if (ai_chat_is_blank(config->device_id) ||
+        ai_chat_is_blank(config->user_id) ||
+        ai_chat_is_blank(config->device_key) ||
+        ai_chat_is_blank(config->token_api_base)) {
+        ESP_LOGW(TAG,
+                 "AI Chat config incomplete: device_id=%d user_id=%d device_key=%d api_base=%d role_id_optional=%d",
+                 !ai_chat_is_blank(config->device_id),
+                 !ai_chat_is_blank(config->user_id),
+                 !ai_chat_is_blank(config->device_key),
+                 !ai_chat_is_blank(config->token_api_base),
+                 !ai_chat_is_blank(config->role_id));
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t ai_chat_send_json(tirtc_conn_t conn, const char *json)
+{
+    if (conn == NULL || json == NULL || json[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return tirtc_session_send_command_raw(conn, AI_CHAT_SIGNALING_CMD, json, strlen(json));
+}
+
+static esp_err_t ai_chat_disconnect_conn(tirtc_conn_t conn)
+{
+    if (conn == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return tirtc_session_disconnect();
+}
+
+static char *ai_chat_build_notification_json(const char *method)
+{
+    cJSON *root = cJSON_CreateObject();
+
+    if (root == NULL || method == NULL) {
+        cJSON_Delete(root);
+        return NULL;
+    }
+
+    cJSON_AddStringToObject(root, "jsonrpc", "2.0");
+    cJSON_AddStringToObject(root, "method", method);
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json;
+}
+
+static char *ai_chat_build_start_session_json(const char *device_id, const char *user_id, const char *role_id)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON *params = cJSON_CreateObject();
+    cJSON *input_audio = NULL;
+    cJSON *output_audio = NULL;
+
+    if (root == NULL || params == NULL) {
+        cJSON_Delete(root);
+        cJSON_Delete(params);
+        return NULL;
+    }
+
+    cJSON_AddStringToObject(root, "jsonrpc", "2.0");
+    cJSON_AddStringToObject(root, "id", AI_CHAT_START_SESSION_RPC_ID);
+    cJSON_AddStringToObject(root, "method", "start_session");
+
+    cJSON_AddStringToObject(params, "device_id", device_id);
+    cJSON_AddStringToObject(params, "user_id", user_id);
+    cJSON_AddStringToObject(params, "role_id", role_id);
+
+#if AI_CHAT_START_SESSION_INCLUDE_AUDIO
+    input_audio = cJSON_CreateObject();
+    output_audio = cJSON_CreateObject();
+    if (input_audio == NULL || output_audio == NULL) {
+        cJSON_Delete(root);
+        cJSON_Delete(input_audio);
+        cJSON_Delete(output_audio);
+        return NULL;
+    }
+
+    cJSON_AddStringToObject(input_audio, "codec", AI_CHAT_AUDIO_CODEC_NAME);
+    cJSON_AddNumberToObject(input_audio, "sample_rate", AI_CHAT_AUDIO_SAMPLE_RATE);
+    cJSON_AddNumberToObject(input_audio, "channels", AI_CHAT_AUDIO_CHANNELS);
+
+    cJSON_AddStringToObject(output_audio, "codec", AI_CHAT_AUDIO_CODEC_NAME);
+    cJSON_AddNumberToObject(output_audio, "sample_rate", AI_CHAT_AUDIO_SAMPLE_RATE);
+    cJSON_AddNumberToObject(output_audio, "channels", AI_CHAT_AUDIO_CHANNELS);
+
+    cJSON_AddItemToObject(params, "input_audio", input_audio);
+    cJSON_AddItemToObject(params, "output_audio", output_audio);
+#endif
+    cJSON_AddItemToObject(root, "params", params);
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json;
+}
+
+static bool ai_chat_audio_spec_supported(const ai_chat_audio_spec_t *spec)
+{
+    if (spec == NULL || !spec->valid) {
+        return true;
+    }
+    return strcmp(spec->codec, AI_CHAT_AUDIO_CODEC_NAME) == 0 &&
+           spec->sample_rate == AI_CHAT_AUDIO_SAMPLE_RATE &&
+           spec->channels == AI_CHAT_AUDIO_CHANNELS;
+}
+
+static esp_err_t ai_chat_send_start_session(tirtc_conn_t conn)
+{
+    ai_chat_config_t config = {0};
+    char role_id[AI_CHAT_ROLE_ID_MAX] = {0};
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    config = s_ai.config;
+    ai_chat_copy_str(role_id, sizeof(role_id), s_ai.role_id);
+    ai_chat_set_state_locked(AI_CHAT_STATE_STARTING_SESSION, "starting session");
+    xSemaphoreGive(s_lock);
+
+    if (role_id[0] == '\0') {
+        ai_chat_copy_str(role_id, sizeof(role_id), config.role_id);
+    }
+    if (role_id[0] == '\0') {
+        ESP_LOGW(TAG, "AI Chat start_session missing role_id");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    char *json = ai_chat_build_start_session_json(config.device_id, config.user_id, role_id);
+    if (json == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG,
+             "send start_session: device_id_len=%u user_id_len=%u role_id_len=%u audio=%s/%uHz/%uch",
+             (unsigned)strlen(config.device_id),
+             (unsigned)strlen(config.user_id),
+             (unsigned)strlen(role_id),
+             AI_CHAT_AUDIO_CODEC_NAME,
+             AI_CHAT_AUDIO_SAMPLE_RATE,
+             AI_CHAT_AUDIO_CHANNELS);
+    ESP_LOGD(TAG, "AI Chat start_session payload_len=%u", (unsigned)strlen(json));
+    esp_err_t ret = ai_chat_send_json(conn, json);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "AI Chat command sent: cmd=0x%04x method=start_session len=%u",
+                 AI_CHAT_SIGNALING_CMD,
+                 (unsigned)strlen(json));
+    }
+    free(json);
+    return ret;
+}
+
+static bool ai_chat_media_can_accept_locked(void)
+{
+    return s_media.running &&
+           s_media.uplink_enabled &&
+           s_media.conn != NULL &&
+           s_media.queue != NULL;
+}
+
+static bool ai_chat_media_make_pcm16_16k(const uint8_t *data,
+                                         size_t data_len,
+                                         const audio_format_t *format,
+                                         uint8_t out[AI_CHAT_AUDIO_FRAME_BYTES])
+{
+    const int16_t *samples = (const int16_t *)data;
+    int16_t *dst = (int16_t *)out;
+    size_t sample_count = data_len / sizeof(int16_t);
+
+    memset(out, 0, AI_CHAT_AUDIO_FRAME_BYTES);
+
+    if (data == NULL || format == NULL ||
+        format->bits_per_sample != 16 ||
+        format->channels != 1) {
+        return false;
+    }
+
+    if (format->sample_rate_hz == AI_CHAT_AUDIO_SAMPLE_RATE) {
+        size_t copy_bytes = data_len > AI_CHAT_AUDIO_FRAME_BYTES ? AI_CHAT_AUDIO_FRAME_BYTES : data_len;
+        memcpy(out, data, copy_bytes);
+        return true;
+    }
+
+    if (format->sample_rate_hz == 8000U) {
+        size_t out_index = 0;
+
+        for (size_t index = 0; index < sample_count && out_index + 1U < AI_CHAT_AUDIO_FRAME_SAMPLES; ++index) {
+            dst[out_index++] = samples[index];
+            dst[out_index++] = samples[index];
+        }
+        return true;
+    }
+
+    return false;
+}
+
+static uint32_t ai_chat_pcm_peak_percent(const uint8_t *data, size_t data_len)
+{
+    const int16_t *samples = (const int16_t *)data;
+    size_t sample_count = data_len / sizeof(int16_t);
+    uint32_t peak = 0;
+
+    if (data == NULL || data_len == 0U) {
+        return 0;
+    }
+
+    for (size_t index = 0; index < sample_count; ++index) {
+        int16_t sample = samples[index];
+        uint32_t value = sample == INT16_MIN ? 32768U : (uint32_t)abs(sample);
+        if (value > peak) {
+            peak = value;
+        }
+    }
+
+    uint32_t percent = (peak * 100U) / 32767U;
+    return percent > 100U ? 100U : percent;
+}
+
+static void ai_chat_media_task(void *ctx)
+{
+    (void)ctx;
+    ai_chat_media_packet_t packet = {0};
+
+    while (xQueueReceive(s_media.queue, &packet, portMAX_DELAY) == pdTRUE) {
+        bool running = false;
+        tirtc_conn_t conn = NULL;
+
+        taskENTER_CRITICAL(&s_media_lock);
+        running = s_media.running;
+        conn = s_media.conn;
+        taskEXIT_CRITICAL(&s_media_lock);
+
+        if (!running || conn == NULL || conn != packet.conn) {
+            continue;
+        }
+
+        size_t send_buffer_used = 0;
+        bool soft_drop = false;
+        esp_err_t buffer_ret = tirtc_session_get_send_buffer_used(packet.conn, &send_buffer_used);
+        esp_err_t ret = ESP_OK;
+
+        if (buffer_ret == ESP_OK && send_buffer_used >= AI_CHAT_SEND_BUFFER_SOFT_DROP_BYTES) {
+            soft_drop = true;
+            ret = ESP_ERR_TIMEOUT;
+        } else {
+            ret = tirtc_session_send_audio_frame(packet.conn, &packet.frame, packet.data);
+        }
+        uint32_t peak_percent = ai_chat_pcm_peak_percent(packet.data, packet.frame.length);
+        bool log_tx_started = false;
+        bool log_tx_window = false;
+        uint32_t window_frames = 0;
+        uint32_t window_payload = 0;
+        uint32_t window_peak = 0;
+        uint32_t total_failures = 0;
+        uint32_t total_dropped = 0;
+        const TickType_t now_tick = xTaskGetTickCount();
+        taskENTER_CRITICAL(&s_media_lock);
+        if (ret == ESP_OK) {
+            s_media.tx_frames++;
+            if (!s_media.tx_started_logged) {
+                s_media.tx_started_logged = true;
+                s_media.last_tx_window_log_tick = now_tick;
+                log_tx_started = true;
+            }
+            s_media.tx_window_frames++;
+            s_media.tx_window_payload_bytes += packet.frame.length;
+            if (peak_percent > s_media.tx_window_peak_percent) {
+                s_media.tx_window_peak_percent = peak_percent;
+            }
+            if (!log_tx_started &&
+                (s_media.last_tx_window_log_tick == 0 ||
+                 now_tick - s_media.last_tx_window_log_tick >= pdMS_TO_TICKS(AI_CHAT_MEDIA_TX_LOG_INTERVAL_MS))) {
+                log_tx_window = true;
+                window_frames = s_media.tx_window_frames;
+                window_payload = s_media.tx_window_payload_bytes;
+                window_peak = s_media.tx_window_peak_percent;
+                total_failures = s_media.tx_failures;
+                total_dropped = s_media.dropped_frames;
+                s_media.tx_window_frames = 0;
+                s_media.tx_window_payload_bytes = 0;
+                s_media.tx_window_peak_percent = 0;
+                s_media.last_tx_window_log_tick = now_tick;
+            }
+        } else if (soft_drop) {
+            s_media.dropped_frames++;
+        } else {
+            s_media.tx_failures++;
+        }
+        taskEXIT_CRITICAL(&s_media_lock);
+
+        if (log_tx_started) {
+            ESP_LOGI(TAG,
+                     "AI Chat uplink audio started: stream=%u media=pcm flags=0x%08lx frame_bytes=%u peak=%lu",
+                     (unsigned)packet.frame.stream_id,
+                     (unsigned long)packet.frame.flags,
+                     (unsigned)packet.frame.length,
+                     (unsigned long)peak_percent);
+        } else if (log_tx_window) {
+            ESP_LOGD(TAG,
+                     "AI Chat uplink tx: frames=%lu payload=%lu peak=%lu failures=%lu dropped=%lu",
+                     (unsigned long)window_frames,
+                     (unsigned long)window_payload,
+                     (unsigned long)window_peak,
+                     (unsigned long)total_failures,
+                     (unsigned long)total_dropped);
+        }
+        if (ret == ESP_ERR_TIMEOUT) {
+            bool should_log = false;
+
+            taskENTER_CRITICAL(&s_media_lock);
+            if (s_media.last_backpressure_log_tick == 0 ||
+                now_tick - s_media.last_backpressure_log_tick >= pdMS_TO_TICKS(1000)) {
+                s_media.last_backpressure_log_tick = now_tick;
+                should_log = true;
+            }
+            taskEXIT_CRITICAL(&s_media_lock);
+
+            if (should_log) {
+                ESP_LOGW(TAG,
+                         "AI Chat uplink backpressure: send_buffer=%u soft_drop=%u",
+                         (unsigned)send_buffer_used,
+                         soft_drop ? 1U : 0U);
+            }
+        } else if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "send AI audio failed: %s", esp_err_to_name(ret));
+        }
+    }
+}
+
+static esp_err_t ai_chat_media_init(void)
+{
+    if (s_media.initialized) {
+        return ESP_OK;
+    }
+
+    s_media.queue = xQueueCreateWithCaps(AI_CHAT_MEDIA_QUEUE_LEN,
+                                         sizeof(ai_chat_media_packet_t),
+                                         AI_CHAT_MEDIA_ALLOC_CAPS);
+    if (s_media.queue == NULL) {
+        ai_chat_log_heap("media queue alloc failed");
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = microphone_register_observer(ai_chat_media_capture_cb, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "register AI microphone observer failed: %s", esp_err_to_name(ret));
+        vQueueDeleteWithCaps(s_media.queue);
+        memset(&s_media, 0, sizeof(s_media));
+        return ret;
+    }
+
+    BaseType_t task_ret = xTaskCreatePinnedToCoreWithCaps(ai_chat_media_task,
+                                                          "ai_audio_tx",
+                                                          AI_CHAT_MEDIA_TASK_STACK,
+                                                          NULL,
+                                                          AI_CHAT_MEDIA_TASK_PRIORITY,
+                                                          &s_media.task,
+                                                          AI_CHAT_MEDIA_TASK_CORE,
+                                                          AI_CHAT_MEDIA_ALLOC_CAPS);
+    if (task_ret != pdPASS) {
+        ai_chat_log_heap("media task alloc failed");
+        microphone_unregister_observer(ai_chat_media_capture_cb, NULL);
+        vQueueDeleteWithCaps(s_media.queue);
+        memset(&s_media, 0, sizeof(s_media));
+        return ESP_ERR_NO_MEM;
+    }
+
+    s_media.initialized = true;
+    ai_chat_log_heap("media initialized");
+    return ESP_OK;
+}
+
+static esp_err_t ai_chat_media_start(tirtc_conn_t conn)
+{
+    if (conn == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    taskENTER_CRITICAL(&s_media_lock);
+    bool already_running = s_media.running &&
+                           s_media.audio_prepared &&
+                           s_media.conn == conn;
+    taskEXIT_CRITICAL(&s_media_lock);
+    if (already_running) {
+        return ESP_OK;
+    }
+
+    ai_chat_log_heap("media start begin");
+
+    ESP_RETURN_ON_ERROR(ai_chat_media_init(), TAG, "init AI media failed");
+    ai_chat_log_heap("media start after media init");
+
+    ESP_RETURN_ON_ERROR(microphone_prepare_capture_path(), TAG, "prepare AI microphone path failed");
+    ai_chat_log_heap("media start after mic prepare");
+
+    esp_err_t speaker_ret = speaker_prepare_playback_path();
+    if (speaker_ret != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "AI speaker path is not ready, keep microphone uplink running: %s",
+                 esp_err_to_name(speaker_ret));
+    }
+    ai_chat_log_heap("media start after speaker prepare");
+
+    (void)audio_device_preload_echo_cancel();
+    ai_chat_log_heap("media start after aec preload");
+
+    taskENTER_CRITICAL(&s_media_lock);
+    s_media.audio_prepared = true;
+    s_media.conn = conn;
+    s_media.running = true;
+    s_media.uplink_enabled = false;
+    s_media.next_ts_ms = 0;
+    s_media.tx_frames = 0;
+    s_media.tx_failures = 0;
+    s_media.dropped_frames = 0;
+    s_media.last_backpressure_log_tick = 0;
+    s_media.last_format_drop_log_tick = 0;
+    s_media.last_tx_window_log_tick = 0;
+    s_media.tx_window_frames = 0;
+    s_media.tx_window_payload_bytes = 0;
+    s_media.tx_window_peak_percent = 0;
+    s_media.tx_started_logged = false;
+    taskEXIT_CRITICAL(&s_media_lock);
+
+    xQueueReset(s_media.queue);
+    ai_chat_log_heap("media start after queue reset");
+
+    esp_err_t ret = microphone_set_observer_enabled(ai_chat_media_capture_cb, NULL, false);
+    if (ret != ESP_OK) {
+        taskENTER_CRITICAL(&s_media_lock);
+        s_media.conn = NULL;
+        s_media.running = false;
+        s_media.uplink_enabled = false;
+        taskEXIT_CRITICAL(&s_media_lock);
+        return ret;
+    }
+    ai_chat_log_heap("media start after observer arm");
+
+    ESP_LOGI(TAG,
+             "AI Chat real audio path ready: capture=pcm/%uHz/%uch uplink=app-controlled",
+             (unsigned)AI_CHAT_AUDIO_SAMPLE_RATE,
+             (unsigned)AI_CHAT_AUDIO_CHANNELS);
+    return ESP_OK;
+}
+
+static void ai_chat_media_stop(tirtc_conn_t conn)
+{
+    const int64_t stop_begin_us = esp_timer_get_time();
+    bool should_stop = false;
+    bool release_audio = false;
+
+    taskENTER_CRITICAL(&s_media_lock);
+    should_stop = conn == NULL || conn == s_media.conn;
+    if (should_stop) {
+        s_media.conn = NULL;
+        s_media.running = false;
+        s_media.uplink_enabled = false;
+        s_media.tx_started_logged = false;
+        release_audio = s_media.audio_prepared;
+        s_media.audio_prepared = false;
+    }
+    taskEXIT_CRITICAL(&s_media_lock);
+
+    if (should_stop) {
+        (void)microphone_set_observer_enabled(ai_chat_media_capture_cb, NULL, false);
+        if (s_media.queue != NULL) {
+            xQueueReset(s_media.queue);
+        }
+        if (release_audio) {
+            audio_device_release();
+        }
+        ESP_LOGI(TAG,
+                 "AI Chat media stopped: elapsed_ms=%u release_audio=%u conn=%p queue=%p",
+                 (unsigned)ai_chat_elapsed_ms_since(stop_begin_us),
+                 release_audio ? 1U : 0U,
+                 conn,
+                 s_media.queue);
+        ai_chat_log_heap("media stopped");
+    }
+}
+
+static esp_err_t ai_chat_detach_rtc_and_stop_media(tirtc_conn_t conn, const char *reason)
+{
+    esp_err_t disconnect_ret = ESP_OK;
+
+    /*
+     * Detach the RTC connection before releasing the shared audio path. TiRTC
+     * can still deliver a few remote-audio callbacks after end_session; if the
+     * connection is left active during audio_device_release(), those late frames
+     * can re-open the speaker path and keep extra internal RAM pinned.
+     */
+    if (conn != NULL) {
+        tirtc_session_suppress_remote_media(conn, true);
+        disconnect_ret = ai_chat_disconnect_conn(conn);
+        ESP_LOGI(TAG,
+                 "AI Chat RTC detached before media stop: reason=%s conn=%p ret=%s",
+                 reason != NULL ? reason : "unknown",
+                 conn,
+                 esp_err_to_name(disconnect_ret));
+    }
+
+    tirtc_session_flush_remote_media();
+    ai_chat_media_stop(conn);
+    tirtc_session_flush_remote_media();
+    ai_chat_log_heap("media stopped after rtc detach");
+    return disconnect_ret;
+}
+
+static esp_err_t ai_chat_media_set_uplink_enabled(bool enabled)
+{
+    ESP_RETURN_ON_ERROR(ai_chat_media_init(), TAG, "init AI media failed");
+
+    taskENTER_CRITICAL(&s_media_lock);
+    if (!s_media.running || s_media.conn == NULL) {
+        taskEXIT_CRITICAL(&s_media_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_media.uplink_enabled = enabled;
+    taskEXIT_CRITICAL(&s_media_lock);
+
+    esp_err_t ret = microphone_set_observer_enabled(ai_chat_media_capture_cb, NULL, enabled);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "set AI capture observer failed: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "AI Chat microphone uplink %s", enabled ? "enabled" : "disabled");
+    }
+    return ret;
+}
+
+static void ai_chat_media_get_stats(uint32_t *tx_frames, uint32_t *tx_failures)
+{
+    if (tx_frames == NULL || tx_failures == NULL) {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_media_lock);
+    *tx_frames = s_media.tx_frames;
+    *tx_failures = s_media.tx_failures;
+    taskEXIT_CRITICAL(&s_media_lock);
+}
+
+static void ai_chat_media_capture_cb(const uint8_t *data,
+                                     size_t data_len,
+                                     const audio_format_t *format,
+                                     void *ctx)
+{
+    (void)ctx;
+    ai_chat_media_packet_t packet = {0};
+    bool accept = false;
+
+    if (data == NULL || data_len == 0U || format == NULL) {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_media_lock);
+    accept = ai_chat_media_can_accept_locked();
+    if (accept) {
+        packet.conn = s_media.conn;
+        packet.frame.stream_id = AI_CHAT_AUDIO_STREAM_ID;
+        packet.frame.media = TIRTC_AUDIO_PCM;
+        packet.frame.flags = TIRTC_AUDIOSAMPLE_16K16B1C;
+        packet.frame.reserved = 0;
+        packet.frame.ts = s_media.next_ts_ms;
+        packet.frame.length = AI_CHAT_AUDIO_FRAME_BYTES;
+        s_media.next_ts_ms += AI_CHAT_AUDIO_FRAME_MS;
+    }
+    taskEXIT_CRITICAL(&s_media_lock);
+
+    if (!accept) {
+        return;
+    }
+
+    if (!ai_chat_media_make_pcm16_16k(data, data_len, format, packet.data)) {
+        TickType_t now_tick = xTaskGetTickCount();
+        bool should_log = false;
+        taskENTER_CRITICAL(&s_media_lock);
+        s_media.dropped_frames++;
+        if (s_media.last_format_drop_log_tick == 0 ||
+            now_tick - s_media.last_format_drop_log_tick >= pdMS_TO_TICKS(1000)) {
+            s_media.last_format_drop_log_tick = now_tick;
+            should_log = true;
+        }
+        taskEXIT_CRITICAL(&s_media_lock);
+        if (should_log) {
+            ESP_LOGW(TAG,
+                     "AI Chat uplink dropped unsupported capture frame: rate=%luHz bits=%u ch=%u len=%lu",
+                     (unsigned long)format->sample_rate_hz,
+                     (unsigned)format->bits_per_sample,
+                     (unsigned)format->channels,
+                     (unsigned long)data_len);
+        }
+        return;
+    }
+    if (xQueueSend(s_media.queue, &packet, 0) == pdTRUE) {
+        return;
+    }
+
+    ai_chat_media_packet_t stale = {0};
+    (void)xQueueReceive(s_media.queue, &stale, 0);
+    if (xQueueSend(s_media.queue, &packet, 0) != pdTRUE) {
+        taskENTER_CRITICAL(&s_media_lock);
+        s_media.dropped_frames++;
+        taskEXIT_CRITICAL(&s_media_lock);
+    }
+}
+
+static esp_err_t ai_chat_wait_rtc_ready(void)
+{
+    uint32_t waited_ms = 0;
+    uint32_t last_log_ms = 0;
+    tirtc_session_stats_t last_stats = {0};
+
+    ESP_LOGD(TAG, "AI Chat waiting for RTC ready before token");
+    while (waited_ms <= AI_CHAT_RTC_READY_WAIT_MS) {
+        tirtc_session_stats_t stats = {0};
+        tirtc_session_get_stats(&stats);
+        last_stats = stats;
+        if (stats.sdk_started && !stats.active_connection) {
+            if (waited_ms == 0U) {
+                ESP_LOGD(TAG,
+                         "AI Chat RTC ready: waited=%ums state=%d last_event=%s",
+                         (unsigned)waited_ms,
+                         (int)stats.state,
+                         stats.last_event[0] != '\0' ? stats.last_event : "none");
+            } else {
+                ESP_LOGI(TAG,
+                     "AI Chat RTC ready: waited=%ums state=%d last_event=%s",
+                     (unsigned)waited_ms,
+                     (int)stats.state,
+                     stats.last_event[0] != '\0' ? stats.last_event : "none");
+            }
+            return ESP_OK;
+        }
+        if (stats.active_connection) {
+            ESP_LOGW(TAG, "rtc already has an active connection");
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        esp_err_t prepare_ret = ESP_OK;
+        if (system_time_has_valid_time() && stats.sdk_initialized) {
+            prepare_ret = tirtc_session_prepare_sdk();
+            if (prepare_ret != ESP_OK && prepare_ret != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "AI Chat RTC prepare failed before token: %s", esp_err_to_name(prepare_ret));
+                return prepare_ret;
+            }
+        } else {
+            prepare_ret = ESP_ERR_INVALID_STATE;
+        }
+
+        if (waited_ms == 0U || waited_ms - last_log_ms >= 1000U) {
+            ESP_LOGD(TAG,
+                     "AI Chat RTC wait: waited=%ums time_valid=%d sdk_initialized=%d sdk_started=%d state=%d last_event=%s last_error=%d prepare=%s",
+                     (unsigned)waited_ms,
+                     system_time_has_valid_time() ? 1 : 0,
+                     stats.sdk_initialized ? 1 : 0,
+                     stats.sdk_started ? 1 : 0,
+                     (int)stats.state,
+                     stats.last_event[0] != '\0' ? stats.last_event : "none",
+                     stats.last_error,
+                     esp_err_to_name(prepare_ret));
+            last_log_ms = waited_ms;
+        }
+        vTaskDelay(pdMS_TO_TICKS(AI_CHAT_RTC_READY_POLL_MS));
+        waited_ms += AI_CHAT_RTC_READY_POLL_MS;
+    }
+
+    ESP_LOGW(TAG,
+             "rtc ready timeout: state=%d sdk_started=%d start_event=%s last_error=%d",
+             (int)last_stats.state,
+             last_stats.sdk_started ? 1 : 0,
+             last_stats.last_event[0] != '\0' ? last_stats.last_event : "none",
+             last_stats.last_error);
+    return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t ai_chat_verify_time_ready(void)
+{
+    time_t now = 0;
+
+    time(&now);
+    if (system_time_has_valid_time()) {
+        ESP_LOGD(TAG, "AI Chat system time verified before token: unix=%lld", (long long)now);
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "AI Chat system time invalid before token: unix=%lld", (long long)now);
+    return ESP_ERR_INVALID_STATE;
+}
+
+static void ai_chat_start_heartbeat_once(uint32_t generation)
+{
+    if (generation == 0U) {
+        return;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool already_running = s_heartbeat_task != NULL &&
+                           s_heartbeat_generation == generation;
+    xSemaphoreGive(s_lock);
+    if (already_running) {
+        return;
+    }
+
+    ai_chat_heartbeat_context_t *heartbeat_ctx = ai_chat_calloc_psram(1, sizeof(*heartbeat_ctx));
+    if (heartbeat_ctx == NULL) {
+        ESP_LOGW(TAG, "create heartbeat context failed");
+        return;
+    }
+    heartbeat_ctx->generation = generation;
+
+    TaskHandle_t task = NULL;
+    BaseType_t ret = xTaskCreatePinnedToCoreWithCaps(ai_chat_heartbeat_task,
+                                                     "ai_heartbeat",
+                                                     AI_CHAT_HEARTBEAT_TASK_STACK,
+                                                     heartbeat_ctx,
+                                                     AI_CHAT_HEARTBEAT_TASK_PRIORITY,
+                                                     &task,
+                                                     AI_CHAT_CONTROL_TASK_CORE,
+                                                     AI_CHAT_TASK_ALLOC_CAPS);
+    if (ret != pdPASS) {
+        free(heartbeat_ctx);
+        ai_chat_log_heap("heartbeat task create failed");
+        ESP_LOGW(TAG, "create heartbeat task failed");
+        return;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_heartbeat_task = task;
+    s_heartbeat_generation = generation;
+    xSemaphoreGive(s_lock);
+}
+
+static void ai_chat_heartbeat_task(void *ctx)
+{
+    ai_chat_heartbeat_context_t *heartbeat_ctx = (ai_chat_heartbeat_context_t *)ctx;
+    uint32_t generation = heartbeat_ctx != NULL ? heartbeat_ctx->generation : 0U;
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+
+    free(heartbeat_ctx);
+
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(AI_CHAT_HEARTBEAT_INTERVAL_MS));
+
+        tirtc_conn_t conn = NULL;
+        ai_chat_state_t state = AI_CHAT_STATE_IDLE;
+        bool generation_ok = false;
+
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        conn = s_ai.conn;
+        state = s_ai.state;
+        generation_ok = ai_chat_generation_matches_locked(generation);
+        xSemaphoreGive(s_lock);
+
+        if (!generation_ok || conn == NULL || state != AI_CHAT_STATE_IN_SESSION) {
+            break;
+        }
+
+        char *json = ai_chat_build_notification_json("heartbeat");
+        if (json == NULL) {
+            continue;
+        }
+        (void)ai_chat_send_json(conn, json);
+        free(json);
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_heartbeat_task == self && s_heartbeat_generation == generation) {
+        s_heartbeat_task = NULL;
+        s_heartbeat_generation = 0;
+    }
+    xSemaphoreGive(s_lock);
+    ai_chat_delete_current_task_with_caps();
+}
+
+static void ai_chat_handle_connect_timeout(uint32_t generation)
+{
+    bool timed_out = false;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (ai_chat_generation_matches_locked(generation) &&
+        s_ai.state == AI_CHAT_STATE_CONNECTING &&
+        s_ai.conn == NULL) {
+        s_ai.last_error = ESP_ERR_TIMEOUT;
+        ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "connect timeout");
+        (void)ai_chat_next_generation_locked();
+        timed_out = true;
+    }
+    xSemaphoreGive(s_lock);
+
+    if (timed_out) {
+        ESP_LOGW(TAG,
+                 "AI Chat WHIP connect timeout after %ums, disconnecting RTC session",
+                 (unsigned)AI_CHAT_CONNECT_TIMEOUT_MS);
+        ai_chat_media_stop(NULL);
+        tirtc_session_flush_remote_media();
+        esp_err_t disconnect_ret = ai_chat_disconnect_conn(NULL);
+        if (disconnect_ret != ESP_OK && disconnect_ret != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "AI Chat RTC disconnect after timeout failed: %s", esp_err_to_name(disconnect_ret));
+        }
+    }
+}
+
+static void ai_chat_handle_start_session_timeout(uint32_t generation)
+{
+    tirtc_conn_t conn = NULL;
+    bool timed_out = false;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (ai_chat_generation_matches_locked(generation) &&
+        s_ai.state == AI_CHAT_STATE_STARTING_SESSION &&
+        s_ai.conn != NULL) {
+        conn = s_ai.conn;
+        s_ai.last_error = ESP_ERR_TIMEOUT;
+        ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "start session timeout");
+        (void)ai_chat_next_generation_locked();
+        timed_out = true;
+    }
+    xSemaphoreGive(s_lock);
+
+    if (timed_out) {
+        ESP_LOGW(TAG,
+                 "AI Chat start_session timeout after %ums, disconnecting RTC session",
+                 (unsigned)AI_CHAT_START_SESSION_TIMEOUT_MS);
+        esp_err_t disconnect_ret = ai_chat_detach_rtc_and_stop_media(conn, "start-session-timeout");
+        if (disconnect_ret != ESP_OK && disconnect_ret != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG,
+                     "AI Chat RTC disconnect after start_session timeout failed: %s",
+                     esp_err_to_name(disconnect_ret));
+        }
+    }
+}
+
+static void ai_chat_session_task(void *ctx)
+{
+    const int64_t task_begin_us = esp_timer_get_time();
+    ai_chat_session_context_t *session_ctx = (ai_chat_session_context_t *)ctx;
+    uint32_t generation = session_ctx != NULL ? session_ctx->generation : 0U;
+    tirtc_conn_t conn = session_ctx != NULL ? session_ctx->conn : NULL;
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    int64_t media_start_us = 0;
+    uint32_t media_elapsed_ms = 0;
+    uint32_t settle_wait_ms = 0;
+    bool wait_start_session_timeout = false;
+
+    free(session_ctx);
+    if (generation == 0U || conn == NULL || !ai_chat_generation_matches(generation)) {
+        s_session_task = NULL;
+        ai_chat_delete_current_task_with_caps();
+        return;
+    }
+
+    media_start_us = esp_timer_get_time();
+    esp_err_t media_ret = ai_chat_media_start(conn);
+    media_elapsed_ms = (uint32_t)((esp_timer_get_time() - media_start_us) / 1000LL);
+    if (media_ret != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "AI Chat media prewarm failed before start_session: %s elapsed=%ums",
+                 esp_err_to_name(media_ret),
+                 (unsigned)media_elapsed_ms);
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (ai_chat_generation_matches_locked(generation)) {
+            s_ai.last_error = media_ret;
+            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "media prewarm failed");
+        }
+        xSemaphoreGive(s_lock);
+        (void)ai_chat_disconnect_conn(conn);
+        s_session_task = NULL;
+        ai_chat_delete_current_task_with_caps();
+        return;
+    }
+
+    if (media_elapsed_ms < AI_CHAT_START_SESSION_SETTLE_MS) {
+        settle_wait_ms = AI_CHAT_START_SESSION_SETTLE_MS - media_elapsed_ms;
+        vTaskDelay(pdMS_TO_TICKS(settle_wait_ms));
+    }
+    ai_chat_timeline_mark(generation, AI_CHAT_TIMELINE_MEDIA_READY);
+    ESP_LOGD(TAG,
+             "AI Chat media prewarmed before start_session: elapsed=%ums settle_wait=%ums",
+             (unsigned)media_elapsed_ms,
+             (unsigned)settle_wait_ms);
+
+    if (!ai_chat_generation_matches(generation)) {
+        ai_chat_media_stop(conn);
+        s_session_task = NULL;
+        ai_chat_delete_current_task_with_caps();
+        return;
+    }
+
+    esp_err_t ret = ai_chat_send_start_session(conn);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "AI Chat start_session send failed: %s", esp_err_to_name(ret));
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (ai_chat_generation_matches_locked(generation)) {
+            s_ai.last_error = ret;
+            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "start session failed");
+        }
+        xSemaphoreGive(s_lock);
+        (void)ai_chat_detach_rtc_and_stop_media(conn, "start-session-send-failed");
+    } else {
+        ai_chat_timeline_mark(generation, AI_CHAT_TIMELINE_START_SESSION_SENT);
+        wait_start_session_timeout = true;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_session_task == self) {
+        s_session_task = NULL;
+    }
+    xSemaphoreGive(s_lock);
+
+    if (wait_start_session_timeout) {
+        /*
+         * Keep the timeout guard inside this already-running PSRAM task, but
+         * poll the state instead of sleeping for the full timeout. Once the
+         * session reaches in_session or the app closes, this task exits and
+         * releases its PSRAM stack within one poll period.
+         */
+        if (ai_chat_wait_timeout_guard("start_session",
+                                       generation,
+                                       AI_CHAT_STATE_STARTING_SESSION,
+                                       conn,
+                                       AI_CHAT_START_SESSION_TIMEOUT_MS)) {
+            ai_chat_handle_start_session_timeout(generation);
+        }
+    }
+
+    ESP_LOGD(TAG,
+             "AI Chat session task exit: gen=%lu elapsed_ms=%u stack_hwm=%u",
+             (unsigned long)generation,
+             (unsigned)ai_chat_elapsed_ms_since(task_begin_us),
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    ai_chat_delete_current_task_with_caps();
+}
+
+static esp_err_t ai_chat_schedule_start_session(tirtc_conn_t conn, uint32_t generation)
+{
+    if (conn == NULL || generation == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_session_task != NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ai_chat_session_context_t *session_ctx = ai_chat_calloc_psram(1, sizeof(*session_ctx));
+    if (session_ctx == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    session_ctx->generation = generation;
+    session_ctx->conn = conn;
+
+    BaseType_t task_ret = xTaskCreatePinnedToCoreWithCaps(ai_chat_session_task,
+                                                          "ai_session",
+                                                          AI_CHAT_SESSION_TASK_STACK,
+                                                          session_ctx,
+                                                          AI_CHAT_SESSION_TASK_PRIORITY,
+                                                          &s_session_task,
+                                                          AI_CHAT_CONTROL_TASK_CORE,
+                                                          AI_CHAT_TASK_ALLOC_CAPS);
+    if (task_ret != pdPASS) {
+        free(session_ctx);
+        s_session_task = NULL;
+        ai_chat_log_heap("session task create failed");
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+static void ai_chat_on_whip_connect(int error, tirtc_conn_t conn, void *user_data)
+{
+    ai_chat_whip_context_t *whip_ctx = (ai_chat_whip_context_t *)user_data;
+    uint32_t generation = whip_ctx != NULL ? whip_ctx->generation : 0U;
+
+    free(whip_ctx);
+
+    if (!ai_chat_generation_matches(generation)) {
+        if (conn != NULL) {
+            (void)ai_chat_disconnect_conn(conn);
+        }
+        ESP_LOGI(TAG, "ignore stale AI Chat WHIP callback generation=%lu", (unsigned long)generation);
+        return;
+    }
+
+    if (error != 0 || conn == NULL) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (ai_chat_generation_matches_locked(generation)) {
+            s_ai.conn = NULL;
+            s_ai.last_error = error;
+            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "connect failed");
+        }
+        xSemaphoreGive(s_lock);
+        ESP_LOGW(TAG, "AI Chat WHIP connect failed: %s (%d)", TiRtcGetErrorStr(error), error);
+        return;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_ai.conn = conn;
+    ai_chat_set_state_locked(AI_CHAT_STATE_CONNECTED, "connected");
+    xSemaphoreGive(s_lock);
+    ai_chat_timeline_mark(generation, AI_CHAT_TIMELINE_WHIP_CONNECTED);
+
+    ESP_LOGI(TAG, "AI Chat WHIP connected hconn=%p", conn);
+    esp_err_t ret = ai_chat_schedule_start_session(conn, generation);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "AI Chat schedule start_session failed: %s", esp_err_to_name(ret));
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_ai.last_error = ret;
+        ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "start session task failed");
+        xSemaphoreGive(s_lock);
+        (void)ai_chat_disconnect_conn(conn);
+    }
+}
+
+static void ai_chat_start_task(void *ctx)
+{
+    const int64_t task_begin_us = esp_timer_get_time();
+    ai_chat_start_context_t *start_ctx = (ai_chat_start_context_t *)ctx;
+    uint32_t generation = start_ctx != NULL ? start_ctx->generation : 0U;
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    ai_chat_config_t *config = NULL;
+    ai_chat_join_info_t *join_info = NULL;
+    esp_err_t ret = ESP_OK;
+    bool wait_connect_timeout = false;
+
+    free(start_ctx);
+
+    config = (ai_chat_config_t *)ai_chat_calloc_psram(1, sizeof(*config));
+    join_info = (ai_chat_join_info_t *)ai_chat_calloc_psram(1, sizeof(*join_info));
+    if (config == NULL || join_info == NULL) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (ai_chat_generation_matches_locked(generation)) {
+            s_ai.last_error = ESP_ERR_NO_MEM;
+            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "start workspace failed");
+        }
+        xSemaphoreGive(s_lock);
+        goto finish;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (!ai_chat_generation_matches_locked(generation)) {
+        xSemaphoreGive(s_lock);
+        goto finish;
+    }
+    *config = s_ai.config;
+    ai_chat_set_state_locked(AI_CHAT_STATE_TOKEN, "request token");
+    xSemaphoreGive(s_lock);
+    ai_chat_timeline_mark(generation, AI_CHAT_TIMELINE_TOKEN_START);
+
+    ret = ai_chat_wait_rtc_ready();
+    if (ret == ESP_OK) {
+        ai_chat_timeline_mark(generation, AI_CHAT_TIMELINE_RTC_READY);
+    }
+    if (ret == ESP_OK && ai_chat_generation_matches(generation)) {
+        ret = ai_chat_verify_time_ready();
+    }
+    if (ret == ESP_OK && ai_chat_generation_matches(generation)) {
+        ret = ai_chat_token_request_join(config, join_info);
+        if (ret == ESP_OK) {
+            ai_chat_timeline_mark(generation, AI_CHAT_TIMELINE_TOKEN_DONE);
+        }
+    }
+    if (ret == ESP_OK && !ai_chat_generation_matches(generation)) {
+        goto finish;
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "AI Chat token stage failed: %s", esp_err_to_name(ret));
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (ai_chat_generation_matches_locked(generation)) {
+            s_ai.last_error = ret;
+            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "token failed");
+        }
+        xSemaphoreGive(s_lock);
+        goto finish;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (!ai_chat_generation_matches_locked(generation)) {
+        xSemaphoreGive(s_lock);
+        goto finish;
+    }
+    ai_chat_copy_str(s_ai.role_id, sizeof(s_ai.role_id), join_info->role_id);
+    ai_chat_set_state_locked(AI_CHAT_STATE_CONNECTING, "connecting");
+    xSemaphoreGive(s_lock);
+
+    ai_chat_whip_context_t *whip_ctx = ai_chat_calloc_psram(1, sizeof(*whip_ctx));
+    if (whip_ctx == NULL) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (ai_chat_generation_matches_locked(generation)) {
+            s_ai.last_error = ESP_ERR_NO_MEM;
+            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "connect submit failed");
+        }
+        xSemaphoreGive(s_lock);
+        goto finish;
+    }
+    whip_ctx->generation = generation;
+
+    ESP_LOGI(TAG,
+             "AI Chat WHIP submit: device_id_len=%u role_id_len=%u user_id_len=%u peer_id_len=%u token_len=%u",
+             (unsigned)strlen(config->device_id),
+             (unsigned)strlen(join_info->role_id),
+             (unsigned)strlen(config->user_id),
+             (unsigned)strlen(join_info->peer_id),
+             (unsigned)strlen(join_info->token));
+    tirtc_session_set_next_connection_auto_media(false);
+    ai_chat_timeline_mark(generation, AI_CHAT_TIMELINE_WHIP_SUBMIT);
+    int rc = tirtc_session_whip_connect(join_info->peer_id,
+                                        join_info->token,
+                                        ai_chat_on_whip_connect,
+                                        whip_ctx);
+    if (rc != 0) {
+        tirtc_session_set_next_connection_auto_media(true);
+        free(whip_ctx);
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (ai_chat_generation_matches_locked(generation)) {
+            s_ai.last_error = rc;
+            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "connect submit failed");
+        }
+        xSemaphoreGive(s_lock);
+        ESP_LOGW(TAG, "AI Chat WHIP submit failed: %s (%d)", TiRtcGetErrorStr(rc), rc);
+        if (rc == TIRTC_E_SERVER_ERROR) {
+            ESP_LOGW(TAG,
+                     "AI Chat server rejected WHIP: role_id_len=%u",
+                     (unsigned)strlen(join_info->role_id));
+        }
+    } else {
+        wait_connect_timeout = true;
+    }
+
+finish:
+    free(join_info);
+    free(config);
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_start_task == self) {
+        s_start_task = NULL;
+    }
+    xSemaphoreGive(s_lock);
+
+    if (wait_connect_timeout) {
+        /*
+         * Do not create a separate ai_conn_timeout task. Keep the guard inside
+         * this PSRAM task, but leave immediately when WHIP succeeds/fails or
+         * the app closes so repeated AI Chat enter/exit does not stack up
+         * 20-second sleeping tasks.
+         */
+        if (ai_chat_wait_timeout_guard("whip_connect",
+                                       generation,
+                                       AI_CHAT_STATE_CONNECTING,
+                                       NULL,
+                                       AI_CHAT_CONNECT_TIMEOUT_MS)) {
+            ai_chat_handle_connect_timeout(generation);
+        }
+    }
+
+    ESP_LOGD(TAG,
+             "AI Chat start task exit: gen=%lu elapsed_ms=%u stack_hwm=%u wait_connect=%u",
+             (unsigned long)generation,
+             (unsigned)ai_chat_elapsed_ms_since(task_begin_us),
+             (unsigned)uxTaskGetStackHighWaterMark(NULL),
+             wait_connect_timeout ? 1U : 0U);
+    ai_chat_delete_current_task_with_caps();
+}
+
+static void ai_chat_apply_caption_locked(const ai_chat_event_t *event)
+{
+    ai_chat_caption_merge_trace_t trace = {0};
+    char old_text[AI_CHAT_CAPTION_TEXT_MAX];
+    size_t old_preview_len = 0;
+    size_t raw_preview_len = 0;
+    size_t merged_preview_len = 0;
+    bool group_reset = false;
+
+    if (event == NULL || event->caption_type < 0 || event->caption_type > 1) {
+        return;
+    }
+    if (event->text[0] == '\0') {
+        ai_chat_set_state_locked(s_ai.state, "empty caption");
+        return;
+    }
+
+    ai_chat_caption_group_t *group = &s_ai.captions[event->caption_type];
+    if (group->utterance_id != event->utterance_id ||
+        group->caption_type != event->caption_type ||
+        group->final) {
+        group_reset = true;
+        group->caption_type = event->caption_type;
+        group->utterance_id = event->utterance_id;
+        group->final = false;
+        group->text[0] = '\0';
+    }
+
+    ai_chat_copy_str(old_text, sizeof(old_text), group->text);
+    ai_chat_apply_caption_text(group, event, &trace);
+
+    old_preview_len = ai_chat_utf8_preview_len(old_text, AI_CHAT_CAPTION_TRACE_TEXT_BYTES);
+    raw_preview_len = ai_chat_utf8_preview_len(event->text, AI_CHAT_CAPTION_TRACE_TEXT_BYTES);
+    merged_preview_len = ai_chat_utf8_preview_len(group->text, AI_CHAT_CAPTION_TRACE_TEXT_BYTES);
+    ESP_LOGD(TAG,
+             "AI Chat caption trace: type=%s mode=%d final=%d seq=%d utterance=%lld reset=%u merge=%s old=%u raw=%u out=%u overlap=%u old_text=\"%.*s\" raw=\"%.*s\" merged=\"%.*s\"",
+             ai_chat_caption_type_name(event->caption_type),
+             event->mode,
+             event->is_final ? 1 : 0,
+             event->seq_num,
+             (long long)event->utterance_id,
+             group_reset ? 1U : 0U,
+             ai_chat_caption_merge_kind_name(trace.kind),
+             (unsigned)trace.old_len,
+             (unsigned)trace.incoming_len,
+             (unsigned)trace.result_len,
+             (unsigned)trace.overlap_len,
+             (int)old_preview_len,
+             old_text,
+             (int)raw_preview_len,
+             event->text,
+             (int)merged_preview_len,
+             group->text);
+
+    group->final = event->is_final;
+    ai_chat_update_message_locked(event->caption_type,
+                                  event->utterance_id,
+                                  group->text,
+                                  event->is_final);
+    ai_chat_set_state_locked(s_ai.state, event->is_final ? "caption final" : "caption");
+}
+
+static bool ai_chat_caption_is_rest_hint(const ai_chat_event_t *event)
+{
+    return event != NULL &&
+           event->type == AI_CHAT_EVENT_CAPTION &&
+           event->caption_type == 1 &&
+           event->is_final &&
+           event->text[0] != '\0' &&
+           strstr(event->text, AI_CHAT_REST_HINT_PREFIX) != NULL;
+}
+
+static void ai_chat_handle_event(tirtc_conn_t conn, const ai_chat_event_t *event)
+{
+    if (event == NULL) {
+        return;
+    }
+
+    switch (event->type) {
+    case AI_CHAT_EVENT_START_OK: {
+        bool listening = false;
+        uint32_t heartbeat_generation = 0;
+
+        if (!ai_chat_audio_spec_supported(&event->input_audio) ||
+            !ai_chat_audio_spec_supported(&event->output_audio)) {
+            ESP_LOGW(TAG, "AI Chat audio format is unsupported");
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            s_ai.last_error = ESP_ERR_NOT_SUPPORTED;
+            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "unsupported audio");
+            xSemaphoreGive(s_lock);
+            (void)ai_chat_close();
+            return;
+        }
+
+        ESP_LOGI(TAG,
+                 "AI Chat start_session ok: session_id=%s input=%s/%luHz/%uch output=%s/%luHz/%uch",
+                 event->session_id,
+                 event->input_audio.codec[0] != '\0' ? event->input_audio.codec : "default",
+                 (unsigned long)event->input_audio.sample_rate,
+                 (unsigned)event->input_audio.channels,
+                 event->output_audio.codec[0] != '\0' ? event->output_audio.codec : "default",
+                 (unsigned long)event->output_audio.sample_rate,
+                 (unsigned)event->output_audio.channels);
+
+        esp_err_t subscribe_ret = tirtc_session_subscribe_audio(conn, AI_CHAT_AUDIO_STREAM_ID);
+        if (subscribe_ret != ESP_OK) {
+            ESP_LOGW(TAG, "AI Chat subscribe audio failed: %s", esp_err_to_name(subscribe_ret));
+        }
+
+        esp_err_t media_ret = ai_chat_media_start(conn);
+        if (media_ret != ESP_OK) {
+            ESP_LOGW(TAG, "AI Chat media start failed after session ok: %s", esp_err_to_name(media_ret));
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            s_ai.last_error = media_ret;
+            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "media failed");
+            xSemaphoreGive(s_lock);
+            (void)ai_chat_close();
+            return;
+        }
+
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        ai_chat_copy_str(s_ai.session_id, sizeof(s_ai.session_id), event->session_id);
+        ai_chat_set_state_locked(AI_CHAT_STATE_IN_SESSION, "in session");
+        s_ai.listening = true;
+        listening = s_ai.listening;
+        heartbeat_generation = s_ai.generation;
+        xSemaphoreGive(s_lock);
+
+        ai_chat_start_heartbeat_once(heartbeat_generation);
+        (void)ai_chat_media_set_uplink_enabled(listening);
+        ai_chat_timeline_mark(heartbeat_generation, AI_CHAT_TIMELINE_START_OK);
+        ai_chat_timeline_log(heartbeat_generation);
+        break;
+    }
+    case AI_CHAT_EVENT_START_ERROR:
+        ESP_LOGW(TAG,
+                 "AI Chat start_session failed code=%d message=%s",
+                 event->error_code,
+                 event->error_message);
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_ai.last_error = event->error_code;
+        ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "start rejected");
+        xSemaphoreGive(s_lock);
+        (void)ai_chat_close();
+        break;
+    case AI_CHAT_EVENT_CAPTION:
+    {
+        bool should_close_after_rest = false;
+        bool rest_hint = ai_chat_caption_is_rest_hint(event);
+
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        ai_chat_apply_caption_locked(event);
+        if (rest_hint && s_ai.conn == conn) {
+            s_ai.resting_requested = true;
+            should_close_after_rest = !s_ai.cloud_speaking;
+            ai_chat_set_state_locked(s_ai.state, "rest requested");
+        }
+        xSemaphoreGive(s_lock);
+        if (should_close_after_rest) {
+            ESP_LOGI(TAG, "AI Chat rest hint received, closing session");
+            (void)ai_chat_close();
+        }
+        break;
+    }
+    case AI_CHAT_EVENT_ROUND_START:
+        ESP_LOGI(TAG, "AI Chat round_start");
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_ai.cloud_speaking = true;
+        ai_chat_set_state_locked(s_ai.state, "cloud speaking");
+        xSemaphoreGive(s_lock);
+        break;
+    case AI_CHAT_EVENT_ROUND_END:
+    {
+        bool should_close_after_rest = false;
+
+        ESP_LOGI(TAG, "AI Chat round_end");
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_ai.cloud_speaking = false;
+        if (s_ai.resting_requested && s_ai.conn == conn) {
+            s_ai.resting_requested = false;
+            should_close_after_rest = true;
+        }
+        ai_chat_set_state_locked(s_ai.state, "waiting input");
+        xSemaphoreGive(s_lock);
+        if (should_close_after_rest) {
+            ESP_LOGI(TAG, "AI Chat rest round ended, closing session");
+            (void)ai_chat_close();
+        }
+        break;
+    }
+    case AI_CHAT_EVENT_INTERRUPT:
+        tirtc_session_flush_remote_media();
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_ai.cloud_speaking = false;
+        ai_chat_set_state_locked(s_ai.state, "interrupted");
+        xSemaphoreGive(s_lock);
+        break;
+    case AI_CHAT_EVENT_END_SESSION:
+        (void)ai_chat_close();
+        break;
+    default:
+        break;
+    }
+}
+
+static bool ai_chat_on_command(tirtc_conn_t conn, uint32_t cmdw, const void *data, uint32_t data_len, void *ctx)
+{
+    (void)ctx;
+
+    if (conn == NULL || !ai_chat_is_signaling_cmd(cmdw)) {
+        return false;
+    }
+
+    bool mine = false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    mine = s_ai.conn == conn;
+    if (mine) {
+        s_ai.rx_commands++;
+    }
+    xSemaphoreGive(s_lock);
+
+    if (!mine) {
+        return false;
+    }
+
+    ESP_LOGD(TAG,
+             "AI Chat command received: cmdw=0x%08lx len=%lu",
+             (unsigned long)cmdw,
+             (unsigned long)data_len);
+
+    ai_chat_event_t event = {0};
+    esp_err_t ret = ai_chat_events_parse(data, data_len, &event);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "parse AI Chat command failed cmdw=0x%08lx len=%lu",
+                 (unsigned long)cmdw,
+                 (unsigned long)data_len);
+        return true;
+    }
+
+    ESP_LOGD(TAG, "AI Chat event=%s", ai_chat_event_type_name(event.type));
+    ai_chat_handle_event(conn, &event);
+    return true;
+}
+
+static bool ai_chat_on_message(tirtc_conn_t conn,
+                               uint8_t media,
+                               uint8_t stream_id,
+                               uint8_t flags,
+                               const void *data,
+                               uint32_t data_len,
+                               void *ctx)
+{
+    (void)ctx;
+
+    if (conn == NULL || data == NULL || data_len == 0U) {
+        return false;
+    }
+
+    bool mine = false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    mine = s_ai.conn == conn;
+    xSemaphoreGive(s_lock);
+    if (!mine) {
+        return false;
+    }
+
+    ESP_LOGD(TAG,
+             "AI Chat message received: media=%u stream=%u flags=%u len=%lu",
+             (unsigned)media,
+             (unsigned)stream_id,
+             (unsigned)flags,
+             (unsigned long)data_len);
+
+    ai_chat_event_t event = {0};
+    esp_err_t ret = ai_chat_events_parse(data, data_len, &event);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "parse AI Chat message failed len=%lu",
+                 (unsigned long)data_len);
+        return false;
+    }
+
+    ESP_LOGD(TAG, "AI Chat message event=%s", ai_chat_event_type_name(event.type));
+    ai_chat_handle_event(conn, &event);
+    return true;
+}
+
+static void ai_chat_on_connection_error(tirtc_conn_t conn, int error, void *ctx)
+{
+    (void)ctx;
+    bool mine = false;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    mine = conn != NULL && conn == s_ai.conn;
+    if (mine) {
+        s_ai.conn = NULL;
+        s_ai.last_error = error;
+        s_ai.listening = false;
+        s_ai.resting_requested = false;
+        ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "connection error");
+    }
+    xSemaphoreGive(s_lock);
+
+    if (mine) {
+        ai_chat_media_stop(conn);
+        tirtc_session_flush_remote_media();
+    }
+}
+
+static void ai_chat_on_disconnected(tirtc_conn_t conn, void *ctx)
+{
+    (void)ctx;
+    bool mine = false;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    mine = conn != NULL && conn == s_ai.conn;
+    if (mine) {
+        s_ai.conn = NULL;
+        s_ai.cloud_speaking = false;
+        s_ai.listening = false;
+        s_ai.resting_requested = false;
+        ai_chat_set_state_locked(AI_CHAT_STATE_IDLE, "disconnected");
+    }
+    xSemaphoreGive(s_lock);
+
+    if (mine) {
+        ai_chat_media_stop(conn);
+        tirtc_session_flush_remote_media();
+    }
+}
+
+esp_err_t ai_chat_configure(const ai_chat_config_t *config)
+{
+    ESP_RETURN_ON_FALSE(config != NULL, ESP_ERR_INVALID_ARG, TAG, "AI Chat config is null");
+    ESP_RETURN_ON_ERROR(ai_chat_validate_config(config), TAG, "invalid AI Chat config");
+
+    if (s_lock == NULL) {
+        s_lock = xSemaphoreCreateMutexWithCaps(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (s_lock == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    ESP_RETURN_ON_ERROR(ai_chat_ensure_task_reaper(), TAG, "start AI Chat task reaper failed");
+    ESP_RETURN_ON_ERROR(ai_chat_ensure_message_history(), TAG, "allocate AI Chat message history failed");
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_ai.config = *config;
+    if (!config->enabled) {
+        ai_chat_set_state_locked(AI_CHAT_STATE_IDLE, "disabled");
+    }
+    xSemaphoreGive(s_lock);
+    return ESP_OK;
+}
+
+esp_err_t ai_chat_init(const ai_chat_config_t *config)
+{
+    bool first_ready = false;
+
+    ESP_RETURN_ON_ERROR(ai_chat_configure(config), TAG, "configure AI Chat failed");
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool registered = s_ai.observer_registered;
+    xSemaphoreGive(s_lock);
+
+    if (!registered) {
+        const tirtc_session_observer_t observer = {
+            .on_command = ai_chat_on_command,
+            .on_message = ai_chat_on_message,
+            .on_connection_error = ai_chat_on_connection_error,
+            .on_disconnected = ai_chat_on_disconnected,
+        };
+        ESP_RETURN_ON_ERROR(tirtc_session_register_observer(&observer, NULL),
+                            TAG,
+                            "register AI Chat RTC observer failed");
+
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_ai.observer_registered = true;
+        s_ai.initialized = true;
+        xSemaphoreGive(s_lock);
+        first_ready = true;
+    }
+
+    if (first_ready) {
+        ESP_LOGI(TAG, "AI Chat service ready");
+    } else {
+        ESP_LOGD(TAG, "AI Chat service configured");
+    }
+    return ESP_OK;
+}
+
+esp_err_t ai_chat_open(void)
+{
+    ai_chat_start_context_t *start_ctx = NULL;
+    uint32_t generation = 0;
+
+    ESP_RETURN_ON_FALSE(s_lock != NULL, ESP_ERR_INVALID_STATE, TAG, "AI Chat not initialized");
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (!s_ai.config.enabled) {
+        xSemaphoreGive(s_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_ai.state == AI_CHAT_STATE_IN_SESSION ||
+        s_ai.state == AI_CHAT_STATE_TOKEN ||
+        s_ai.state == AI_CHAT_STATE_CONNECTING ||
+        s_ai.state == AI_CHAT_STATE_CONNECTED ||
+        s_ai.state == AI_CHAT_STATE_STARTING_SESSION) {
+        xSemaphoreGive(s_lock);
+        return ESP_OK;
+    }
+    if (s_start_task != NULL) {
+        xSemaphoreGive(s_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    memset(s_ai.session_id, 0, sizeof(s_ai.session_id));
+    memset(s_ai.captions, 0, sizeof(s_ai.captions));
+    ai_chat_clear_messages_locked();
+    s_ai.last_error = 0;
+    s_ai.rx_commands = 0;
+    s_ai.cloud_speaking = false;
+    s_ai.listening = false;
+    s_ai.resting_requested = false;
+    generation = ai_chat_next_generation_locked();
+    ai_chat_set_state_locked(AI_CHAT_STATE_STARTING, "starting");
+    xSemaphoreGive(s_lock);
+    ai_chat_timeline_reset(generation);
+
+    start_ctx = ai_chat_calloc_psram(1, sizeof(*start_ctx));
+    if (start_ctx == NULL) {
+        ai_chat_log_heap("start_ctx alloc failed");
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (ai_chat_generation_matches_locked(generation)) {
+            s_ai.last_error = ESP_ERR_NO_MEM;
+            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "task failed");
+        }
+        xSemaphoreGive(s_lock);
+        return ESP_ERR_NO_MEM;
+    }
+    start_ctx->generation = generation;
+
+    ai_chat_log_heap("before start task");
+    BaseType_t task_ret = xTaskCreatePinnedToCoreWithCaps(ai_chat_start_task,
+                                                          "ai_chat_start",
+                                                          AI_CHAT_START_TASK_STACK,
+                                                          start_ctx,
+                                                          AI_CHAT_START_TASK_PRIORITY,
+                                                          &s_start_task,
+                                                          AI_CHAT_CONTROL_TASK_CORE,
+                                                          AI_CHAT_TASK_ALLOC_CAPS);
+    if (task_ret != pdPASS) {
+        free(start_ctx);
+        s_start_task = NULL;
+        ai_chat_log_heap("start task create failed");
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (ai_chat_generation_matches_locked(generation)) {
+            s_ai.last_error = ESP_ERR_NO_MEM;
+            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "task failed");
+        }
+        xSemaphoreGive(s_lock);
+        return ESP_ERR_NO_MEM;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t ai_chat_close(void)
+{
+    const int64_t close_begin_us = esp_timer_get_time();
+    tirtc_conn_t conn = NULL;
+    ai_chat_state_t old_state = AI_CHAT_STATE_IDLE;
+    uint32_t close_generation = 0;
+
+    if (s_lock == NULL) {
+        return ESP_OK;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    conn = s_ai.conn;
+    old_state = s_ai.state;
+    if (s_ai.state == AI_CHAT_STATE_IDLE && conn == NULL) {
+        memset(s_ai.captions, 0, sizeof(s_ai.captions));
+        ai_chat_clear_messages_locked();
+        xSemaphoreGive(s_lock);
+        return ESP_OK;
+    }
+    ai_chat_set_state_locked(AI_CHAT_STATE_STOPPING, "stopping");
+    close_generation = ai_chat_next_generation_locked();
+    s_ai.conn = NULL;
+    s_ai.cloud_speaking = false;
+    xSemaphoreGive(s_lock);
+
+    if (conn != NULL) {
+        tirtc_session_suppress_remote_media(conn, true);
+    }
+
+    ESP_LOGI(TAG,
+             "AI Chat close begin: t_ms=%llu gen=%lu old_state=%s conn=%p",
+             (unsigned long long)ai_chat_now_ms(),
+             (unsigned long)close_generation,
+             ai_chat_state_name(old_state),
+             conn);
+
+    if (conn != NULL) {
+        char *json = ai_chat_build_notification_json("end_session");
+        if (json != NULL) {
+            (void)ai_chat_send_json(conn, json);
+            free(json);
+        }
+        (void)ai_chat_detach_rtc_and_stop_media(conn, "close");
+    } else {
+        ai_chat_media_stop(NULL);
+        tirtc_session_flush_remote_media();
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    memset(s_ai.session_id, 0, sizeof(s_ai.session_id));
+    memset(s_ai.captions, 0, sizeof(s_ai.captions));
+    ai_chat_clear_messages_locked();
+    s_ai.listening = false;
+    s_ai.resting_requested = false;
+    ai_chat_set_state_locked(AI_CHAT_STATE_IDLE, "idle");
+    xSemaphoreGive(s_lock);
+    ESP_LOGI(TAG,
+             "AI Chat close done: elapsed_ms=%u gen=%lu conn=%p",
+             (unsigned)ai_chat_elapsed_ms_since(close_begin_us),
+             (unsigned long)close_generation,
+             conn);
+    ai_chat_log_heap("close done");
+    return ESP_OK;
+}
+
+esp_err_t ai_chat_clear_messages(void)
+{
+    if (s_lock == NULL) {
+        return ESP_OK;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    memset(s_ai.captions, 0, sizeof(s_ai.captions));
+    ai_chat_clear_messages_locked();
+    xSemaphoreGive(s_lock);
+    return ESP_OK;
+}
+
+esp_err_t ai_chat_handle_control_button(bool pressed)
+{
+    ai_chat_state_t state = AI_CHAT_STATE_IDLE;
+    bool should_interrupt = false;
+    tirtc_conn_t conn = NULL;
+
+    ESP_RETURN_ON_FALSE(s_lock != NULL, ESP_ERR_INVALID_STATE, TAG, "AI Chat not initialized");
+
+    if (!pressed) {
+        return ESP_OK;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    state = s_ai.state;
+    should_interrupt = pressed && s_ai.cloud_speaking;
+    conn = s_ai.conn;
+    xSemaphoreGive(s_lock);
+
+    if (state != AI_CHAT_STATE_IN_SESSION || conn == NULL) {
+        return ESP_OK;
+    }
+
+    if (should_interrupt) {
+        char *json = ai_chat_build_notification_json("interrupt");
+        if (json != NULL && conn != NULL) {
+            (void)ai_chat_send_json(conn, json);
+        }
+        free(json);
+        tirtc_session_flush_remote_media();
+    }
+
+    return ESP_OK;
+}
+
+bool ai_chat_owns_control_button(void)
+{
+    if (s_lock == NULL) {
+        return false;
+    }
+
+    ai_chat_state_t state = AI_CHAT_STATE_IDLE;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    state = s_ai.state;
+    xSemaphoreGive(s_lock);
+
+    return state == AI_CHAT_STATE_STARTING ||
+           state == AI_CHAT_STATE_TOKEN ||
+           state == AI_CHAT_STATE_CONNECTING ||
+           state == AI_CHAT_STATE_CONNECTED ||
+           state == AI_CHAT_STATE_STARTING_SESSION ||
+           state == AI_CHAT_STATE_IN_SESSION;
+}
+
+void ai_chat_get_snapshot(ai_chat_snapshot_t *snapshot)
+{
+    if (snapshot == NULL) {
+        return;
+    }
+
+    memset(snapshot, 0, sizeof(*snapshot));
+    if (s_lock == NULL) {
+        return;
+    }
+
+    uint32_t tx_frames = 0;
+    uint32_t tx_failures = 0;
+    ai_chat_media_get_stats(&tx_frames, &tx_failures);
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    snapshot->state = s_ai.state;
+    snapshot->active = s_ai.state == AI_CHAT_STATE_IN_SESSION;
+    snapshot->listening = s_ai.state == AI_CHAT_STATE_IN_SESSION && s_ai.listening;
+    snapshot->cloud_speaking = s_ai.cloud_speaking;
+    snapshot->tx_audio_frames = tx_frames;
+    snapshot->tx_audio_failures = tx_failures;
+    snapshot->rx_commands = s_ai.rx_commands;
+    snapshot->last_error = s_ai.last_error;
+    ai_chat_copy_str(snapshot->role_id, sizeof(snapshot->role_id), s_ai.role_id);
+    ai_chat_copy_str(snapshot->session_id, sizeof(snapshot->session_id), s_ai.session_id);
+    ai_chat_copy_str(snapshot->asr_caption, sizeof(snapshot->asr_caption), s_ai.captions[0].text);
+    ai_chat_copy_str(snapshot->tts_caption, sizeof(snapshot->tts_caption), s_ai.captions[1].text);
+    snapshot->message_count = s_ai.message_count > AI_CHAT_MESSAGE_SNAPSHOT_MAX ?
+        AI_CHAT_MESSAGE_SNAPSHOT_MAX : s_ai.message_count;
+    for (uint8_t index = 0; index < snapshot->message_count; ++index) {
+        uint8_t source_index = (uint8_t)(s_ai.message_count - snapshot->message_count + index);
+        snapshot->messages[index].caption_type = s_ai.messages[source_index].caption_type;
+        snapshot->messages[index].utterance_id = s_ai.messages[source_index].utterance_id;
+        snapshot->messages[index].final = s_ai.messages[source_index].final;
+        ai_chat_copy_str(snapshot->messages[index].text,
+                         sizeof(snapshot->messages[index].text),
+                         s_ai.messages[source_index].text);
+    }
+    ai_chat_copy_str(snapshot->status, sizeof(snapshot->status), s_ai.status);
+    xSemaphoreGive(s_lock);
+}
