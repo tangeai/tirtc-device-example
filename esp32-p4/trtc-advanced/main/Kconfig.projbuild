@@ -1,0 +1,234 @@
+menu "Audio"
+
+config AUDIO_LOCAL_LOOPBACK_TEST
+    bool "Enable temporary local mic-to-speaker loopback test"
+    default n
+
+config APP_AUDIO_AEC_ENABLE
+    bool "Enable ESP-SR acoustic echo cancellation"
+    default n
+    help
+        Enables the ESP-SR AEC path for duplex audio. Keep this disabled by
+        default on the P4 RTC video profile so ESP-Hosted/SDIO keeps enough
+        internal DMA memory for sustained H264 uplink traffic.
+
+endmenu
+
+menu "RTC video uplink"
+
+config APP_RTC_H264_DIRECT_HW_ENCODER
+    bool "Use direct ESP_H264 hardware encoder for RTC video"
+    default n
+    help
+        Bypass the V4L2 memory-to-memory H264 wrapper on the RTC camera
+        uplink hot path and call the ESP32-P4 hardware encoder directly.
+        Keep this disabled for the normal demo path: the V4L2 wrapper is the
+        vendor-supported camera-to-H264 path and applies the H264 codec
+        controls consistently before frames enter TiRTC.
+
+config APP_RTC_H264_BITRATE
+    int "RTC H264 target bitrate"
+    range 500000 12000000
+    default 6000000
+    help
+        Target bitrate used by the ESP32-P4 hardware H264 encoder for the
+        RTC camera uplink. The normal profile is tuned for sustained 1080p20
+        with bounded send latency; raise this only after logs prove the
+        transport keeps draining without backpressure.
+
+config APP_RTC_H264_FPS
+    int "RTC H264 target FPS"
+    range 5 30
+    default 20
+    help
+        Normal RTC camera uplink frame rate. Keep this separate from the
+        camera sensor mode: the OV5647 sensor can expose 1080p30, while the
+        current TiRTC demo target is sustained 1080p20 with bounded send
+        latency. Weak-network adaptation remains disabled unless explicitly
+        enabled below.
+
+config APP_RTC_H264_GOP
+    int "RTC H264 GOP"
+    range 1 120
+    default 40
+    help
+        GOP used by the ESP32-P4 hardware H264 encoder. Keep this separate
+        from FPS: startup and peer recovery still request explicit key frames,
+        while the normal periodic IDR interval should be long enough that the
+        browser/proxy path does not see a visible 0.5s key-frame cadence.
+
+config APP_RTC_H264_MIN_QP
+    int "RTC H264 minimum QP"
+    range 10 51
+    default 34
+    help
+        Lower bound for encoder QP. Keep this high enough to prevent the
+        ESP32-P4 H264 encoder from emitting very large startup delta frames
+        that can overflow the proxy/browser path. This is not weak-network
+        adaptation; the target bitrate remains configured separately.
+
+config APP_RTC_H264_MAX_QP
+    int "RTC H264 maximum QP"
+    range 10 51
+    default 45
+
+config APP_RTC_H264_OUTPUT_BUFFER_BYTES
+    int "RTC H264 output buffer bytes"
+    range 524288 4194304
+    default 4194304
+    help
+        MMAP output buffer size for one encoded H264 frame. Keep enough room
+        for 1080p key frames and high-motion bursts. This buffer does not
+        control adaptive downshift; it only protects the encoder output path.
+
+config APP_RTC_H264_MAX_DELTA_PAYLOAD_BYTES
+    int "RTC H264 maximum delta frame payload bytes"
+    range 65536 1048576
+    default 262144
+    help
+        Hard guard for abnormal non-key frame payloads. Normal operation must
+        not drop H264 P frames after encoding, because that breaks the
+        reference chain and can make the browser/proxy show a short recovery
+        hiccup. Keep the steady-state guard high enough for normal 1080p motion
+        detail, while the startup guard below remains tighter during decoder
+        warmup. GOP should remain short so recovery follows quickly.
+
+config APP_RTC_H264_STARTUP_GUARD_MS
+    int "RTC H264 startup transport guard window in milliseconds"
+    range 0 10000
+    default 2500
+    help
+        Startup-only window that uses a tighter delta-frame burst limit while
+        the browser/proxy decoder and data channels are still warming up. This
+        is not weak-network adaptation; after the window expires the normal
+        max-delta policy above applies.
+
+config APP_RTC_H264_STARTUP_MAX_DELTA_PAYLOAD_BYTES
+    int "RTC H264 startup maximum delta frame payload bytes"
+    range 65536 1048576
+    default 131072
+    help
+        Delta-frame payload limit used only during the startup guard window.
+        This defaults to the normal max-delta guard so startup uses the same
+        burst protection as steady-state operation.
+
+config APP_RTC_VIDEO_AUTO_ADAPT_ENABLE
+    bool "Enable automatic RTC video weak-network adaptation"
+    default n
+    help
+        Keep this disabled for the normal demo path: the device will try to
+        output the configured full frame rate, resolution, and bitrate.
+        When enabled, future TiRTC/network weak-link callbacks may call the
+        auto adaptation entry to lower frame rate or resolution through the
+        media governor policy table.
+
+config APP_RTC_WAIT_VIDEO_SUBSCRIBE_BEFORE_CAPTURE
+    bool "Start camera capture after remote video subscription"
+    default n
+    help
+        Disable this for the normal IPC demo path so the device starts the
+        physical camera/H264 hot path as soon as a call is accepted. That keeps
+        the capture/encoder path warm before the WebRTC proxy sends its video
+        subscription and shortens first-frame latency.
+
+        Enable it only when saving camera/H264 work before a confirmed remote
+        subscription is more important than first-frame time.
+
+config APP_DEVICE_ONLINE_PAUSE_DURING_RTC
+    bool "Pause device-online MQTT while RTC media is active"
+    default y
+    help
+        Give the TiRTC audio/video path priority while a realtime RTC session
+        is active. Device binding and online reporting still run before and
+        after the call; during the call the platform online MQTT client is
+        stopped so TLS keepalive/reconnect work cannot steal internal DMA
+        memory or network scheduling from sustained H264 uplink.
+
+config APP_DMA_ESCROW_BYTES
+    int "Application DMA escrow bytes"
+    range 0 131072
+    default 65536
+    help
+        Internal DMA-capable memory held by the media layer at early boot.
+        The H264 prewarm path can release this escrow and retry encoder open
+        if the hardware encoder cannot acquire enough internal reference
+        memory after the standard IDF DMA reserve has been created.
+
+config APP_CAMERA_FRAME_TRACE_INITIAL_COUNT
+    int "Camera frame trace initial frame count"
+    range 0 64
+    default 0
+    help
+        Number of per-frame camera pipeline trace lines printed after a video
+        session starts. Keep this at zero for performance tuning; the periodic
+        aggregate stats remain enabled and are enough for FPS/bitrate analysis.
+
+config APP_CAMERA_DRAIN_STALE_FRAMES
+    bool "Drain stale camera frames before RTC encode"
+    default y
+    help
+        The OV5647 1080p sensor mode runs at 30fps, while the normal RTC path
+        sends 1080p20. Keep only the newest queued V4L2 frame before H264
+        encoding so the RTC stream does not encode old camera buffers that can
+        look like a short repeated-frame stutter on the viewer side.
+
+config APP_CAMERA_FRAME_TRACE_INTERVAL_MS
+    int "Camera slow/large frame trace interval in milliseconds"
+    range 200 60000
+    default 10000
+    help
+        Minimum interval for slow or large frame trace logs. This prevents
+        diagnostic logging from disturbing the 1080p H264 hot path while still
+        keeping enough evidence when the encoder or transport stalls.
+
+config APP_RTC_H264_KEY_FRAME_REQUEST_MIN_INTERVAL_MS
+    int "Minimum interval between local H264 key-frame requests"
+    range 0 5000
+    default 100
+    help
+        Coalesce near-duplicate IDR requests from stream start and peer-side
+        key-frame callbacks. Keep the window short: the WebRTC proxy sends a
+        second key-frame request during startup, and suppressing it for too
+        long can leave the remote decoder waiting and trigger a remote close.
+
+config APP_RTC_TRANSPORT_BACKPRESSURE_HOLD_MS
+    int "RTC transport backpressure hold in milliseconds"
+    range 40 1000
+    default 300
+    help
+        Short camera hold window after the TiRTC send buffer crosses the
+        transport guard waterline. This is not weak-network adaptation and
+        does not change the configured 1080p/bitrate profile; it only prevents
+        the SDK send buffer from filling so far that heartbeat/control traffic
+        times out.
+
+config APP_TIRTC_QUERY_SEND_BUFFER_USED
+    bool "Query TiRTC SDK send-buffer usage"
+    default y
+    help
+        Keep SDK send-buffer backpressure enabled on the send hot path.
+        Close/error snapshots still use the cached waterline only, because
+        some SDK builds can invalidate a connection handle during remote close.
+        Disable this only when isolating SDK send-buffer internals.
+
+endmenu
+
+menu "Debug utilities"
+
+config APP_DEBUG_SCREEN_SERVER_ENABLE
+    bool "Enable LAN screen debug web server"
+    default n
+    help
+        Starts a local HTTP server after the display is initialized.
+        The server exposes the current LVGL screen as BMP and accepts
+        debug tap/scroll commands from a browser on the same Wi-Fi LAN.
+        Disable this for production builds to avoid compiling or linking
+        the HTTP debug server.
+
+config APP_DEBUG_SCREEN_SERVER_PORT
+    int "LAN screen debug web server port"
+    range 1024 65534
+    default 8080
+    depends on APP_DEBUG_SCREEN_SERVER_ENABLE
+
+endmenu

@@ -1,0 +1,652 @@
+{
+  "assets": [
+    {
+      "text": "恢复",
+      "source": "Figma nodes 281:2, 281:3, 281:4",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_10_restore.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_12_restore.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_16_restore.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "type: contact_add\ndevice_id: 12位设备ID\npair_key: 配对Key",
+      "source": "local generated text asset for call/wechat split",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_a050dd580b_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_a050dd580b_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_a050dd580b_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "扫码接口不可用",
+      "source": "local generated text asset for call/wechat split",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_2428c8671b_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_2428c8671b_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_2428c8671b_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "扫描成功",
+      "source": "local generated text asset for call/wechat split",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_7987a1a9fd_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_7987a1a9fd_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_7987a1a9fd_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "摄像头不可用",
+      "source": "local generated text asset for call/wechat split",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_cf010be1d8_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_cf010be1d8_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_cf010be1d8_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "扫码服务忙",
+      "source": "local generated text asset for call/wechat split",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_f34db5aad9_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_f34db5aad9_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_f34db5aad9_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "未识别二维码",
+      "source": "local generated text asset for call/wechat split",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_1f4da58a27_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_1f4da58a27_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_1f4da58a27_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "二维码格式错误",
+      "source": "local generated text asset for call/wechat split",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_9bf8f036e2_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_9bf8f036e2_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_9bf8f036e2_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "摄像头超时",
+      "source": "local generated text asset for call/wechat split",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_d114a96da6_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_d114a96da6_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_d114a96da6_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "扫码失败",
+      "source": "local generated text asset for call/wechat split",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_e2928d1add_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_e2928d1add_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_e2928d1add_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "添加联系人",
+      "source": "local generated text asset for call/wechat split",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_aa05f77ba6_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_aa05f77ba6_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_aa05f77ba6_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "联系人列表",
+      "source": "local generated text asset for call/wechat split",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_c0320e2418_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_c0320e2418_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_c0320e2418_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "配对 Key",
+      "source": "local generated text asset for call/wechat split",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_da2d3f599d_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_da2d3f599d_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_da2d3f599d_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "扫码添加联系人",
+      "source": "local generated text asset for call/wechat split",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_cdf6c49d11_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_cdf6c49d11_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_cdf6c49d11_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "通话",
+      "source": "local generated text asset for call/wechat split",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_b8f8adbc17_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_b8f8adbc17_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_b8f8adbc17_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "已开门",
+      "source": "local generated text asset for device door status",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_door_open_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_door_open_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_door_open_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "刚刚",
+      "source": "local generated text asset for scan contact timestamp",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_just_now_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_just_now_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_just_now_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "内存不足",
+      "source": "local generated text asset for scan contact error",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_no_memory_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_no_memory_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_no_memory_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "设备绑定",
+      "source": "Figma node 288:34 for binding prompt",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_binding_title_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_binding_title_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_binding_title_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "请先连接 WiFi",
+      "source": "Figma node 288:38 for binding prompt",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_binding_connect_wifi_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_binding_connect_wifi_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_binding_connect_wifi_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "联网后自动获取6位绑定码",
+      "source": "Figma node 288:39 for binding prompt",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_binding_auto_code_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_binding_auto_code_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_binding_auto_code_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "设置WiFi",
+      "source": "Figma node 288:41 for binding prompt",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_binding_set_wifi_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_binding_set_wifi_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_binding_set_wifi_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "绑定码",
+      "source": "Figma node 293:5 for binding prompt",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_binding_code_label_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_binding_code_label_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_binding_code_label_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "绑定网址",
+      "source": "Figma node 293:7 for binding prompt",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_binding_url_label_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_binding_url_label_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_binding_url_label_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "重置绑定",
+      "source": "Figma node 302:2 for TiRTC config reset button",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_binding_reset_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_binding_reset_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_binding_reset_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "TiRTC 服务",
+      "source": "Figma node 305:2 for network test service row",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_network_tirtc_service_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_network_tirtc_service_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_network_tirtc_service_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "麦克风音量",
+      "source": "Figma text asset for AI Chat settings",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_ai_mic_volume_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_ai_mic_volume_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_ai_mic_volume_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+build*/
+.vscode/
+.agents/
+firmware/
+managed_components/
+logs/
+sdkconfig.old
+*.pyc
+__pycache__/
+.playwright-cli/

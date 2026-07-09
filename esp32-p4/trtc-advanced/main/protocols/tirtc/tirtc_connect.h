@@ -1,0 +1,22 @@
+﻿#pragma once
+
+#include <stdbool.h>
+
+#include "esp_err.h"
+#include "tiRTC.h"
+#include "tirtc_session.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+esp_err_t tirtc_connect_start(const tirtc_session_config_t *config,
+                              TIRTCCONNECTCALLBACK callback,
+                              void *user_data);
+bool tirtc_connect_is_connecting(void);
+void tirtc_connect_on_tirtc_started(void);
+void tirtc_connect_cancel(void);
+
+#ifdef __cplusplus
+}
+#endif
