@@ -5,19 +5,13 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "app_memory_policy.h"
 
 static const char *TAG = "audio_alaw_codec";
 
 static void *audio_alaw_alloc(size_t size)
 {
-    void *buffer = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (buffer == NULL) {
-        buffer = heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    }
-    if (buffer == NULL) {
-        buffer = malloc(size);
-    }
-    return buffer;
+    return app_memory_alloc_psram(size);
 }
 
 static uint8_t audio_alaw_linear_to_alaw(int16_t sample)

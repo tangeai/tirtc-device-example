@@ -7,8 +7,6 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <sys/select.h>
-#include <sys/time.h>
 #include <unistd.h>
 
 #include "esp_check.h"
@@ -23,6 +21,8 @@
 #include "linux/videodev2.h"
 #include "sdkconfig.h"
 
+#include "app_memory_policy.h"
+#include "app_log_policy.h"
 #include "hardware_board.h"
 #include "hardware_board_config.h"
 
@@ -36,10 +36,6 @@ static const char *TAG = "camera";
 #define CAMERA_DRIVER_FRAME_BUSY_WAIT_MS 5
 #define CAMERA_DRIVER_FRAME_POLL_WAIT_MS 1
 #define CAMERA_DRIVER_TARGET_FORMAT    V4L2_PIX_FMT_YUV420
-
-#ifndef CONFIG_APP_CAMERA_DRAIN_STALE_FRAMES
-#define CONFIG_APP_CAMERA_DRAIN_STALE_FRAMES 1
-#endif
 
 typedef struct {
 	struct v4l2_buffer buffer;
@@ -122,7 +118,7 @@ static esp_err_t camera_driver_init_lock(void)
 	if (s_lock != NULL) {
 		return ESP_OK;
 	}
-	s_lock = xSemaphoreCreateMutex();
+	s_lock = xSemaphoreCreateMutexWithCaps(APP_SYNC_CAPS_CONTROL);
 	return s_lock == NULL ? ESP_ERR_NO_MEM : ESP_OK;
 }
 
@@ -151,12 +147,12 @@ static esp_err_t camera_driver_video_init_once(void)
 
 	ESP_RETURN_ON_ERROR(esp_video_init(&video_config), TAG, "esp_video init failed");
 	s_video_ready = true;
-	ESP_LOGI(TAG,
-		 "esp_video ready: dev=%s i2c=%d scl=%d sda=%d",
-		 ESP_VIDEO_MIPI_CSI_DEVICE_NAME,
-		 (int)HARDWARE_BOARD_I2C_NUM,
-		 (int)HARDWARE_BOARD_I2C_SCL,
-		 (int)HARDWARE_BOARD_I2C_SDA);
+	APP_LOG_DETAIL(TAG,
+		       "esp_video ready: dev=%s i2c=%d scl=%d sda=%d",
+		       ESP_VIDEO_MIPI_CSI_DEVICE_NAME,
+		       (int)HARDWARE_BOARD_I2C_NUM,
+		       (int)HARDWARE_BOARD_I2C_SCL,
+		       (int)HARDWARE_BOARD_I2C_SDA);
 	return ESP_OK;
 }
 
@@ -178,12 +174,12 @@ static esp_err_t camera_driver_open_device(void)
 		return ESP_FAIL;
 	}
 
-	ESP_LOGI(TAG,
-		 "camera capability: driver=%s card=%s bus=%s caps=0x%08" PRIx32,
-		 capability.driver,
-		 capability.card,
-		 capability.bus_info,
-		 capability.capabilities);
+	APP_LOG_DETAIL(TAG,
+		       "camera capability: driver=%s card=%s bus=%s caps=0x%08" PRIx32,
+		       capability.driver,
+		       capability.card,
+		       capability.bus_info,
+		       capability.capabilities);
 	return ESP_OK;
 }
 
@@ -253,12 +249,12 @@ static void camera_driver_log_sensor_format(void)
 	esp_cam_sensor_format_t sensor_format = {0};
 
 	if (ioctl(s_fd, VIDIOC_G_SENSOR_FMT, &sensor_format) != 0) {
-		ESP_LOGI(TAG, "camera sensor format query unsupported errno=%d", errno);
+		APP_LOG_DETAIL(TAG, "camera sensor format query unsupported errno=%d", errno);
 		return;
 	}
 
-	ESP_LOGI(TAG,
-		 "camera sensor format: name=%s size=%ux%u fps=%u pixfmt=%u xclk=%d mipi_clk=%llu lanes=%u line_sync=%d",
+	APP_LOG_DETAIL(TAG,
+		       "camera sensor format: name=%s size=%ux%u fps=%u pixfmt=%u xclk=%d mipi_clk=%llu lanes=%u line_sync=%d",
 		 sensor_format.name != NULL ? sensor_format.name : "unknown",
 		 (unsigned)sensor_format.width,
 		 (unsigned)sensor_format.height,
@@ -298,50 +294,6 @@ static void camera_driver_requeue_buffer(const struct v4l2_buffer *buf, const ch
 	}
 }
 
-static uint32_t camera_driver_drain_to_latest_frame(struct v4l2_buffer *latest)
-{
-	uint32_t dropped = 0;
-
-	if (!CONFIG_APP_CAMERA_DRAIN_STALE_FRAMES || latest == NULL || s_fd < 0 || !s_first_frame_logged) {
-		return 0;
-	}
-
-	for (uint32_t i = 0; i < HARDWARE_BOARD_CAMERA_BUFFER_COUNT - 1U; ++i) {
-		fd_set read_set;
-		struct timeval timeout = {
-			.tv_sec = 0,
-			.tv_usec = 0,
-		};
-
-		FD_ZERO(&read_set);
-		FD_SET(s_fd, &read_set);
-		int ready = select(s_fd + 1, &read_set, NULL, NULL, &timeout);
-		if (ready <= 0 || !FD_ISSET(s_fd, &read_set)) {
-			break;
-		}
-
-		struct v4l2_buffer next = {
-			.type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
-			.memory = V4L2_MEMORY_MMAP,
-		};
-		if (ioctl(s_fd, VIDIOC_DQBUF, &next) != 0) {
-			if (errno != EAGAIN) {
-				ESP_LOGD(TAG, "camera latest-frame drain stopped errno=%d", errno);
-			}
-			break;
-		}
-		if (!camera_driver_buffer_is_usable(&next)) {
-			camera_driver_requeue_buffer(&next, "invalid-drain");
-			break;
-		}
-		camera_driver_requeue_buffer(latest, "stale");
-		*latest = next;
-		dropped++;
-	}
-
-	return dropped;
-}
-
 static void camera_driver_config_frame_rate(void)
 {
 	struct v4l2_streamparm parm = {
@@ -349,14 +301,14 @@ static void camera_driver_config_frame_rate(void)
 	};
 
 	if (ioctl(s_fd, VIDIOC_G_PARM, &parm) != 0) {
-		ESP_LOGI(TAG, "camera frame interval query unsupported errno=%d", errno);
+		APP_LOG_DETAIL(TAG, "camera frame interval query unsupported errno=%d", errno);
 		return;
 	}
 
 	uint32_t before_num = parm.parm.capture.timeperframe.numerator;
 	uint32_t before_den = parm.parm.capture.timeperframe.denominator;
-	ESP_LOGI(TAG,
-		 "camera frame interval before: numerator=%u denominator=%u capability=0x%08" PRIx32,
+	APP_LOG_DETAIL(TAG,
+		       "camera frame interval before: numerator=%u denominator=%u capability=0x%08" PRIx32,
 		 (unsigned)before_num,
 		 (unsigned)before_den,
 		 parm.parm.capture.capability);
@@ -371,8 +323,8 @@ static void camera_driver_config_frame_rate(void)
 	memset(&parm, 0, sizeof(parm));
 	parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	if (ioctl(s_fd, VIDIOC_G_PARM, &parm) == 0) {
-		ESP_LOGI(TAG,
-			 "camera frame interval active: numerator=%u denominator=%u capability=0x%08" PRIx32,
+		APP_LOG_DETAIL(TAG,
+			       "camera frame interval active: numerator=%u denominator=%u capability=0x%08" PRIx32,
 			 (unsigned)parm.parm.capture.timeperframe.numerator,
 			 (unsigned)parm.parm.capture.timeperframe.denominator,
 			 parm.parm.capture.capability);
@@ -423,8 +375,8 @@ static esp_err_t camera_driver_prepare_buffers(void)
 		}
 	}
 
-	ESP_LOGI(TAG,
-		 "camera buffers ready: count=%u len0=%u",
+	APP_LOG_DETAIL(TAG,
+		       "camera buffers ready: count=%u len0=%u",
 		 (unsigned)HARDWARE_BOARD_CAMERA_BUFFER_COUNT,
 		 (unsigned)s_buffer_lengths[0]);
 	return ESP_OK;
@@ -443,7 +395,7 @@ static esp_err_t camera_driver_stream_on(void)
 	}
 
 	s_streaming = true;
-	ESP_LOGI(TAG, "camera stream on");
+	APP_LOG_DETAIL(TAG, "camera stream on");
 	return ESP_OK;
 }
 
@@ -530,6 +482,20 @@ esp_err_t camera_driver_set_stream_target(uint16_t width, uint16_t height, uint8
 	if (s_target_width == width && s_target_height == height && s_target_fps == fps) {
 		xSemaphoreGive(s_lock);
 		return ESP_OK;
+	}
+	if (s_client_count > 0U) {
+		ESP_LOGW(TAG,
+			 "camera target change rejected while in use: clients=%" PRIu32
+			 " active=%ux%u@%u requested=%ux%u@%u",
+			 s_client_count,
+			 (unsigned)s_target_width,
+			 (unsigned)s_target_height,
+			 (unsigned)s_target_fps,
+			 (unsigned)width,
+			 (unsigned)height,
+			 (unsigned)fps);
+		xSemaphoreGive(s_lock);
+		return ESP_ERR_INVALID_STATE;
 	}
 	if (s_frame_outstanding) {
 		xSemaphoreGive(s_lock);
@@ -690,8 +656,6 @@ esp_err_t camera_driver_capture(camera_driver_frame_t *frame)
 		return ESP_FAIL;
 	}
 
-	uint32_t stale_frames_dropped = camera_driver_drain_to_latest_frame(&buf);
-
 	memset(frame, 0, sizeof(*frame));
 	s_active_frame.buffer = buf;
 	s_frame_outstanding = true;
@@ -701,7 +665,7 @@ esp_err_t camera_driver_capture(camera_driver_frame_t *frame)
 	frame->width = (uint16_t)s_active_format.fmt.pix.width;
 	frame->height = (uint16_t)s_active_format.fmt.pix.height;
 	frame->sequence = buf.sequence;
-	frame->stale_frames_dropped = stale_frames_dropped;
+	frame->stale_frames_dropped = 0;
 	frame->sensor_timestamp_us = camera_driver_buffer_timestamp_us(&buf);
 	switch (s_active_format.fmt.pix.pixelformat) {
 	case V4L2_PIX_FMT_YUV420:
@@ -725,7 +689,7 @@ esp_err_t camera_driver_capture(camera_driver_frame_t *frame)
 			 (unsigned)frame->data_len,
 			 (unsigned)buf.index,
 			 (unsigned)buf.sequence,
-			 (unsigned)stale_frames_dropped,
+			 0U,
 			 (unsigned long long)frame->sensor_timestamp_us);
 	}
 

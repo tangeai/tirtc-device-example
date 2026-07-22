@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
@@ -29,6 +30,7 @@ static const char *TAG = "thing_mqtt";
 #define THING_MQTT_HEARTBEAT_STACK_SIZE 4096
 #define THING_MQTT_BUFFER_SIZE        2048
 #define THING_MQTT_MAX_LISTENERS      4
+#define THING_MQTT_COMMAND_ACK_BIT    (1U << 0)
 
 typedef struct {
     bool used;
@@ -47,6 +49,9 @@ typedef struct {
     char ack_topic[THING_MQTT_TOPIC_MAX_LEN];
     char up_topic[THING_MQTT_TOPIC_MAX_LEN];
     size_t payload_len;
+    char payload_topic[THING_MQTT_TOPIC_MAX_LEN];
+    bool payload_is_cmd;
+    bool payload_is_notify;
     uint32_t heartbeat_interval_ms;
     thing_mqtt_message_cb_t on_message;
     void *ctx;
@@ -54,12 +59,15 @@ typedef struct {
     void *disconnect_ctx;
     thing_mqtt_heartbeat_payload_cb_t build_heartbeat;
     void *heartbeat_ctx;
+    int command_ack_msg_id;
+    bool command_ack_confirmed;
     thing_mqtt_listener_t listeners[THING_MQTT_MAX_LISTENERS];
 } thing_mqtt_runtime_t;
 
 static EXT_RAM_BSS_ATTR thing_mqtt_runtime_t s_thing_mqtt;
 static EXT_RAM_BSS_ATTR char s_thing_mqtt_payload[THING_MQTT_PAYLOAD_MAX_LEN];
 static SemaphoreHandle_t s_thing_mqtt_lock;
+static EventGroupHandle_t s_thing_mqtt_events;
 
 static void reset_runtime_locked(bool keep_listeners)
 {
@@ -69,6 +77,7 @@ static void reset_runtime_locked(bool keep_listeners)
         memcpy(listeners, s_thing_mqtt.listeners, sizeof(listeners));
     }
     memset(&s_thing_mqtt, 0, sizeof(s_thing_mqtt));
+    s_thing_mqtt.command_ack_msg_id = -1;
     s_thing_mqtt_payload[0] = '\0';
     if (keep_listeners) {
         memcpy(s_thing_mqtt.listeners, listeners, sizeof(s_thing_mqtt.listeners));
@@ -78,8 +87,14 @@ static void reset_runtime_locked(bool keep_listeners)
 static esp_err_t ensure_lock(void)
 {
     if (s_thing_mqtt_lock == NULL) {
-        s_thing_mqtt_lock = xSemaphoreCreateMutexWithCaps(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_thing_mqtt_lock = xSemaphoreCreateMutexWithCaps(APP_SYNC_CAPS_CONTROL);
         if (s_thing_mqtt_lock == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    if (s_thing_mqtt_events == NULL) {
+        s_thing_mqtt_events = xEventGroupCreate();
+        if (s_thing_mqtt_events == NULL) {
             return ESP_ERR_NO_MEM;
         }
     }
@@ -135,14 +150,30 @@ static void publish_ack(void)
         unlock_runtime();
         return;
     }
+    xEventGroupClearBits(s_thing_mqtt_events, THING_MQTT_COMMAND_ACK_BIT);
     msg_id = esp_mqtt_client_publish(s_thing_mqtt.client,
                                      s_thing_mqtt.ack_topic,
                                      ack_payload,
                                      0,
                                      1,
                                      0);
+    s_thing_mqtt.command_ack_msg_id = msg_id;
+    s_thing_mqtt.command_ack_confirmed = false;
     unlock_runtime();
-    ESP_LOGD(TAG, "command ack published: msg_id=%d", msg_id);
+    if (msg_id >= 0) {
+        ESP_LOGD(TAG, "command ack queued: msg_id=%d", msg_id);
+    } else {
+        ESP_LOGW(TAG, "command ack queue failed: msg_id=%d", msg_id);
+    }
+}
+
+static void reset_payload_assembly(void)
+{
+    s_thing_mqtt.payload_len = 0;
+    s_thing_mqtt_payload[0] = '\0';
+    s_thing_mqtt.payload_topic[0] = '\0';
+    s_thing_mqtt.payload_is_cmd = false;
+    s_thing_mqtt.payload_is_notify = false;
 }
 
 static void handle_mqtt_payload(const esp_mqtt_event_t *event)
@@ -155,27 +186,40 @@ static void handle_mqtt_payload(const esp_mqtt_event_t *event)
         return;
     }
 
-    const bool is_cmd = topic_equals(event, s_thing_mqtt.cmd_topic);
-    const bool is_notify = topic_equals(event, s_thing_mqtt.notify_topic);
-    if (!is_cmd && !is_notify) {
-        return;
-    }
     if (event->total_data_len >= (int)sizeof(s_thing_mqtt_payload)) {
         ESP_LOGW(TAG, "drop oversized MQTT message: total=%d", event->total_data_len);
-        s_thing_mqtt.payload_len = 0;
-        s_thing_mqtt_payload[0] = '\0';
+        reset_payload_assembly();
         return;
     }
     if (event->current_data_offset == 0) {
-        s_thing_mqtt.payload_len = 0;
-        s_thing_mqtt_payload[0] = '\0';
+        reset_payload_assembly();
+        s_thing_mqtt.payload_is_cmd = topic_equals(event, s_thing_mqtt.cmd_topic);
+        s_thing_mqtt.payload_is_notify = topic_equals(event, s_thing_mqtt.notify_topic);
+        if (event->topic != NULL && event->topic_len > 0) {
+            size_t topic_len = event->topic_len < (int)(sizeof(s_thing_mqtt.payload_topic) - 1) ?
+                               (size_t)event->topic_len :
+                               sizeof(s_thing_mqtt.payload_topic) - 1;
+            memcpy(s_thing_mqtt.payload_topic, event->topic, topic_len);
+            s_thing_mqtt.payload_topic[topic_len] = '\0';
+        }
+    }
+    if (!s_thing_mqtt.payload_is_cmd && !s_thing_mqtt.payload_is_notify) {
+        return;
+    }
+    if (event->current_data_offset != (int)s_thing_mqtt.payload_len) {
+        ESP_LOGW(TAG,
+                 "drop out-of-order MQTT fragment: offset=%d buffered=%u total=%d",
+                 event->current_data_offset,
+                 (unsigned)s_thing_mqtt.payload_len,
+                 event->total_data_len);
+        reset_payload_assembly();
+        return;
     }
     if (s_thing_mqtt.payload_len + (size_t)event->data_len >= sizeof(s_thing_mqtt_payload)) {
         ESP_LOGW(TAG, "drop MQTT fragment: len=%u chunk=%d",
                  (unsigned)s_thing_mqtt.payload_len,
                  event->data_len);
-        s_thing_mqtt.payload_len = 0;
-        s_thing_mqtt_payload[0] = '\0';
+        reset_payload_assembly();
         return;
     }
 
@@ -186,15 +230,11 @@ static void handle_mqtt_payload(const esp_mqtt_event_t *event)
         return;
     }
 
-    if (is_cmd) {
+    if (s_thing_mqtt.payload_is_cmd) {
         publish_ack();
     }
     char topic[THING_MQTT_TOPIC_MAX_LEN] = {0};
-    size_t topic_len = event->topic_len < (int)(sizeof(topic) - 1) ?
-                       (size_t)event->topic_len :
-                       sizeof(topic) - 1;
-    memcpy(topic, event->topic, topic_len);
-    topic[topic_len] = '\0';
+    strlcpy(topic, s_thing_mqtt.payload_topic, sizeof(topic));
 
     lock_runtime();
     primary_cb = s_thing_mqtt.on_message;
@@ -216,8 +256,7 @@ static void handle_mqtt_payload(const esp_mqtt_event_t *event)
                                         listeners[index].ctx);
         }
     }
-    s_thing_mqtt.payload_len = 0;
-    s_thing_mqtt_payload[0] = '\0';
+    reset_payload_assembly();
 }
 
 static void thing_mqtt_event_handler(void *handler_args,
@@ -254,6 +293,9 @@ static void thing_mqtt_event_handler(void *handler_args,
         disconnect_cb = s_thing_mqtt.on_disconnect;
         disconnect_ctx = s_thing_mqtt.disconnect_ctx;
         unlock_runtime();
+        if (s_thing_mqtt_events != NULL) {
+            xEventGroupSetBits(s_thing_mqtt_events, THING_MQTT_COMMAND_ACK_BIT);
+        }
 
         ESP_LOGW(TAG, "disconnected: reason=0x%02x", reason);
         if (disconnect_cb != NULL) {
@@ -264,6 +306,23 @@ static void thing_mqtt_event_handler(void *handler_args,
     case MQTT_EVENT_DATA:
         handle_mqtt_payload(event);
         break;
+    case MQTT_EVENT_PUBLISHED:
+    {
+        bool command_ack_confirmed = false;
+
+        lock_runtime();
+        if (s_thing_mqtt.command_ack_msg_id >= 0 &&
+            event->msg_id == s_thing_mqtt.command_ack_msg_id) {
+            s_thing_mqtt.command_ack_confirmed = true;
+            command_ack_confirmed = true;
+        }
+        unlock_runtime();
+        if (command_ack_confirmed && s_thing_mqtt_events != NULL) {
+            ESP_LOGD(TAG, "command ack confirmed: msg_id=%d", event->msg_id);
+            xEventGroupSetBits(s_thing_mqtt_events, THING_MQTT_COMMAND_ACK_BIT);
+        }
+        break;
+    }
     case MQTT_EVENT_ERROR:
         ESP_LOGW(TAG, "mqtt error");
         break;
@@ -336,6 +395,8 @@ static void heartbeat_task(void *arg)
 
 esp_err_t thing_mqtt_client_start(const thing_mqtt_client_config_t *config)
 {
+    char active_device_id[sizeof(s_thing_mqtt.device_id)] = {0};
+
     ESP_RETURN_ON_ERROR(ensure_lock(), TAG, "mqtt lock init failed");
 
     if (config == NULL ||
@@ -347,8 +408,17 @@ esp_err_t thing_mqtt_client_start(const thing_mqtt_client_config_t *config)
 
     lock_runtime();
     if (s_thing_mqtt.client != NULL) {
+        bool same_identity = strcmp(s_thing_mqtt.device_id, config->device_id) == 0;
+        strlcpy(active_device_id, s_thing_mqtt.device_id, sizeof(active_device_id));
         unlock_runtime();
-        return ESP_OK;
+        if (same_identity) {
+            return ESP_OK;
+        }
+        ESP_LOGE(TAG,
+                 "start rejected: active identity=%s requested identity=%s",
+                 active_device_id,
+                 config->device_id);
+        return ESP_ERR_INVALID_STATE;
     }
     reset_runtime_locked(true);
     strlcpy(s_thing_mqtt.device_id, config->device_id, sizeof(s_thing_mqtt.device_id));
@@ -447,6 +517,9 @@ void thing_mqtt_client_stop(void)
     s_thing_mqtt.client = NULL;
     s_thing_mqtt.connected = false;
     unlock_runtime();
+    if (s_thing_mqtt_events != NULL) {
+        xEventGroupSetBits(s_thing_mqtt_events, THING_MQTT_COMMAND_ACK_BIT);
+    }
 
     if (heartbeat_task_handle != NULL) {
         xTaskNotifyGive(heartbeat_task_handle);
@@ -491,6 +564,46 @@ bool thing_mqtt_client_is_connected(void)
     connected = s_thing_mqtt.client != NULL && s_thing_mqtt.connected;
     unlock_runtime();
     return connected;
+}
+
+esp_err_t thing_mqtt_client_wait_last_command_ack(uint32_t timeout_ms)
+{
+    int target_msg_id = -1;
+    bool confirmed = false;
+    bool connected = false;
+
+    ESP_RETURN_ON_ERROR(ensure_lock(), TAG, "mqtt ack wait init failed");
+
+    lock_runtime();
+    target_msg_id = s_thing_mqtt.command_ack_msg_id;
+    confirmed = s_thing_mqtt.command_ack_confirmed;
+    connected = s_thing_mqtt.client != NULL && s_thing_mqtt.connected;
+    unlock_runtime();
+
+    if (target_msg_id < 0) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (confirmed) {
+        return ESP_OK;
+    }
+    if (!connected) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    EventBits_t bits = xEventGroupWaitBits(s_thing_mqtt_events,
+                                           THING_MQTT_COMMAND_ACK_BIT,
+                                           pdTRUE,
+                                           pdFALSE,
+                                           pdMS_TO_TICKS(timeout_ms));
+    if ((bits & THING_MQTT_COMMAND_ACK_BIT) == 0) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    lock_runtime();
+    confirmed = s_thing_mqtt.command_ack_msg_id == target_msg_id &&
+                s_thing_mqtt.command_ack_confirmed;
+    unlock_runtime();
+    return confirmed ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
 esp_err_t thing_mqtt_client_publish_up(const char *payload, int qos)

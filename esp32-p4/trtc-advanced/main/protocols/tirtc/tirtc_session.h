@@ -88,7 +88,12 @@ typedef struct {
                                      size_t data_len,
                                      size_t *playback_data_len,
                                      void *ctx);
-    esp_err_t (*submit_remote_video_jpeg)(const uint8_t *data, size_t data_len, void *ctx);
+    esp_err_t (*submit_remote_video)(uint8_t media,
+                                     uint8_t flags,
+                                     const uint8_t *data,
+                                     size_t data_len,
+                                     uint32_t pts,
+                                     void *ctx);
     void (*flush)(void *ctx);
 } tirtc_session_media_ops_t;
 
@@ -151,7 +156,9 @@ typedef struct {
     size_t local_video_tx_largest_slot;
     uint32_t local_video_tx_queue_len;
     uint32_t local_video_tx_free_slots;
+    size_t local_audio_tx_pool_capacity;
     uint32_t local_audio_tx_queue_len;
+    uint32_t local_audio_tx_free_slots;
     bool access_hijacking_detected;
     int last_error;
     char last_event[TIRTC_SESSION_DEBUG_TEXT_MAX_LEN];
@@ -190,6 +197,8 @@ int tirtc_session_service_request(const char *path,
                                   void *user_data);
 esp_err_t tirtc_session_connect_peer(const char *remote_device_id,
                                      const char *remote_device_secret_key);
+esp_err_t tirtc_session_connect_peer_with_token(const char *remote_device_id,
+                                                const char *connect_token);
 esp_err_t tirtc_session_restart(void);
 esp_err_t tirtc_session_stop(void);
 esp_err_t tirtc_session_disconnect(void);
@@ -200,12 +209,17 @@ esp_err_t tirtc_session_hangup(void);
 void tirtc_session_on_network_state_changed(const tirtc_session_network_state_t *state);
 esp_err_t tirtc_session_set_local_video_send_enabled(bool enabled);
 esp_err_t tirtc_session_set_local_audio_send_enabled(bool enabled);
+esp_err_t tirtc_session_activate_deferred_media(bool enable_video, bool enable_audio);
 void tirtc_session_set_next_connection_auto_media(bool enabled);
+void tirtc_session_set_next_connection_defer_media(bool enabled);
 esp_err_t tirtc_session_track_external_connection(tirtc_conn_t conn, bool auto_media);
 esp_err_t tirtc_session_send_command_raw(tirtc_conn_t conn,
                                          uint32_t cmdw,
                                          const void *data,
                                          size_t data_len);
+esp_err_t tirtc_session_send_active_command(uint32_t cmdw,
+                                            const void *data,
+                                            size_t data_len);
 esp_err_t tirtc_session_send_rgb(uint8_t red, uint8_t green, uint8_t blue);
 esp_err_t tirtc_session_query_peer_state(void);
 bool tirtc_session_get_last_peer_state(tirtc_session_peer_state_t *state);

@@ -1,8 +1,10 @@
 #include "device_online.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "app_memory_policy.h"
 #include "device_auth_http.h"
 #include "device_identity.h"
 #include "esp_attr.h"
@@ -29,7 +31,7 @@ static const char *TAG = "device_online";
 #define DEVICE_ONLINE_STATUS_PAYLOAD_MAX_LEN            512
 
 #ifndef CONFIG_APP_DEVICE_ONLINE_PAUSE_DURING_RTC
-#define CONFIG_APP_DEVICE_ONLINE_PAUSE_DURING_RTC 1
+#define CONFIG_APP_DEVICE_ONLINE_PAUSE_DURING_RTC 0
 #endif
 
 typedef struct {
@@ -571,7 +573,11 @@ esp_err_t device_online_get_cached_mqtt_token(device_auth_token_t *token)
         identity.mac[0] = '\0';
     }
 
-    device_auth_token_t refreshed = {0};
+    device_auth_token_t *refreshed = app_memory_calloc_psram(1, sizeof(*refreshed));
+    if (refreshed == NULL) {
+        xSemaphoreGive(s_online.token_refresh_lock);
+        return ESP_ERR_NO_MEM;
+    }
     ESP_LOGD(TAG,
              "mqtt token cache refresh: ttl=%us",
              (unsigned)DEVICE_ONLINE_TOKEN_TTL_SECONDS);
@@ -579,15 +585,15 @@ esp_err_t device_online_get_cached_mqtt_token(device_auth_token_t *token)
                                           credentials.device_id,
                                           credentials.device_key,
                                           identity.mac,
-                                          &refreshed);
+                                          refreshed);
     if (ret == ESP_OK) {
         now_us = esp_timer_get_time();
         xSemaphoreTake(s_online.lock, portMAX_DELAY);
         if (s_online.credentials_valid &&
             device_online_credentials_match(&credentials, &s_online.credentials)) {
-            s_online.token = refreshed;
+            s_online.token = *refreshed;
             s_online.token_expires_us = now_us + device_online_token_ttl_us();
-            *token = refreshed;
+            *token = *refreshed;
             ESP_LOGD(TAG,
                      "mqtt token cached: expires_in=%us",
                      (unsigned)DEVICE_ONLINE_TOKEN_TTL_SECONDS);
@@ -597,6 +603,7 @@ esp_err_t device_online_get_cached_mqtt_token(device_auth_token_t *token)
         xSemaphoreGive(s_online.lock);
     }
 
+    free(refreshed);
     xSemaphoreGive(s_online.token_refresh_lock);
     if (ret == ESP_ERR_NOT_FOUND) {
         device_online_handle_rebind_required("device reset required");
@@ -606,21 +613,27 @@ esp_err_t device_online_get_cached_mqtt_token(device_auth_token_t *token)
 
 static esp_err_t device_online_connect(const device_online_credentials_t *credentials)
 {
-    device_auth_token_t token = {0};
+    device_auth_token_t *token = NULL;
     thing_mqtt_listener_handle_t listener = -1;
     bool owns_mqtt_client = false;
+    esp_err_t ret = ESP_OK;
 
     if (credentials == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    token = app_memory_calloc_psram(1, sizeof(*token));
+    if (token == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
     device_online_set_state(DEVICE_ONLINE_STATE_AUTHENTICATING, ESP_OK, "request mqtt token");
-    esp_err_t ret = device_online_get_cached_mqtt_token(&token);
+    ret = device_online_get_cached_mqtt_token(token);
     if (ret != ESP_OK) {
         if (ret != ESP_ERR_NOT_FOUND) {
             device_online_set_state(DEVICE_ONLINE_STATE_ERROR, ret, "mqtt token failed");
         }
-        return ret;
+        goto done;
     }
 
     device_online_set_state(DEVICE_ONLINE_STATE_MQTT_CONNECTING, ESP_OK, "mqtt connecting");
@@ -629,7 +642,7 @@ static esp_err_t device_online_connect(const device_online_credentials_t *creden
         thing_mqtt_client_config_t mqtt_config = {
             .broker_uri = s_online.config.mqtt_uri,
             .device_id = credentials->device_id,
-            .mqtt_token = token.mqtt_token,
+            .mqtt_token = token->mqtt_token,
             .heartbeat_interval_ms = s_online.config.heartbeat_interval_ms,
             .on_message = device_online_on_mqtt_message,
             .ctx = NULL,
@@ -644,14 +657,17 @@ static esp_err_t device_online_connect(const device_online_credentials_t *creden
     }
     if (ret != ESP_OK) {
         device_online_set_state(DEVICE_ONLINE_STATE_ERROR, ret, "mqtt start failed");
-        return ret;
+        goto done;
     }
     xSemaphoreTake(s_online.lock, portMAX_DELAY);
     s_online.owns_mqtt_client = owns_mqtt_client;
     s_online.mqtt_listener = listener;
     device_online_request_report_locked("mqtt-start");
     xSemaphoreGive(s_online.lock);
-    return ESP_OK;
+
+done:
+    free(token);
+    return ret;
 }
 
 static bool device_online_mqtt_token_refresh_due(device_online_credentials_t *credentials)
@@ -702,6 +718,8 @@ static bool device_online_take_token_reauth_request(device_online_credentials_t 
 static esp_err_t device_online_restart_owned_mqtt(const device_online_credentials_t *credentials,
                                                   bool force_token_refresh)
 {
+    device_auth_token_t *token = NULL;
+
     if (credentials == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -710,16 +728,21 @@ static esp_err_t device_online_restart_owned_mqtt(const device_online_credential
         device_online_invalidate_token();
     }
 
-    device_auth_token_t token = {0};
-    esp_err_t ret = device_online_get_cached_mqtt_token(&token);
+    token = app_memory_calloc_psram(1, sizeof(*token));
+    if (token == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = device_online_get_cached_mqtt_token(token);
     if (ret != ESP_OK) {
+        free(token);
         return ret;
     }
 
     thing_mqtt_client_config_t mqtt_config = {
         .broker_uri = s_online.config.mqtt_uri,
         .device_id = credentials->device_id,
-        .mqtt_token = token.mqtt_token,
+        .mqtt_token = token->mqtt_token,
         .heartbeat_interval_ms = s_online.config.heartbeat_interval_ms,
         .on_message = device_online_on_mqtt_message,
         .ctx = NULL,
@@ -735,19 +758,23 @@ static esp_err_t device_online_restart_owned_mqtt(const device_online_credential
         device_online_set_mqtt_connected(false);
         device_online_request_report("mqtt-restart");
     }
+    free(token);
     return ret;
 }
 
-static void device_online_monitor_loop(void)
+static void device_online_monitor_loop(device_online_credentials_t *credentials)
 {
+    if (credentials == NULL) {
+        return;
+    }
+
     while (!device_online_stopping() &&
            device_online_network_ready() &&
            !device_online_realtime_media_active()) {
-        device_online_credentials_t credentials = {0};
         uint8_t reason_code = 0;
-        if (device_online_take_token_reauth_request(&credentials, &reason_code)) {
+        if (device_online_take_token_reauth_request(credentials, &reason_code)) {
             device_online_set_state(DEVICE_ONLINE_STATE_AUTHENTICATING, ESP_OK, "reauth mqtt token");
-            esp_err_t ret = device_online_restart_owned_mqtt(&credentials, true);
+            esp_err_t ret = device_online_restart_owned_mqtt(credentials, true);
             if (ret != ESP_OK) {
                 if (ret != ESP_ERR_NOT_FOUND) {
                     device_online_set_state(DEVICE_ONLINE_STATE_ERROR, ret, "mqtt token self-heal failed");
@@ -757,9 +784,9 @@ static void device_online_monitor_loop(void)
             }
         }
 
-        if (device_online_mqtt_token_refresh_due(&credentials)) {
+        if (device_online_mqtt_token_refresh_due(credentials)) {
             device_online_set_state(DEVICE_ONLINE_STATE_AUTHENTICATING, ESP_OK, "refresh mqtt token");
-            esp_err_t ret = device_online_restart_owned_mqtt(&credentials, true);
+            esp_err_t ret = device_online_restart_owned_mqtt(credentials, true);
             if (ret != ESP_OK) {
                 if (ret != ESP_ERR_NOT_FOUND) {
                     device_online_set_state(DEVICE_ONLINE_STATE_ERROR, ret, "mqtt token refresh failed");
@@ -789,9 +816,14 @@ static void device_online_monitor_loop(void)
 static void device_online_task(void *arg)
 {
     (void)arg;
-    device_online_credentials_t credentials = {0};
+    device_online_credentials_t *credentials = app_memory_calloc_psram(1, sizeof(*credentials));
     esp_err_t ret = ESP_OK;
     bool mqtt_started = false;
+
+    if (credentials == NULL) {
+        device_online_set_state(DEVICE_ONLINE_STATE_ERROR, ESP_ERR_NO_MEM, "online workspace allocation failed");
+        goto done;
+    }
 
     if (!s_online.config.enabled) {
         device_online_set_state(DEVICE_ONLINE_STATE_DISABLED, ESP_OK, "online disabled");
@@ -814,7 +846,7 @@ static void device_online_task(void *arg)
         goto done;
     }
 
-    ret = device_online_get_cached_credentials(&credentials);
+    ret = device_online_get_cached_credentials(credentials);
     if (ret == ESP_ERR_NOT_FOUND) {
         device_online_set_device_id("");
         device_online_set_state(DEVICE_ONLINE_STATE_UNBOUND, ESP_OK, "device unbound");
@@ -825,11 +857,11 @@ static void device_online_task(void *arg)
         goto done;
     }
 
-    device_online_set_device_id(credentials.device_id);
-    ret = device_online_connect(&credentials);
+    device_online_set_device_id(credentials->device_id);
+    ret = device_online_connect(credentials);
     if (ret == ESP_OK) {
         mqtt_started = true;
-        device_online_monitor_loop();
+        device_online_monitor_loop(credentials);
     }
 
     if (mqtt_started) {
@@ -841,6 +873,7 @@ static void device_online_task(void *arg)
     }
 
 done:
+    free(credentials);
     xSemaphoreTake(s_online.lock, portMAX_DELAY);
     s_online.task = NULL;
     s_online.stopping = false;
@@ -856,13 +889,13 @@ esp_err_t device_online_init(const device_online_config_t *config)
     }
 
     if (s_online.lock == NULL) {
-        s_online.lock = xSemaphoreCreateMutexWithCaps(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_online.lock = xSemaphoreCreateMutexWithCaps(APP_SYNC_CAPS_CONTROL);
         if (s_online.lock == NULL) {
             return ESP_ERR_NO_MEM;
         }
     }
     if (s_online.token_refresh_lock == NULL) {
-        s_online.token_refresh_lock = xSemaphoreCreateMutexWithCaps(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_online.token_refresh_lock = xSemaphoreCreateMutexWithCaps(APP_SYNC_CAPS_CONTROL);
         if (s_online.token_refresh_lock == NULL) {
             return ESP_ERR_NO_MEM;
         }
@@ -1013,22 +1046,15 @@ esp_err_t device_online_start_async(const char *reason)
     s_online.stopping = false;
     s_online.snapshot.running = true;
     strlcpy(s_online.reason, reason != NULL ? reason : "manual", sizeof(s_online.reason));
+    /* This worker owns network state only; credential persistence is handled by
+     * the binding/NVS worker, so its large stack can stay in PSRAM. */
     BaseType_t task_ret = xTaskCreateWithCaps(device_online_task,
                                               "device_online",
                                               DEVICE_ONLINE_TASK_STACK_SIZE,
                                               NULL,
                                               DEVICE_ONLINE_TASK_PRIORITY,
                                               &s_online.task,
-                                              APP_TASK_STACK_CAPS_CONTROL);
-    if (task_ret != pdPASS) {
-        task_ret = xTaskCreateWithCaps(device_online_task,
-                                       "device_online",
-                                       DEVICE_ONLINE_TASK_STACK_SIZE,
-                                       NULL,
-                                       DEVICE_ONLINE_TASK_PRIORITY,
-                                       &s_online.task,
-                                       APP_TASK_STACK_CAPS_INTERNAL);
-    }
+                                              APP_TASK_STACK_CAPS_BACKGROUND);
     if (task_ret != pdPASS) {
         s_online.task = NULL;
         s_online.snapshot.running = false;

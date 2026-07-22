@@ -1,8 +1,14 @@
 #include "display_driver.h"
 
 #include "bsp/esp32_p4_wifi6_touch_lcd_35.h"
+#include "esp_cache.h"
 #include "esp_check.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
+#include "esp_memory_utils.h"
+#include "esp_timer.h"
+#include "sdkconfig.h"
 
 #include "app_task_affinity.h"
 #include "hardware_board.h"
@@ -10,7 +16,9 @@
 static const char *TAG = "display_driver";
 
 #define DISPLAY_DRIVER_ROTATION   LV_DISP_ROT_270
-#define DISPLAY_DRIVER_DRAW_LINES 4
+#define DISPLAY_DRIVER_DRAW_LINES 32
+#define DISPLAY_DRIVER_TRANSFER_LINES 4
+#define DISPLAY_DRIVER_LVGL_TASK_PRIORITY 15
 #define DISPLAY_DRIVER_TOUCH_SCROLL_LIMIT_PX  18
 #define DISPLAY_DRIVER_TOUCH_SCROLL_THROW     0
 #define DISPLAY_DRIVER_TOUCH_GESTURE_LIMIT_PX 45
@@ -18,6 +26,8 @@ static const char *TAG = "display_driver";
 static lv_disp_t *s_display;
 static lv_indev_t *s_touch_indev;
 static bool s_initialized;
+
+_Static_assert(LV_COLOR_DEPTH == 16, "direct LCD video requires RGB565 LVGL color depth");
 
 static void display_driver_configure_touch(lv_indev_t *indev)
 {
@@ -48,13 +58,18 @@ esp_err_t display_driver_init(display_driver_handles_t *handles)
 	bsp_display_cfg_t cfg = {
 		.lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
 		.buffer_size = BSP_LCD_V_RES * DISPLAY_DRIVER_DRAW_LINES,
-		.double_buffer = false,
+		.trans_size = BSP_LCD_V_RES * DISPLAY_DRIVER_TRANSFER_LINES,
+		.double_buffer = true,
 		.flags = {
+			/* Draw in PSRAM and copy normal UI traffic through one small internal
+			 * DMA transport buffer. Call video uses P4 PSRAM-direct SPI DMA and
+			 * does not consume this staging memory. */
 			.buff_dma = false,
 			.buff_spiram = true,
 		},
 	};
 	cfg.lvgl_port_cfg.task_stack = 12 * 1024;
+	cfg.lvgl_port_cfg.task_priority = DISPLAY_DRIVER_LVGL_TASK_PRIORITY;
 	cfg.lvgl_port_cfg.task_affinity = APP_TASK_CORE_UI;
 	cfg.lvgl_port_cfg.task_stack_caps = APP_TASK_STACK_CAPS_INTERNAL;
 
@@ -66,7 +81,6 @@ esp_err_t display_driver_init(display_driver_handles_t *handles)
 	ESP_RETURN_ON_FALSE(s_touch_indev != NULL, ESP_FAIL, TAG, "bsp touch init failed");
 	display_driver_configure_touch(s_touch_indev);
 	ESP_RETURN_ON_ERROR(bsp_display_backlight_on(), TAG, "backlight on failed");
-
 	s_initialized = true;
 	if (handles != NULL) {
 		handles->display = s_display;
@@ -74,12 +88,15 @@ esp_err_t display_driver_init(display_driver_handles_t *handles)
 	}
 
 	ESP_LOGI(TAG,
-		 "display ready: physical=%dx%d ui=%ux%u rotation=%u",
+		 "display ready: physical=%dx%d ui=%ux%u rotation=%u draw_buf=%uB buffers=2 "
+		 "caps=psram lvgl_transfer=%uB caps=internal-dma direct_video=psram-dma",
 		 BSP_LCD_H_RES,
 		 BSP_LCD_V_RES,
 		 display_driver_width(),
 		 display_driver_height(),
-		 (unsigned)DISPLAY_DRIVER_ROTATION);
+		 (unsigned)DISPLAY_DRIVER_ROTATION,
+		 (unsigned)(BSP_LCD_V_RES * DISPLAY_DRIVER_DRAW_LINES * sizeof(lv_color_t)),
+		 (unsigned)(BSP_LCD_V_RES * DISPLAY_DRIVER_TRANSFER_LINES * sizeof(lv_color_t)));
 	return ESP_OK;
 }
 
@@ -102,4 +119,65 @@ uint16_t display_driver_height(void)
 		return (uint16_t)lv_disp_get_ver_res(s_display);
 	}
 	return hardware_board_get_display_config()->height;
+}
+
+esp_err_t display_driver_blit_rgb565(uint16_t x,
+                                    uint16_t y,
+                                    uint16_t width,
+                                    uint16_t height,
+                                    const uint16_t *pixels,
+                                    uint32_t *elapsed_us)
+{
+	ESP_RETURN_ON_FALSE(s_initialized && s_display != NULL,
+				    ESP_ERR_INVALID_STATE,
+				    TAG,
+				    "display is not initialized");
+	ESP_RETURN_ON_FALSE(pixels != NULL && width > 0U && height > 0U,
+				    ESP_ERR_INVALID_ARG,
+				    TAG,
+				    "invalid direct LCD frame");
+	ESP_RETURN_ON_FALSE((uint32_t)x + width <= display_driver_width() &&
+					(uint32_t)y + height <= display_driver_height(),
+				    ESP_ERR_INVALID_SIZE,
+				    TAG,
+				    "direct LCD region is outside the display");
+
+	esp_lcd_panel_handle_t panel = bsp_display_get_panel_handle();
+	esp_lcd_panel_io_handle_t io = bsp_display_get_io_handle();
+	ESP_RETURN_ON_FALSE(panel != NULL && io != NULL,
+				    ESP_ERR_INVALID_STATE,
+				    TAG,
+				    "LCD handles are unavailable");
+
+	size_t transfer_size = (size_t)width * height * sizeof(*pixels);
+	ESP_RETURN_ON_FALSE(esp_ptr_external_ram(pixels) &&
+				    esp_ptr_dma_ext_capable(pixels),
+				    ESP_ERR_INVALID_ARG,
+				    TAG,
+				    "direct LCD frame is not PSRAM DMA capable");
+
+	int64_t started_us = esp_timer_get_time();
+	ESP_RETURN_ON_ERROR(esp_cache_msync((void *)pixels,
+					 transfer_size,
+					 ESP_CACHE_MSYNC_FLAG_DIR_C2M),
+				    TAG,
+				    "direct LCD cache sync failed");
+	ESP_RETURN_ON_ERROR(esp_lcd_panel_draw_bitmap(panel,
+					      x,
+					      y,
+					      x + width,
+					      y + height,
+					      pixels),
+				    TAG,
+				    "direct LCD draw failed");
+
+	/* The panel call queues one frame-sized PSRAM DMA transfer. Drain it before
+	 * the renderer releases this frame slot back to the converter. */
+	ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, -1, NULL, 0),
+				    TAG,
+				    "direct LCD DMA wait failed");
+	if (elapsed_us != NULL) {
+		*elapsed_us = (uint32_t)(esp_timer_get_time() - started_us);
+	}
+	return ESP_OK;
 }

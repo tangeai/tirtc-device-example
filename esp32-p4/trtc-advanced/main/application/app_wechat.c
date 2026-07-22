@@ -37,15 +37,6 @@ typedef struct {
 
 static app_wechat_contact_scan_state_t s_wechat_contact_scan;
 
-static void *app_wechat_calloc_prefer_psram(size_t count, size_t size)
-{
-	void *ptr = heap_caps_calloc(count, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-	if (ptr == NULL) {
-		ptr = calloc(count, size);
-	}
-	return ptr;
-}
-
 static void app_wechat_contact_add_task(void *arg)
 {
 	app_wechat_contact_add_task_ctx_t *task_ctx = (app_wechat_contact_add_task_ctx_t *)arg;
@@ -61,7 +52,7 @@ static void app_wechat_contact_add_task(void *arg)
 		}
 	}
 	free(task_ctx);
-	vTaskDelete(NULL);
+	vTaskDeleteWithCaps(NULL);
 }
 
 static void app_wechat_queue_scanned_contact_save(const char *open_id)
@@ -70,19 +61,21 @@ static void app_wechat_queue_scanned_contact_save(const char *open_id)
 		return;
 	}
 
-	app_wechat_contact_add_task_ctx_t *task_ctx = app_wechat_calloc_prefer_psram(1, sizeof(*task_ctx));
+	app_wechat_contact_add_task_ctx_t *task_ctx =
+		heap_caps_calloc(1, sizeof(*task_ctx), APP_MEMORY_CAPS_CONTROL);
 	if (task_ctx == NULL) {
 		ESP_LOGW(TAG, "wechat scanned contact save task alloc failed");
 		return;
 	}
 	strlcpy(task_ctx->open_id, open_id, sizeof(task_ctx->open_id));
 
-	BaseType_t task_ret = xTaskCreate(app_wechat_contact_add_task,
+	BaseType_t task_ret = xTaskCreateWithCaps(app_wechat_contact_add_task,
 					  "wechat_add_qr",
 					  APP_WECHAT_SCAN_ADD_TASK_STACK_SIZE,
 					  task_ctx,
 					  APP_WECHAT_SCAN_ADD_TASK_PRIORITY,
-					  NULL);
+					  NULL,
+					  APP_TASK_STACK_CAPS_INTERNAL);
 	if (task_ret != pdPASS) {
 		ESP_LOGW(TAG, "wechat scanned contact save task create failed");
 		free(task_ctx);

@@ -24,17 +24,22 @@ static void wifi_page_model_copy_text(char *dst, size_t dst_size, const char *sr
 void wifi_page_model_build(const display_status_t *status,
                                             wifi_page_model_t *model)
 {
-    display_status_t empty_status = {0};
-
     if (model == NULL) {
         return;
     }
 
-    if (status == NULL) {
-        status = &empty_status;
-    }
-
     memset(model, 0, sizeof(*model));
+    if (status == NULL) {
+        model->connection_color = DISPLAY_WIFI_COLOR_MUTED;
+        model->scan_color = DISPLAY_WIFI_COLOR_MUTED;
+        wifi_page_model_copy_text(model->connection_text,
+                                  sizeof(model->connection_text),
+                                  "WiFi offline");
+        wifi_page_model_copy_text(model->scan_text,
+                                  sizeof(model->scan_text),
+                                  "0 APs");
+        return;
+    }
 
     if (status->network_connected) {
         model->connection_color = DISPLAY_WIFI_COLOR_SUCCESS;

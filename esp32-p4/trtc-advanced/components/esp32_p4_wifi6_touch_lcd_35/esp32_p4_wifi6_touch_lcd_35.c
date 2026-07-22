@@ -470,7 +470,6 @@ esp_err_t bsp_display_new_with_handles(const bsp_display_config_t *config, bsp_l
 
     // 安装面板IO
     ESP_LOGD(TAG, "Install panel IO");
-    static esp_lcd_panel_io_handle_t io_handle = NULL;
     const esp_lcd_panel_io_spi_config_t io_config = {
         .dc_gpio_num = BSP_LCD_DC,
         .cs_gpio_num = BSP_LCD_SPI_CS,
@@ -479,6 +478,9 @@ esp_err_t bsp_display_new_with_handles(const bsp_display_config_t *config, bsp_l
         .lcd_param_bits = 8,
         .spi_mode = 0,
         .trans_queue_depth = 20,
+        .flags = {
+            .psram_dma_direct = true,
+        },
     };
 
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_config, &io_handle));
@@ -638,6 +640,7 @@ static lv_display_t *bsp_display_lcd_init(const bsp_display_cfg_t *cfg)
         .io_handle = io_handle,
         .panel_handle = panel_handle,
         .buffer_size = cfg->buffer_size,
+        .trans_size = cfg->trans_size,
         .double_buffer = cfg->double_buffer,
         .hres = BSP_LCD_H_RES,
         .vres = BSP_LCD_V_RES,
@@ -756,6 +759,11 @@ void bsp_display_del(void)
 esp_lcd_panel_handle_t bsp_display_get_panel_handle(void)
 {
     return panel_handle;
+}
+
+esp_lcd_panel_io_handle_t bsp_display_get_io_handle(void)
+{
+    return io_handle;
 }
 
 #endif // (BSP_CONFIG_NO_GRAPHIC_LIB == 0)

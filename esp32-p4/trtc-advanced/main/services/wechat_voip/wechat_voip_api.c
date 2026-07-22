@@ -9,9 +9,10 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "thing_http_client.h"
+#include "wechat_voip_config.h"
 
 static const char *TAG = "wx_voip_api";
-static const char *ACTIVE_CALL_ROOM_TYPE = "voice";
+static const char *ACTIVE_CALL_ROOM_TYPE = WECHAT_VOIP_LOCAL_VIDEO_ENABLE ? "video" : "voice";
 
 enum {
     VOIP_HTTP_URL_MAX_LEN = 256,
@@ -132,17 +133,32 @@ esp_err_t wechat_voip_api_report_profile(const char *api_base, const char *mqtt_
     char response[VOIP_HTTP_RESPONSE_MAX_LEN] = {0};
     int status = 0;
     char body[192];
+    const bool video_enabled = WECHAT_VOIP_LOCAL_VIDEO_ENABLE != 0;
+    const unsigned video_width = video_enabled ? WECHAT_VOIP_VIDEO_WIDTH : 1U;
+    const unsigned video_height = video_enabled ? WECHAT_VOIP_VIDEO_HEIGHT : 1U;
+    const char *video_media = video_enabled ? WECHAT_VOIP_VIDEO_MEDIA : "";
     snprintf(body,
              sizeof(body),
-             "{\"screen_width\":1,\"screen_height\":1,"
+             "{\"screen_width\":%u,\"screen_height\":%u,"
              "\"audio_rate\":%u,\"audio_channels\":%u,"
-             "\"video_mt\":\"\",\"no_video\":true,"
+             "\"video_mt\":\"%s\",\"no_video\":%s,"
              "\"calling_timeout_sec\":%u}",
+             video_width,
+             video_height,
              DEVICE_AUDIO_RATE,
              DEVICE_AUDIO_CHANNELS,
+             video_media,
+             video_enabled ? "false" : "true",
              DEVICE_CALLING_TIMEOUT_SEC);
 
-    ESP_LOGI(TAG, "report voip profile");
+    ESP_LOGI(TAG,
+             "report voip profile: video=%u codec=%s size=%ux%u audio=%uHz/%uch",
+             video_enabled ? 1U : 0U,
+             video_enabled ? video_media : "none",
+             video_width,
+             video_height,
+             (unsigned)DEVICE_AUDIO_RATE,
+             (unsigned)DEVICE_AUDIO_CHANNELS);
     esp_err_t ret = voip_http_request(api_base,
                                       "/v1/voip/device/profile",
                                       "POST",
@@ -245,6 +261,7 @@ esp_err_t wechat_voip_api_request_call(const char *api_base,
     }
 
     char body[VOIP_HTTP_BODY_MAX_LEN];
+    const unsigned local_camera_status = WECHAT_VOIP_LOCAL_VIDEO_ENABLE ? 1U : 0U;
     int written = 0;
     if (target->app_id[0] != '\0') {
         written = snprintf(body,
@@ -255,14 +272,17 @@ esp_err_t wechat_voip_api_request_call(const char *api_base,
                            "\"wx_model_id\":\"%s\","
                            "\"wx_room_type\":\"%s\","
                            "\"wx_version_type\":%d,"
-                           "\"wx_caller_camera_status\":0,"
+                           "\"calling_timeout_sec\":%u,"
+                           "\"wx_caller_camera_status\":%u,"
                            "\"wx_listener_camera_status\":0}",
                            device_id,
                            target->app_id,
                            target->openid,
                            target->model_id,
                            ACTIVE_CALL_ROOM_TYPE,
-                           wx_version_type);
+                           wx_version_type,
+                           (unsigned)DEVICE_CALLING_TIMEOUT_SEC,
+                           local_camera_status);
     } else {
         written = snprintf(body,
                            sizeof(body),
@@ -271,13 +291,16 @@ esp_err_t wechat_voip_api_request_call(const char *api_base,
                            "\"wx_model_id\":\"%s\","
                            "\"wx_room_type\":\"%s\","
                            "\"wx_version_type\":%d,"
-                           "\"wx_caller_camera_status\":0,"
+                           "\"calling_timeout_sec\":%u,"
+                           "\"wx_caller_camera_status\":%u,"
                            "\"wx_listener_camera_status\":0}",
                            device_id,
                            target->openid,
                            target->model_id,
                            ACTIVE_CALL_ROOM_TYPE,
-                           wx_version_type);
+                           wx_version_type,
+                           (unsigned)DEVICE_CALLING_TIMEOUT_SEC,
+                           local_camera_status);
     }
     if (written <= 0 || written >= (int)sizeof(body)) {
         return ESP_ERR_INVALID_SIZE;
@@ -285,9 +308,14 @@ esp_err_t wechat_voip_api_request_call(const char *api_base,
 
     char response[VOIP_HTTP_RESPONSE_MAX_LEN] = {0};
     int status = 0;
-    ESP_LOGI(TAG, "request wechat call: openid_len=%u model_id_len=%u",
+    ESP_LOGI(TAG,
+             "request wechat call: room=%s local_camera=%u openid_len=%u model_id_len=%u version_type=%d calling_timeout=%us",
+             ACTIVE_CALL_ROOM_TYPE,
+             local_camera_status,
              (unsigned)strlen(target->openid),
-             (unsigned)strlen(target->model_id));
+             (unsigned)strlen(target->model_id),
+             wx_version_type,
+             (unsigned)DEVICE_CALLING_TIMEOUT_SEC);
     esp_err_t ret = voip_http_request(api_base,
                                       "/v1/voip/device/call",
                                       "POST",

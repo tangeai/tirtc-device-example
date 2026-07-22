@@ -8,6 +8,7 @@
 #define BINDING_MQTT_DEVICE_KEY_MAX_LEN 128
 
 typedef void (*binding_mqtt_ready_cb_t)(void *ctx);
+typedef bool (*binding_mqtt_cancel_cb_t)(void *ctx);
 
 typedef struct {
     const char *broker_uri;
@@ -18,6 +19,8 @@ typedef struct {
     uint32_t ready_timeout_ms;
     binding_mqtt_ready_cb_t ready_cb;
     void *ready_ctx;
+    binding_mqtt_cancel_cb_t should_cancel;
+    void *cancel_ctx;
 } binding_mqtt_client_config_t;
 
 typedef struct {

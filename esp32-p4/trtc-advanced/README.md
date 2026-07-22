@@ -6,14 +6,14 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 示例版本 | 1.0.2 |
-| 发布时间 | 2026-07-09 |
+| 示例版本 | 1.1.0 |
+| 发布时间 | 2026-07-23 |
 | 目标芯片 | ESP32-P4 |
 | 目标开发板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |
 | ESP-IDF | 5.5.4 |
 | TiRTC SDK | 2.2.0 |
 | 默认视频链路 | OV5647 YUV420 -> ESP32-P4 H264 -> TiRTC |
-| 默认上行参数 | 1920x1080, 20 fps, 6 Mbps |
+| 默认上行参数 | 1280x960, 20 fps, 4 Mbps |
 
 ## 核心能力
 
@@ -22,8 +22,22 @@
 - TiRTC 设备上线、远端呼入、连接断开、音视频订阅和关键帧请求。
 - 摄像头 H264 上行：P4 侧使用 YUV420 输入和硬件 H264 编码，不启用本地摄像头预览抢占资源。
 - 本机麦克风上行和远端音频播放。
-- 微信 VoIP、AI Chat、OTA、设置和调试信息页。
+- P4 设备间双向音视频通话：本机 H264 上行、远端 H264 解码、PSRAM 直通 LCD 显示和低延迟挂断。
+- IPC 查看、设备通话、微信 VoIP 和 AI Chat 统一使用按业务所有权启停的 AEC 策略。
+- 微信 VoIP 支持 PCMA 双向音频和本机摄像头 H264 主动上行，并提供 AI Chat、OTA、设置和调试信息页。
 - IPC 查看页展示绑定二维码、设备 ID、分辨率、帧率和码率。
+
+## 设备上线流程
+
+1. Wi-Fi 联网并完成系统校时。
+2. 从 `https://ep-open.tange-ai.com/services` 获取设备、MQTT、VoIP、AI、呼叫和 TiRTC 服务地址；发现失败时使用编译期备用地址。
+3. 未绑定设备向 `/v1/device/report` 只上报物理 MAC，临时 MQTT 完成订阅后再展示 6 位绑定码。
+4. 收到 `auth_grant` 后先发送 QoS 1 ACK，并等待 broker PUBACK，再保存设备凭证并关闭临时连接。
+5. 已绑定设备使用 `X-Device-Id`、`X-Timestamp`、`X-Nonce`、`X-Signature` 和 `X-Mac` 获取 MQTT token。
+6. 正式 MQTT 长连接订阅 `/cmd` 和 `/notify`，通过 `/ack` 确认命令，并使用 `/up` 上报心跳和状态。
+7. 设备在线后设置 TiRTC 的 secret key 和物理 client ID，再以 device ID 调用 `TiRtcStart()`；以 `SYS_STARTED` 回调作为 SDK 已上线的判据。
+
+服务端解绑通知会保留本地设备凭证，待正式 MQTT ACK 确认后走签名 Report 重新核对映射，不在设备端直接清除身份。
 
 ## 工程结构
 
@@ -75,9 +89,14 @@ cmd /c "C:\esp\v5.5.4\esp-idf\export.bat >nul && idf.py -p COMx flash monitor"
 当前默认策略：
 
 - `CONFIG_FREERTOS_HZ=1000`
-- `CONFIG_APP_RTC_H264_BITRATE=6000000`
+- `CONFIG_APP_RTC_H264_BITRATE=4000000`
 - `CONFIG_APP_RTC_H264_FPS=20`
 - `CONFIG_APP_RTC_H264_GOP=40`
+- `CONFIG_APP_DEVICE_CALL_VIDEO_WIDTH=480`
+- `CONFIG_APP_DEVICE_CALL_VIDEO_HEIGHT=320`
+- `CONFIG_APP_DEVICE_CALL_VIDEO_FPS=15`
+- `CONFIG_APP_DEVICE_CALL_VIDEO_BITRATE=2000000`
+- `CONFIG_APP_AUDIO_AEC_ENABLE=y`
 - `CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE` 默认关闭
 - `CONFIG_APP_RTC_WAIT_VIDEO_SUBSCRIBE_BEFORE_CAPTURE` 默认关闭
 - `TIRTC_AUTO_PUSH_LOCAL_MEDIA_ON_CONNECT=1`
@@ -102,7 +121,7 @@ cmd /c "C:\esp\v5.5.4\esp-idf\export.bat >nul && idf.py -p COMx flash monitor"
 
 发布脚本会生成两类资产：
 
-- `release_assets/web-flash/v1.0.2/`：维护者多地址烧录资产、`flash_args.txt`、`SHA256SUMS.txt`。
-- `release_assets/web-install/v1.0.2/`：如本机 esptool 可用，会生成 0x0 完整镜像和一键烧录 zip。
+- `release_assets/web-flash/v1.1.0/`：维护者多地址烧录资产、`flash_args.txt`、`SHA256SUMS.txt`。
+- `release_assets/web-install/v1.1.0/`：如本机 esptool 可用，会生成 0x0 完整镜像和一键烧录 zip。
 
 发布前请确认 README、release note、版本号、TiRTC SDK 版本、构建产物和 SHA256 一致。

@@ -19,20 +19,24 @@ static const char *TAG = "media_sink";
 
 #define MEDIA_SINK_AUDIO_QUEUE_LEN 16
 #define MEDIA_SINK_AUDIO_TASK_STACK (5 * 1024)
-#define MEDIA_SINK_AUDIO_TASK_PRIORITY 13
+/* Speaker playout is deadline-driven: one late 20ms packet is audible and
+ * cannot be recovered by a deeper queue. Keep it ahead of video decode. */
+#define MEDIA_SINK_AUDIO_TASK_PRIORITY 17
 #define MEDIA_SINK_AUDIO_TASK_CORE APP_TASK_CORE_AUDIO
 #define MEDIA_SINK_AUDIO_BACKLOG_TRIM_THRESHOLD 12
 #define MEDIA_SINK_AUDIO_BACKLOG_TARGET_PACKETS 4
-#define MEDIA_SINK_AUDIO_DRAIN_BURST_MAX 0
+#define MEDIA_SINK_AUDIO_DRAIN_BURST_MAX 4
 #define MEDIA_SINK_AUDIO_PLAY_CHUNK_MS 20
 #define MEDIA_SINK_AUDIO_REALTIME_PREBUFFER_MS 20
 #define MEDIA_SINK_AUDIO_BULK_PREBUFFER_MS 200
 #define MEDIA_SINK_AUDIO_PCM_BUFFER_MS 1600
 #define MEDIA_SINK_AUDIO_REALTIME_PACKET_MAX_MS 60
 #define MEDIA_SINK_AUDIO_REALTIME_TARGET_MS 60
+#define MEDIA_SINK_AUDIO_REALTIME_TRIM_HYSTERESIS_MS 40
 #define MEDIA_SINK_AUDIO_JITTER_BOOST_STEP_MS 20
 #define MEDIA_SINK_AUDIO_JITTER_BOOST_MAX_MS 40
 #define MEDIA_SINK_AUDIO_BULK_TARGET_MS 240
+#define MEDIA_SINK_AUDIO_BULK_TRIM_HYSTERESIS_MS 80
 #define MEDIA_SINK_AUDIO_SLOW_PLAY_US 25000
 
 typedef struct {
@@ -131,9 +135,19 @@ static uint32_t media_sink_audio_latency_target_ms(uint32_t source_packet_ms)
 static uint32_t media_sink_audio_prebuffer_ms(uint32_t source_packet_ms)
 {
     if (source_packet_ms > 0U && source_packet_ms <= MEDIA_SINK_AUDIO_REALTIME_PACKET_MAX_MS) {
-        return MEDIA_SINK_AUDIO_REALTIME_PREBUFFER_MS;
+        uint32_t prebuffer_ms = MEDIA_SINK_AUDIO_REALTIME_PREBUFFER_MS + s_audio_jitter_boost_ms;
+        uint32_t packet_floor_ms = source_packet_ms + MEDIA_SINK_AUDIO_PLAY_CHUNK_MS;
+
+        return prebuffer_ms > packet_floor_ms ? prebuffer_ms : packet_floor_ms;
     }
     return MEDIA_SINK_AUDIO_BULK_PREBUFFER_MS;
+}
+
+static uint32_t media_sink_audio_trim_hysteresis_ms(uint32_t source_packet_ms)
+{
+    return source_packet_ms > 0U && source_packet_ms <= MEDIA_SINK_AUDIO_REALTIME_PACKET_MAX_MS ?
+           MEDIA_SINK_AUDIO_REALTIME_TRIM_HYSTERESIS_MS :
+           MEDIA_SINK_AUDIO_BULK_TRIM_HYSTERESIS_MS;
 }
 
 static void media_sink_set_last_source_packet_ms(uint32_t source_packet_ms)
@@ -174,11 +188,7 @@ static void media_sink_audio_decay_jitter_boost(void)
 
 static uint8_t *media_sink_alloc_audio_buffer(size_t size)
 {
-    uint8_t *buffer = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (buffer == NULL) {
-        buffer = malloc(size);
-    }
-    return buffer;
+    return app_memory_alloc_psram(size);
 }
 
 static esp_err_t media_sink_ensure_audio_playback_buffers(void)
@@ -282,6 +292,10 @@ static esp_err_t media_sink_append_audio_pcm(const uint8_t *data,
     const size_t latency_target_bytes =
         media_sink_audio_bytes_for_duration_ms(media_sink_audio_latency_target_ms(source_packet_ms),
                                                         playback_format);
+    const size_t trim_high_water_bytes =
+        latency_target_bytes +
+        media_sink_audio_bytes_for_duration_ms(media_sink_audio_trim_hysteresis_ms(source_packet_ms),
+                                               playback_format);
     const uint8_t *write_data = data;
     uint32_t trimmed_ms = 0;
     uint32_t buffered_ms = 0;
@@ -321,8 +335,14 @@ static esp_err_t media_sink_append_audio_pcm(const uint8_t *data,
         s_audio_last_source_packet_ms = source_packet_ms;
     }
 
-    if (latency_target_bytes > 0U && s_audio_pcm_used_bytes > latency_target_bytes) {
+    if (latency_target_bytes > 0U && trim_high_water_bytes > latency_target_bytes &&
+        s_audio_pcm_used_bytes > trim_high_water_bytes) {
         size_t drop_bytes = s_audio_pcm_used_bytes - latency_target_bytes;
+        if (play_chunk_bytes > 0U && drop_bytes > play_chunk_bytes) {
+            /* Converge one playout chunk at a time. A large head cut creates
+             * an audible gap even though the queue still contains valid PCM. */
+            drop_bytes = play_chunk_bytes;
+        }
         if (play_chunk_bytes > 0 && (drop_bytes % play_chunk_bytes) != 0) {
             drop_bytes += play_chunk_bytes - (drop_bytes % play_chunk_bytes);
         }
@@ -560,9 +580,6 @@ static void media_sink_maybe_log_audio_rate(void)
                  (unsigned)media_sink_audio_duration_ms_for_bytes(
                      media_sink_get_audio_pcm_used_bytes(), speaker_get_playback_format()),
                  (unsigned)s_audio_jitter_boost_ms);
-        if (s_audio_play_drop_packets_in_window == 0) {
-            media_sink_audio_decay_jitter_boost();
-        }
     } else if (s_audio_rx_packets_in_window > 0 && s_audio_play_ok_packets_in_window == 0) {
         ESP_LOGI(TAG,
                  "remote audio buffering: rx=%up/%ums queued=%u buffered_ms=%u prebuffer_ms=%u",
@@ -706,6 +723,7 @@ static void media_sink_audio_task(void *ctx)
                                                         playback_format);
     bool playback_started = false;
     media_sink_audio_packet_t packet = {0};
+    TickType_t next_play_tick = 0;
 
     while (true) {
         BaseType_t received_packet = xQueueReceive(s_audio_queue,
@@ -739,10 +757,12 @@ static void media_sink_audio_task(void *ctx)
 
         if (!playback_started && buffered_bytes >= prebuffer_bytes) {
             playback_started = true;
+            next_play_tick = xTaskGetTickCount();
         }
 
         if (playback_started && buffered_bytes < play_chunk_bytes) {
             playback_started = false;
+            next_play_tick = 0;
             media_sink_audio_note_underflow();
         }
 
@@ -757,7 +777,13 @@ static void media_sink_audio_task(void *ctx)
 
             if (play_ret != ESP_OK) {
                 playback_started = false;
+                next_play_tick = 0;
                 continue;
+            }
+
+            TickType_t now_tick = xTaskGetTickCount();
+            if (next_play_tick != 0 && (int32_t)(now_tick - next_play_tick) < 0) {
+                vTaskDelay(next_play_tick - now_tick);
             }
 
             output_level = media_sink_audio_level_percent((const int16_t *)play_chunk, play_chunk_bytes);
@@ -789,6 +815,7 @@ static void media_sink_audio_task(void *ctx)
                          MEDIA_SINK_AUDIO_PLAY_CHUNK_MS,
                          (unsigned)buffered_ms_before_play);
                 playback_started = false;
+                next_play_tick = 0;
             } else {
                 if (!s_remote_audio_playback_started_logged) {
                     s_remote_audio_playback_started_logged = true;
@@ -801,6 +828,17 @@ static void media_sink_audio_task(void *ctx)
                 }
                 s_audio_play_ok_packets_in_window++;
                 s_audio_play_ok_ms_in_window += MEDIA_SINK_AUDIO_PLAY_CHUNK_MS;
+            }
+
+            if (play_ret == ESP_OK || play_ret == ESP_ERR_TIMEOUT) {
+                const TickType_t play_period = pdMS_TO_TICKS(MEDIA_SINK_AUDIO_PLAY_CHUNK_MS);
+                now_tick = xTaskGetTickCount();
+                if (next_play_tick == 0 ||
+                    (int32_t)(now_tick - next_play_tick) > (int32_t)(play_period * 2U)) {
+                    next_play_tick = now_tick + play_period;
+                } else {
+                    next_play_tick += play_period;
+                }
             }
 
             if (play_ret == ESP_OK && play_elapsed_us > MEDIA_SINK_AUDIO_SLOW_PLAY_US) {
@@ -835,10 +873,7 @@ esp_err_t media_sink_init(void)
 
     s_audio_queue = xQueueCreateWithCaps(MEDIA_SINK_AUDIO_QUEUE_LEN,
                                          sizeof(media_sink_audio_packet_t),
-                                         APP_QUEUE_CAPS_BACKGROUND);
-    if (s_audio_queue == NULL) {
-        s_audio_queue = xQueueCreate(MEDIA_SINK_AUDIO_QUEUE_LEN, sizeof(media_sink_audio_packet_t));
-    }
+                                         APP_QUEUE_CAPS_CONTROL);
     ESP_RETURN_ON_FALSE(s_audio_queue != NULL, ESP_ERR_NO_MEM, TAG, "audio queue alloc failed");
 
     BaseType_t audio_ok = xTaskCreatePinnedToCoreWithCaps(media_sink_audio_task,
@@ -896,10 +931,7 @@ esp_err_t media_sink_submit_remote_audio(const uint8_t *data,
         .format = *format,
         .data_len = data_len,
     };
-    packet.data = heap_caps_malloc(data_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (packet.data == NULL) {
-        packet.data = heap_caps_malloc(data_len, MALLOC_CAP_8BIT);
-    }
+    packet.data = app_memory_alloc_psram(data_len);
     ESP_RETURN_ON_FALSE(packet.data != NULL, ESP_ERR_NO_MEM, TAG, "audio packet alloc failed");
     memcpy(packet.data, data, data_len);
 

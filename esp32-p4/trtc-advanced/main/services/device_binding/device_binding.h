@@ -31,8 +31,6 @@ typedef struct {
 typedef esp_err_t (*device_binding_load_credentials_cb_t)(device_binding_credentials_t *credentials,
                                                           void *ctx);
 
-typedef esp_err_t (*device_binding_clear_credentials_cb_t)(void *ctx);
-
 typedef struct {
     bool enabled;
     const char *api_base;
@@ -40,7 +38,6 @@ typedef struct {
     uint32_t wait_timeout_ms;
     device_binding_load_credentials_cb_t load_credentials;
     device_binding_save_credentials_cb_t save_credentials;
-    device_binding_clear_credentials_cb_t clear_credentials;
     void *ctx;
 } device_binding_config_t;
 

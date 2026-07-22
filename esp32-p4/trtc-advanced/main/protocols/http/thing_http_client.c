@@ -70,6 +70,9 @@ static esp_http_client_method_t thing_http_method_from_string(const char *method
     if (method != NULL && strcmp(method, "GET") == 0) {
         return HTTP_METHOD_GET;
     }
+    if (method != NULL && strcmp(method, "PUT") == 0) {
+        return HTTP_METHOD_PUT;
+    }
     return HTTP_METHOD_POST;
 }
 
@@ -107,7 +110,8 @@ esp_err_t thing_http_request_json(const thing_http_request_t *request,
     int64_t start_us = esp_timer_get_time();
     ESP_LOGI(TAG,
              "request begin: method=%s timeout=%ums internal_free=%u largest=%u",
-             config.method == HTTP_METHOD_GET ? "GET" : "POST",
+             config.method == HTTP_METHOD_GET ? "GET" :
+             config.method == HTTP_METHOD_PUT ? "PUT" : "POST",
              (unsigned)timeout_ms,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
@@ -125,7 +129,7 @@ esp_err_t thing_http_request_json(const thing_http_request_t *request,
             esp_http_client_set_header(client, header->name, header->value);
         }
     }
-    if (config.method == HTTP_METHOD_POST) {
+    if (config.method == HTTP_METHOD_POST || config.method == HTTP_METHOD_PUT) {
         const char *body = request->body != NULL ? request->body : "";
         esp_http_client_set_header(client, "Content-Type", "application/json");
         esp_http_client_set_post_field(client, body, (int)strlen(body));

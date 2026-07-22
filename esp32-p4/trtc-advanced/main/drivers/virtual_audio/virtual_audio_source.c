@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "esp_heap_caps.h"
+#include "app_memory_policy.h"
 
 #define VIRTUAL_AUDIO_SAMPLE_RATE_HZ 8000U
 #define VIRTUAL_AUDIO_CHANNELS       1U
@@ -27,11 +28,7 @@ static int virtual_audio_source_reserve(virtual_audio_source_t *source)
         return DEVICE_VIDEO_OK;
     }
 
-    new_buffer = (uint8_t *)heap_caps_malloc(VIRTUAL_AUDIO_PACKET_BYTES,
-                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (new_buffer == NULL) {
-        new_buffer = (uint8_t *)malloc(VIRTUAL_AUDIO_PACKET_BYTES);
-    }
+    new_buffer = (uint8_t *)app_memory_alloc_psram(VIRTUAL_AUDIO_PACKET_BYTES);
     if (new_buffer == NULL) {
         return DEVICE_VIDEO_ERR_IO;
     }

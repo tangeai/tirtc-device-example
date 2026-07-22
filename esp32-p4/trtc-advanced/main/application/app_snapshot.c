@@ -2,14 +2,15 @@
 
 #include <string.h>
 
-#include "esp_heap_caps.h"
-
+#include "app_ai_chat_config.h"
+#include "app_memory_policy.h"
 #include "app_rtc_config.h"
 #include "ai_chat.h"
 #include "audio_device.h"
 #include "camera_pipeline.h"
 #include "device.h"
 #include "device_binding.h"
+#include "device_call.h"
 #include "device_online.h"
 #include "media_governor.h"
 #include "network.h"
@@ -25,9 +26,7 @@ static ai_chat_snapshot_t *app_snapshot_ai_chat_buffer(void)
 	static ai_chat_snapshot_t *ai;
 
 	if (ai == NULL) {
-		ai = (ai_chat_snapshot_t *)heap_caps_calloc(1,
-							    sizeof(*ai),
-							    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+		ai = (ai_chat_snapshot_t *)app_memory_calloc_psram(1, sizeof(*ai));
 	}
 	return ai;
 }
@@ -229,6 +228,7 @@ static void app_snapshot_fill_ai_chat(app_ai_chat_snapshot_t *ai_snapshot)
 			sizeof(ai_snapshot->messages[index].text));
 	}
 	strlcpy(ai_snapshot->status, ai->status, sizeof(ai_snapshot->status));
+	ai_snapshot->avatar = app_ai_chat_config_get_avatar();
 }
 
 static void app_snapshot_fill_binding(app_device_binding_snapshot_t *binding_snapshot)
@@ -275,6 +275,49 @@ static void app_snapshot_fill_call_contacts(app_call_contacts_snapshot_t *contac
 	}
 
 	app_get_call_contacts(contacts_snapshot);
+}
+
+static app_call_state_t app_snapshot_call_state_from_service(device_call_state_t state)
+{
+	switch (state) {
+	case DEVICE_CALL_STATE_OUTGOING:
+		return APP_CALL_STATE_OUTGOING;
+	case DEVICE_CALL_STATE_INCOMING:
+		return APP_CALL_STATE_INCOMING;
+	case DEVICE_CALL_STATE_CONNECTING:
+		return APP_CALL_STATE_CONNECTING;
+	case DEVICE_CALL_STATE_IN_CALL:
+		return APP_CALL_STATE_IN_CALL;
+	case DEVICE_CALL_STATE_ERROR:
+		return APP_CALL_STATE_ERROR;
+	case DEVICE_CALL_STATE_IDLE:
+	default:
+		return APP_CALL_STATE_IDLE;
+	}
+}
+
+static void app_snapshot_fill_call(app_snapshot_t *snapshot)
+{
+	device_call_snapshot_t call = {0};
+
+	if (snapshot == NULL) {
+		return;
+	}
+
+	device_call_get_snapshot(&call);
+	snapshot->call.state = app_snapshot_call_state_from_service(call.state);
+	snapshot->call.type = strcmp(call.call_type, "video") == 0 ?
+		APP_CALL_TYPE_VIDEO : APP_CALL_TYPE_AUDIO;
+	snapshot->call.pending_incoming = call.pending_incoming;
+	snapshot->call.last_error = call.last_error;
+	strlcpy(snapshot->call.peer_device_id,
+		call.peer_device_id,
+		sizeof(snapshot->call.peer_device_id));
+	strlcpy(snapshot->call.room_id, call.room_id, sizeof(snapshot->call.room_id));
+	strlcpy(snapshot->call.message, call.message, sizeof(snapshot->call.message));
+	app_call_start_apply_snapshot(&snapshot->call);
+	/* Device-call UI only consumes the ThingConnect incoming-call state. */
+	snapshot->rtc.incoming_call_pending = snapshot->call.pending_incoming;
 }
 
 static app_wechat_call_state_t app_snapshot_wechat_call_state_from_service(wechat_voip_call_state_t state)
@@ -338,6 +381,7 @@ void app_snapshot_get(app_snapshot_t *snapshot)
 	app_snapshot_fill_test(&snapshot->test);
 	app_snapshot_fill_ota(&snapshot->ota);
 	app_snapshot_fill_ai_chat(&snapshot->ai_chat);
+	app_snapshot_fill_call(snapshot);
 	app_snapshot_fill_call_contacts(&snapshot->call_contacts);
 	app_snapshot_fill_wechat(&snapshot->wechat);
 }

@@ -2,12 +2,15 @@
 
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs.h"
+#include "app_task_affinity.h"
 #include "platform_storage.h"
 #include "tirtc_session.h"
 
@@ -44,7 +47,7 @@ typedef struct {
     uint8_t contact_count;
 } wechat_voip_contacts_runtime_t;
 
-static wechat_voip_contacts_runtime_t s_contacts;
+static EXT_RAM_BSS_ATTR wechat_voip_contacts_runtime_t s_contacts;
 
 static void copy_str(char *dst, size_t dst_size, const char *src)
 {
@@ -203,7 +206,7 @@ static void contact_save_task(void *arg)
             break;
         }
     }
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);
 }
 
 static void request_save(const char *reason)
@@ -226,12 +229,13 @@ static void request_save(const char *reason)
     }
 
     TaskHandle_t task = NULL;
-    BaseType_t ret = xTaskCreate(contact_save_task,
-                                 "wx_contact_save",
-                                 CONTACT_SAVE_TASK_STACK,
-                                 NULL,
-                                 3,
-                                 &task);
+    BaseType_t ret = xTaskCreateWithCaps(contact_save_task,
+                                         "wx_contact_save",
+                                         CONTACT_SAVE_TASK_STACK,
+                                         NULL,
+                                         3,
+                                         &task,
+                                         APP_TASK_STACK_CAPS_INTERNAL);
     xSemaphoreTake(s_contacts.lock, portMAX_DELAY);
     if (ret == pdPASS) {
         s_contacts.save_task = task;
@@ -247,7 +251,7 @@ static void request_save(const char *reason)
 esp_err_t wechat_voip_contacts_init(void)
 {
     if (s_contacts.lock == NULL) {
-        s_contacts.lock = xSemaphoreCreateMutex();
+        s_contacts.lock = xSemaphoreCreateMutexWithCaps(APP_SYNC_CAPS_CONTROL);
         if (s_contacts.lock == NULL) {
             return ESP_ERR_NO_MEM;
         }

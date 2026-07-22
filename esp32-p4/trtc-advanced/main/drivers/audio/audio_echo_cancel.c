@@ -30,13 +30,12 @@
 #define AUDIO_AEC_REF_RING_MASK               (AUDIO_AEC_REF_RING_SAMPLES - 1U)
 #define AUDIO_AEC_OUT_FIFO_SAMPLES            2048U
 #define AUDIO_AEC_OUT_FIFO_MASK               (AUDIO_AEC_OUT_FIFO_SAMPLES - 1U)
-#define AUDIO_AEC_REF_DELAY_MS                80U
+#define AUDIO_AEC_REF_DELAY_MS                ((uint32_t)APP_CONFIG_AUDIO_AEC_REF_DELAY_MS)
 #define AUDIO_AEC_REF_DELAY_SAMPLES           ((AUDIO_AEC_SAMPLE_RATE_HZ * AUDIO_AEC_REF_DELAY_MS) / 1000U)
 #define AUDIO_AEC_REF_ACTIVE_US               500000LL
 #define AUDIO_AEC_REF_ACTIVE_PEAK             64U
-#define AUDIO_AEC_PROFILE_NAME                "max-fd-veryaggr"
+#define AUDIO_AEC_PROFILE_NAME                "fd-high-perf-aggr"
 #define AUDIO_AEC_FILTER_LENGTH               4
-#define AUDIO_AEC_FALLBACK_FILTER_LENGTH      2
 #define AUDIO_AEC_BUFFER_ALIGNMENT            16U
 #define AUDIO_AEC_PSRAM_CAPS                  (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
 #define AUDIO_AEC_DEINIT_WAIT_MS              60U
@@ -63,6 +62,7 @@ static bool s_out_fifo_ready;
 static bool s_initializing;
 static bool s_deinit_requested;
 static bool s_create_failed_logged;
+static bool s_runtime_active;
 static uint32_t s_active_users;
 
 static inline uint32_t audio_aec_abs_i16(int32_t value)
@@ -111,13 +111,25 @@ static aec_handle_t *audio_aec_create_handle(aec_mode_t mode, int filter_length)
         .sample_rate = (int)AUDIO_AEC_SAMPLE_RATE_HZ,
         .caps = AUDIO_AEC_PSRAM_CAPS,
         .mode = mode,
-        .nlp_level = AEC_NLP_LEVEL_VERYAGGR,
+        .nlp_level = AEC_NLP_LEVEL_AGGR,
     };
     aec_handle_t *handle = aec_create_from_config(&config);
     if (handle != NULL) {
-        (void)aec_set_nlp_level(handle, AEC_NLP_LEVEL_VERYAGGR);
+        (void)aec_set_nlp_level(handle, AEC_NLP_LEVEL_AGGR);
     }
     return handle;
+}
+
+static void audio_aec_reset_state_locked(void)
+{
+    s_ref_write_pos = 0;
+    s_ref_filled_samples = 0;
+    s_last_ref_peak = 0;
+    s_last_playback_us = 0;
+    s_frame_fill = 0;
+    s_out_fifo_read_pos = 0;
+    s_out_fifo_used = 0;
+    s_out_fifo_ready = false;
 }
 
 static void audio_aec_free_handle_and_buffers(aec_handle_t *handle,
@@ -153,10 +165,7 @@ static bool audio_aec_ensure_ready(void)
 
     aec_handle_t *handle = audio_aec_create_handle(AEC_MODE_FD_HIGH_PERF, AUDIO_AEC_FILTER_LENGTH);
     if (handle == NULL) {
-        handle = audio_aec_create_handle(AEC_MODE_VOIP_HIGH_PERF, AUDIO_AEC_FILTER_LENGTH);
-    }
-    if (handle == NULL) {
-        handle = audio_aec_create_handle(AEC_MODE_FD_LOW_COST, AUDIO_AEC_FALLBACK_FILTER_LENGTH);
+        handle = audio_aec_create_handle(AEC_MODE_FD_LOW_COST, AUDIO_AEC_FILTER_LENGTH);
     }
 
     int frame_size = handle == NULL ? 0 : aec_get_chunksize(handle);
@@ -201,14 +210,8 @@ static bool audio_aec_ensure_ready(void)
     s_ref_frame = ref_frame;
     s_out_frame = out_frame;
     s_out_fifo = out_fifo;
-    s_ref_write_pos = 0;
-    s_ref_filled_samples = 0;
-    s_last_ref_peak = 0;
-    s_last_playback_us = 0;
-    s_frame_fill = 0;
-    s_out_fifo_read_pos = 0;
-    s_out_fifo_used = 0;
-    s_out_fifo_ready = false;
+    audio_aec_reset_state_locked();
+    s_runtime_active = false;
     s_initializing = false;
     taskEXIT_CRITICAL(&s_aec_lock);
 
@@ -231,7 +234,7 @@ static bool audio_aec_enter(void)
     bool ready = false;
 
     taskENTER_CRITICAL(&s_aec_lock);
-    if (s_aec != NULL && !s_deinit_requested) {
+    if (s_aec != NULL && s_runtime_active && !s_deinit_requested) {
         s_active_users++;
         ready = true;
     }
@@ -286,6 +289,27 @@ static void audio_aec_fifo_clear(void)
     s_out_fifo_read_pos = 0;
     s_out_fifo_used = 0;
     s_out_fifo_ready = false;
+}
+
+static esp_err_t audio_aec_wait_for_idle(void)
+{
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(AUDIO_AEC_DEINIT_WAIT_MS);
+
+    while (true) {
+        uint32_t active_users = 0;
+
+        taskENTER_CRITICAL(&s_aec_lock);
+        active_users = s_active_users;
+        taskEXIT_CRITICAL(&s_aec_lock);
+        if (active_users == 0U) {
+            return ESP_OK;
+        }
+        if ((int32_t)(xTaskGetTickCount() - deadline) >= 0) {
+            ESP_LOGW(TAG, "AEC state transition timed out: users=%lu", (unsigned long)active_users);
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
 }
 
 static void audio_aec_fifo_push(const int16_t *samples, uint32_t count)
@@ -346,11 +370,61 @@ static bool audio_aec_fifo_pop(int16_t *samples, uint32_t count, uint32_t *out_p
     return true;
 }
 
+esp_err_t audio_echo_cancel_prepare(void)
+{
+    return audio_aec_ensure_ready() ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t audio_echo_cancel_set_active(bool active)
+{
+    bool changed = false;
+
+    if (active && !audio_aec_ensure_ready()) {
+        return ESP_FAIL;
+    }
+
+    taskENTER_CRITICAL(&s_aec_lock);
+    if (active) {
+        if (s_aec == NULL || s_deinit_requested) {
+            taskEXIT_CRITICAL(&s_aec_lock);
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (!s_runtime_active) {
+            audio_aec_reset_state_locked();
+            s_runtime_active = true;
+            changed = true;
+        }
+    } else if (s_runtime_active) {
+        s_runtime_active = false;
+        changed = true;
+    }
+    taskEXIT_CRITICAL(&s_aec_lock);
+
+    if (!active) {
+        esp_err_t ret = audio_aec_wait_for_idle();
+        if (ret != ESP_OK) {
+            return ret;
+        }
+        taskENTER_CRITICAL(&s_aec_lock);
+        audio_aec_reset_state_locked();
+        taskEXIT_CRITICAL(&s_aec_lock);
+    }
+
+    if (changed) {
+        ESP_LOGI(TAG,
+                 "AEC runtime %s: profile=%s ref_delay=%ums",
+                 active ? "active" : "idle",
+                 AUDIO_AEC_PROFILE_NAME,
+                 (unsigned)AUDIO_AEC_REF_DELAY_MS);
+    }
+    return ESP_OK;
+}
+
 void audio_echo_cancel_feed_playback(const int16_t *samples,
                                      size_t sample_count,
                                      uint8_t channels)
 {
-    if (samples == NULL || sample_count == 0U || channels == 0U || !audio_aec_ensure_ready()) {
+    if (samples == NULL || sample_count == 0U || channels == 0U) {
         return;
     }
     if (!audio_aec_enter()) {
@@ -413,7 +487,7 @@ void audio_echo_cancel_process_capture(int16_t *samples,
     if (metrics != NULL) {
         memset(metrics, 0, sizeof(*metrics));
     }
-    if (samples == NULL || sample_count == 0U || !audio_aec_ensure_ready()) {
+    if (samples == NULL || sample_count == 0U) {
         return;
     }
     if (!audio_aec_enter()) {
@@ -431,6 +505,7 @@ void audio_echo_cancel_process_capture(int16_t *samples,
     }
 
     uint32_t mic_peak = 0;
+    uint32_t process_us = 0;
     for (size_t index = 0; index < sample_count; ++index) {
         int16_t mic_sample = samples[index];
         int16_t ref_sample = ref_ring[(read_start + (uint32_t)index) & AUDIO_AEC_REF_RING_MASK];
@@ -444,7 +519,12 @@ void audio_echo_cancel_process_capture(int16_t *samples,
         s_frame_fill++;
 
         if (s_frame_fill >= (uint32_t)s_aec_frame_size) {
+            int64_t process_start_us = esp_timer_get_time();
             aec_process(s_aec, s_mic_frame, s_ref_frame, s_out_frame);
+            int64_t elapsed_us = esp_timer_get_time() - process_start_us;
+            if (elapsed_us > 0) {
+                process_us += elapsed_us > UINT32_MAX ? UINT32_MAX : (uint32_t)elapsed_us;
+            }
             audio_aec_fifo_push(s_out_frame, (uint32_t)s_aec_frame_size);
             s_frame_fill = 0;
         }
@@ -458,6 +538,7 @@ void audio_echo_cancel_process_capture(int16_t *samples,
         metrics->mic_peak = mic_peak;
         metrics->out_peak = out_peak;
         metrics->delay_samples = AUDIO_AEC_REF_DELAY_SAMPLES;
+        metrics->process_us = process_us;
         if (mic_peak > 0U && out_peak < mic_peak) {
             metrics->suppress_percent = (uint8_t)(((uint64_t)(mic_peak - out_peak) * 100U) / mic_peak);
         }
@@ -467,16 +548,7 @@ void audio_echo_cancel_process_capture(int16_t *samples,
 
 void audio_echo_cancel_reset(void)
 {
-    taskENTER_CRITICAL(&s_aec_lock);
-    s_ref_write_pos = 0;
-    s_ref_filled_samples = 0;
-    s_last_ref_peak = 0;
-    s_last_playback_us = 0;
-    s_frame_fill = 0;
-    s_out_fifo_read_pos = 0;
-    s_out_fifo_used = 0;
-    s_out_fifo_ready = false;
-    taskEXIT_CRITICAL(&s_aec_lock);
+    (void)audio_echo_cancel_set_active(false);
 }
 
 void audio_echo_cancel_deinit(void)
@@ -487,6 +559,8 @@ void audio_echo_cancel_deinit(void)
     int16_t *ref_frame = NULL;
     int16_t *out_frame = NULL;
     int16_t *out_fifo = NULL;
+
+    (void)audio_echo_cancel_set_active(false);
 
     taskENTER_CRITICAL(&s_aec_lock);
     if (s_aec == NULL && !s_initializing) {
@@ -537,14 +611,8 @@ void audio_echo_cancel_deinit(void)
     s_ref_frame = NULL;
     s_out_frame = NULL;
     s_out_fifo = NULL;
-    s_ref_write_pos = 0;
-    s_ref_filled_samples = 0;
-    s_last_ref_peak = 0;
-    s_last_playback_us = 0;
-    s_frame_fill = 0;
-    s_out_fifo_read_pos = 0;
-    s_out_fifo_used = 0;
-    s_out_fifo_ready = false;
+    audio_aec_reset_state_locked();
+    s_runtime_active = false;
     s_deinit_requested = false;
     s_create_failed_logged = false;
     taskEXIT_CRITICAL(&s_aec_lock);
@@ -558,6 +626,17 @@ void audio_echo_cancel_deinit(void)
 }
 
 #else
+
+esp_err_t audio_echo_cancel_prepare(void)
+{
+    return ESP_OK;
+}
+
+esp_err_t audio_echo_cancel_set_active(bool active)
+{
+    (void)active;
+    return ESP_OK;
+}
 
 void audio_echo_cancel_feed_playback(const int16_t *samples,
                                      size_t sample_count,

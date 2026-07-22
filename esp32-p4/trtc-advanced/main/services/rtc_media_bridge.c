@@ -10,6 +10,7 @@
 
 #include "audio_alaw_codec.h"
 #include "audio_device.h"
+#include "call_video_renderer.h"
 #include "camera_video_source.h"
 #include "media_sink.h"
 #include "tiRTC.h"
@@ -69,7 +70,15 @@ static void rtc_media_bridge_audio_capture_cb(const uint8_t *data,
 {
     (void)ctx;
 
-    if (s_capture_cb == NULL || format == NULL) {
+    tirtc_session_capture_frame_cb_t capture_cb = NULL;
+    void *capture_cb_ctx = NULL;
+
+    taskENTER_CRITICAL(&s_bridge_lock);
+    capture_cb = s_capture_cb;
+    capture_cb_ctx = s_capture_cb_ctx;
+    taskEXIT_CRITICAL(&s_bridge_lock);
+
+    if (capture_cb == NULL || format == NULL) {
         return;
     }
 
@@ -79,7 +88,7 @@ static void rtc_media_bridge_audio_capture_cb(const uint8_t *data,
         .bits_per_sample = format->bits_per_sample,
     };
 
-    s_capture_cb(data, data_len, &rtc_format, s_capture_cb_ctx);
+    capture_cb(data, data_len, &rtc_format, capture_cb_ctx);
 }
 
 static void rtc_media_bridge_set_capture_frame_cb(tirtc_session_capture_frame_cb_t cb,
@@ -88,8 +97,10 @@ static void rtc_media_bridge_set_capture_frame_cb(tirtc_session_capture_frame_cb
 {
     (void)ctx;
 
+    taskENTER_CRITICAL(&s_bridge_lock);
     s_capture_cb = cb;
     s_capture_cb_ctx = cb_ctx;
+    taskEXIT_CRITICAL(&s_bridge_lock);
     microphone_set_frame_cb(cb != NULL ? rtc_media_bridge_audio_capture_cb : NULL, NULL);
 }
 
@@ -105,6 +116,21 @@ static esp_err_t rtc_media_bridge_set_capture_enabled(bool enabled, void *ctx)
 {
     (void)ctx;
 
+    if (enabled) {
+        bool callback_ready = false;
+
+        taskENTER_CRITICAL(&s_bridge_lock);
+        callback_ready = s_capture_cb != NULL;
+        taskEXIT_CRITICAL(&s_bridge_lock);
+        ESP_RETURN_ON_FALSE(callback_ready,
+                            ESP_ERR_INVALID_STATE,
+                            TAG,
+                            "local audio capture callback is not configured");
+
+        /* The shared audio device clears its active callback when suspended.
+         * Rebind the long-lived TiRTC bridge whenever a new call enables input. */
+        microphone_set_frame_cb(rtc_media_bridge_audio_capture_cb, NULL);
+    }
     return microphone_set_enabled(enabled);
 }
 
@@ -274,11 +300,25 @@ static esp_err_t rtc_media_bridge_submit_remote_audio(uint8_t media,
     return submit_ret;
 }
 
-static esp_err_t rtc_media_bridge_submit_remote_video_jpeg(const uint8_t *data, size_t data_len, void *ctx)
+static esp_err_t rtc_media_bridge_submit_remote_video(uint8_t media,
+                                                      uint8_t flags,
+                                                      const uint8_t *data,
+                                                      size_t data_len,
+                                                      uint32_t pts,
+                                                      void *ctx)
 {
     (void)ctx;
 
-    return media_sink_submit_remote_video_jpeg(data, data_len);
+    if (media == TIRTC_VIDEO_H264) {
+        return call_video_renderer_submit_h264(data,
+                                               data_len,
+                                               (flags & TIRTC_FRAME_FLAG_KEY_FRAME) != 0U,
+                                               pts);
+    }
+    if (media == TIRTC_VIDEO_JPEG) {
+        return media_sink_submit_remote_video_jpeg(data, data_len);
+    }
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 static esp_err_t rtc_media_bridge_submit_local_video(const uint8_t *data,
@@ -306,6 +346,7 @@ static void rtc_media_bridge_flush(void *ctx)
     (void)ctx;
 
     media_sink_flush();
+    call_video_renderer_flush();
     taskENTER_CRITICAL(&s_bridge_lock);
     s_remote_audio_first_logged = false;
     s_remote_audio_unsupported_logged = false;
@@ -322,7 +363,7 @@ static const tirtc_session_media_ops_t s_rtc_media_bridge_ops = {
     .request_video_key_frame = rtc_media_bridge_request_video_key_frame,
     .prepare_playback_path = rtc_media_bridge_prepare_playback_path,
     .submit_remote_audio = rtc_media_bridge_submit_remote_audio,
-    .submit_remote_video_jpeg = rtc_media_bridge_submit_remote_video_jpeg,
+    .submit_remote_video = rtc_media_bridge_submit_remote_video,
     .flush = rtc_media_bridge_flush,
 };
 

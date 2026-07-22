@@ -5,14 +5,11 @@
 
 #include "cJSON.h"
 #include "esp_heap_caps.h"
+#include "app_memory_policy.h"
 
 static char *ai_chat_events_alloc_json_copy(uint32_t len)
 {
-    char *json = (char *)heap_caps_malloc((size_t)len + 1U,
-                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (json == NULL) {
-        json = (char *)malloc((size_t)len + 1U);
-    }
+    char *json = (char *)app_memory_alloc_psram((size_t)len + 1U);
     return json;
 }
 

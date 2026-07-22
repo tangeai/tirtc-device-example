@@ -29,10 +29,5 @@ esp_err_t device_identity_get(device_binding_identity_t *identity)
              mac[4],
              mac[5]);
 
-    /* The developer-platform contract accepts chip_uid as an auxiliary physical
-     * identity. Keep it stable and explicit; MAC is the primary binding key on
-     * this ESP32-P4 board.
-     */
-    strlcpy(identity->chip_uid, identity->mac, sizeof(identity->chip_uid));
     return ESP_OK;
 }

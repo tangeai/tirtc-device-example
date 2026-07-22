@@ -10,6 +10,8 @@
 esp_err_t audio_device_prepare(void);
 void audio_device_release(void);
 void audio_device_get_stats(audio_stats_t *stats);
+esp_err_t audio_device_prepare_echo_cancel(void);
+esp_err_t audio_device_set_echo_cancel_active(bool active);
 
 const audio_format_t *microphone_get_format(void);
 esp_err_t microphone_prepare_capture_path(void);

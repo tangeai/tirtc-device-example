@@ -1,13 +1,16 @@
 #pragma once
 
-#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "sdkconfig.h"
 
+#include "app_memory_policy.h"
+
 /*
  * ESP32-P4 runtime ownership:
- * - CPU1 stays responsive for LVGL/UI and time-sensitive audio I/O.
- * - CPU0 carries Wi-Fi, TiRTC, MQTT/HTTP, camera QR decode, OTA, and background work.
+ * - CPU0 carries network/control, camera uplink, and the H264 decoder caller.
+ * - CPU1 carries LVGL/audio and the TinyH264 dual-task helper.
+ * - Frame conversion is SMP-migratable because it can run on either CPU and
+ *   should consume whichever core has headroom at that instant.
  *
  * Keep task creation sites using these names instead of raw core numbers so the
  * scheduling contract stays visible when modules are moved or added.
@@ -19,6 +22,8 @@
 #define APP_TASK_CORE_RTC        tskNO_AFFINITY
 #define APP_TASK_CORE_CAMERA     tskNO_AFFINITY
 #define APP_TASK_CORE_BACKGROUND tskNO_AFFINITY
+#define APP_TASK_CORE_VIDEO_DECODE  tskNO_AFFINITY
+#define APP_TASK_CORE_VIDEO_CONVERT tskNO_AFFINITY
 #else
 #define APP_TASK_CORE_UI         1
 #define APP_TASK_CORE_AUDIO      1
@@ -26,19 +31,6 @@
 #define APP_TASK_CORE_RTC        0
 #define APP_TASK_CORE_CAMERA     0
 #define APP_TASK_CORE_BACKGROUND 0
+#define APP_TASK_CORE_VIDEO_DECODE  0
+#define APP_TASK_CORE_VIDEO_CONVERT tskNO_AFFINITY
 #endif
-
-/*
- * Memory ownership policy:
- * - realtime/driver paths keep internal stacks;
- * - control/UI workers keep internal stacks because they can trigger NVS or
- *   flash operations while cache is disabled;
- * - background workers prefer PSRAM so H264, CSI, I2S and SDIO can
- *   reserve larger contiguous internal/DMA blocks;
- * - every PSRAM move must still keep an internal fallback at the creation site.
- */
-#define APP_TASK_STACK_CAPS_REALTIME   (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
-#define APP_TASK_STACK_CAPS_INTERNAL   (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
-#define APP_TASK_STACK_CAPS_CONTROL    (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
-#define APP_TASK_STACK_CAPS_BACKGROUND (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
-#define APP_QUEUE_CAPS_BACKGROUND      (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)

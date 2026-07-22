@@ -34,24 +34,13 @@ static BaseType_t app_ui_create_background_task(TaskFunction_t task_func,
                                               priority,
                                               NULL,
                                               APP_TASK_STACK_CAPS_BACKGROUND);
-    if (task_ret != pdPASS) {
-        task_ret = xTaskCreateWithCaps(task_func,
-                                       name,
-                                       stack_size,
-                                       arg,
-                                       priority,
-                                       NULL,
-                                       APP_TASK_STACK_CAPS_INTERNAL);
-    }
     return task_ret;
 }
 
 static app_snapshot_t *app_ui_display_snapshot(void)
 {
     if (s_display_snapshot == NULL) {
-        s_display_snapshot = (app_snapshot_t *)heap_caps_calloc(1,
-                                                                sizeof(*s_display_snapshot),
-                                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_display_snapshot = (app_snapshot_t *)app_memory_calloc_psram(1, sizeof(*s_display_snapshot));
     }
     return s_display_snapshot;
 }
@@ -276,6 +265,25 @@ static app_id_t app_ui_from_display_app(display_app_id_t app_id)
     }
 }
 
+static display_call_state_t app_ui_to_display_call_state(app_call_state_t state)
+{
+    switch (state) {
+    case APP_CALL_STATE_OUTGOING:
+        return DISPLAY_CALL_STATE_OUTGOING;
+    case APP_CALL_STATE_INCOMING:
+        return DISPLAY_CALL_STATE_INCOMING;
+    case APP_CALL_STATE_CONNECTING:
+        return DISPLAY_CALL_STATE_CONNECTING;
+    case APP_CALL_STATE_IN_CALL:
+        return DISPLAY_CALL_STATE_IN_CALL;
+    case APP_CALL_STATE_ERROR:
+        return DISPLAY_CALL_STATE_ERROR;
+    case APP_CALL_STATE_IDLE:
+    default:
+        return DISPLAY_CALL_STATE_IDLE;
+    }
+}
+
 static esp_err_t app_ui_on_wifi_connect(const char *ssid, const char *password, void *ctx)
 {
     (void)ctx;
@@ -315,7 +323,7 @@ static esp_err_t app_ui_on_disconnect_rtc(void *ctx)
 static esp_err_t app_ui_on_hangup_call(void *ctx)
 {
     (void)ctx;
-    return app_hangup_call();
+    return app_hangup_call_async();
 }
 
 static esp_err_t app_ui_on_start_sender_video_test(void *ctx)
@@ -354,7 +362,9 @@ static esp_err_t app_ui_on_set_capture_gain(uint8_t percent, void *ctx)
     return app_set_capture_gain(percent);
 }
 
-static esp_err_t app_ui_on_call_contact(const char *device_id, const char *pair_key, void *ctx)
+static esp_err_t app_ui_on_call_contact(const char *device_id,
+                                        display_call_type_t call_type,
+                                        void *ctx)
 {
     (void)ctx;
     esp_err_t ret = app_enter_app(APP_ID_CALL);
@@ -363,19 +373,21 @@ static esp_err_t app_ui_on_call_contact(const char *device_id, const char *pair_
         return ret;
     }
 
-    return app_call_contact(device_id, pair_key);
+    return app_call_contact(device_id,
+                            call_type == DISPLAY_CALL_TYPE_VIDEO ?
+                            APP_CALL_TYPE_VIDEO : APP_CALL_TYPE_AUDIO);
 }
 
-static esp_err_t app_ui_on_add_call_contact(const char *device_id, const char *pair_key, void *ctx)
+static esp_err_t app_ui_on_add_call_contact(const char *device_id, void *ctx)
 {
     (void)ctx;
-    return app_add_call_contact(device_id, pair_key);
+    return app_add_call_contact(device_id);
 }
 
-static esp_err_t app_ui_on_remove_call_contact(const char *device_id, void *ctx)
+static esp_err_t app_ui_on_refresh_call_contacts(void *ctx)
 {
     (void)ctx;
-    return app_remove_call_contact(device_id);
+    return app_refresh_call_contacts();
 }
 
 static esp_err_t app_ui_on_scan_contact(void *ctx)
@@ -397,7 +409,7 @@ static esp_err_t app_ui_on_start_contact_scan(display_scan_preview_cb_t preview_
     }
 
     return app_start_contact_scan((app_scan_preview_cb_t)preview_cb,
-                                  (app_contact_scan_result_cb_t)result_cb,
+                                  result_cb,
                                   scan_ctx);
 }
 
@@ -596,6 +608,12 @@ static esp_err_t app_ui_on_clear_ai_chat_messages(void *ctx)
     return app_clear_ai_chat_messages();
 }
 
+static esp_err_t app_ui_on_set_ai_chat_avatar(uint8_t avatar, void *ctx)
+{
+    (void)ctx;
+    return app_set_ai_chat_avatar(avatar);
+}
+
 static esp_err_t app_ui_on_set_tirtc_config_field(display_tirtc_config_field_t field,
                                                   const char *value,
                                                   void *ctx)
@@ -646,7 +664,7 @@ void app_ui_configure_display_actions(display_actions_t *actions)
         .on_set_capture_gain = app_ui_on_set_capture_gain,
         .on_call_contact = app_ui_on_call_contact,
         .on_add_call_contact = app_ui_on_add_call_contact,
-        .on_remove_call_contact = app_ui_on_remove_call_contact,
+        .on_refresh_call_contacts = app_ui_on_refresh_call_contacts,
         .on_scan_contact = app_ui_on_scan_contact,
         .on_start_contact_scan = app_ui_on_start_contact_scan,
         .on_stop_contact_scan = app_ui_on_stop_contact_scan,
@@ -668,6 +686,7 @@ void app_ui_configure_display_actions(display_actions_t *actions)
         .on_start_ai_chat = app_ui_on_start_ai_chat,
         .on_close_ai_chat = app_ui_on_close_ai_chat,
         .on_clear_ai_chat_messages = app_ui_on_clear_ai_chat_messages,
+        .on_set_ai_chat_avatar = app_ui_on_set_ai_chat_avatar,
         .on_set_tirtc_config_field = app_ui_on_set_tirtc_config_field,
         .on_set_tirtc_server_env = app_ui_on_set_tirtc_server_env,
         .on_enter_app = app_ui_on_enter_app,
@@ -791,6 +810,22 @@ void app_ui_fill_display_status(display_status_t *status, void *ctx)
     strlcpy(status->binding_message,
             snapshot->binding.message,
             sizeof(status->binding_message));
+    status->call_state = app_ui_to_display_call_state(snapshot->call.state);
+    status->call_type = snapshot->call.type == APP_CALL_TYPE_VIDEO ?
+        DISPLAY_CALL_TYPE_VIDEO : DISPLAY_CALL_TYPE_AUDIO;
+    status->call_contacts_ready = snapshot->call_contacts.ready;
+    status->call_contacts_refreshing = snapshot->call_contacts.refreshing;
+    status->call_last_error = snapshot->call.last_error != ESP_OK ?
+        snapshot->call.last_error : snapshot->call_contacts.last_error;
+    strlcpy(status->call_peer_device_id,
+            snapshot->call.peer_device_id,
+            sizeof(status->call_peer_device_id));
+    strlcpy(status->call_room_id,
+            snapshot->call.room_id,
+            sizeof(status->call_room_id));
+    strlcpy(status->call_message,
+            snapshot->call.message,
+            sizeof(status->call_message));
     call_contact_count = snapshot->call_contacts.count > DISPLAY_CALL_CONTACT_MAX ?
         DISPLAY_CALL_CONTACT_MAX : snapshot->call_contacts.count;
     status->call_contact_count = call_contact_count;
@@ -798,12 +833,10 @@ void app_ui_fill_display_status(display_status_t *status, void *ctx)
         strlcpy(status->call_contacts[index].device_id,
                 snapshot->call_contacts.contacts[index].device_id,
                 sizeof(status->call_contacts[index].device_id));
-        strlcpy(status->call_contacts[index].pair_key,
-                snapshot->call_contacts.contacts[index].pair_key,
-                sizeof(status->call_contacts[index].pair_key));
-        strlcpy(status->call_contacts[index].last_time,
-                snapshot->call_contacts.contacts[index].last_time,
-                sizeof(status->call_contacts[index].last_time));
+        strlcpy(status->call_contacts[index].remark,
+                snapshot->call_contacts.contacts[index].remark,
+                sizeof(status->call_contacts[index].remark));
+        status->call_contacts[index].online = snapshot->call_contacts.contacts[index].online;
     }
     status->wechat_incoming_call_pending = snapshot->wechat.incoming_call_pending;
     status->wechat_call_state = app_ui_to_display_wechat_call_state(snapshot->wechat.call_state);
@@ -848,4 +881,5 @@ void app_ui_fill_display_status(display_status_t *status, void *ctx)
     strlcpy(status->ai_chat_status,
             snapshot->ai_chat.status,
             sizeof(status->ai_chat_status));
+    status->ai_chat_avatar = snapshot->ai_chat.avatar;
 }

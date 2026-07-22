@@ -23,6 +23,8 @@
 #include "mbedtls/sha256.h"
 #include "sdkconfig.h"
 
+#include "app_task_affinity.h"
+
 static const char *TAG = "ota";
 
 #define OTA_DOWNLOAD_BUF_SIZE      4096
@@ -38,7 +40,7 @@ static const char *TAG = "ota";
 /* TLS, JSON parsing, SHA256, and flash writes run outside UI/network callbacks. */
 #define OTA_TASK_STACK_SIZE        (12 * 1024)
 #define OTA_TASK_PRIORITY          3
-#define OTA_TASK_ALLOC_CAPS        (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+#define OTA_TASK_ALLOC_CAPS        APP_TASK_STACK_CAPS_INTERNAL
 
 typedef struct {
     bool update;
@@ -60,29 +62,17 @@ typedef struct {
 
 static void *ota_malloc_psram(size_t size)
 {
-    void *ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (ptr == NULL) {
-        ptr = malloc(size);
-    }
-    return ptr;
+    return app_memory_alloc_psram(size);
 }
 
 static void *ota_malloc_internal(size_t size)
 {
-    void *ptr = heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (ptr == NULL) {
-        ptr = malloc(size);
-    }
-    return ptr;
+    return heap_caps_malloc(size, APP_MEMORY_CAPS_CONTROL);
 }
 
 static void *ota_calloc_internal(size_t count, size_t size)
 {
-    void *ptr = heap_caps_calloc(count, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (ptr == NULL) {
-        ptr = calloc(count, size);
-    }
-    return ptr;
+    return heap_caps_calloc(count, size, APP_MEMORY_CAPS_CONTROL);
 }
 
 static int64_t ota_deadline_from_now_us(uint32_t timeout_ms)

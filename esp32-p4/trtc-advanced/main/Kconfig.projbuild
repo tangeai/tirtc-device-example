@@ -6,11 +6,35 @@ config AUDIO_LOCAL_LOOPBACK_TEST
 
 config APP_AUDIO_AEC_ENABLE
     bool "Enable ESP-SR acoustic echo cancellation"
-    default n
+    default y
     help
-        Enables the ESP-SR AEC path for duplex audio. Keep this disabled by
-        default on the P4 RTC video profile so ESP-Hosted/SDIO keeps enough
-        internal DMA memory for sustained H264 uplink traffic.
+        Preloads the ESP-SR AEC engine when a full-duplex audio owner prepares
+        its media path. Runtime processing is enabled for IPC viewing, device
+        calls, WeChat VoIP, and AI Chat, and is disabled outside those media
+        sessions. Each application keeps its existing audio ownership model.
+
+config APP_AUDIO_AEC_REF_DELAY_MS
+    int "Speaker-to-microphone AEC reference delay (ms)"
+    depends on APP_AUDIO_AEC_ENABLE
+    range 40 160
+    default 80
+    help
+        Compensates the codec, I2S DMA, amplifier, and acoustic path delay.
+        Start at 80 ms for this board and adjust only from full-duplex echo
+        tests; an incorrect value reduces cancellation quality.
+
+endmenu
+
+menu "WeChat VoIP"
+
+config APP_WECHAT_VOIP_LOCAL_VIDEO_ENABLE
+    bool "Upload local camera video during WeChat calls"
+    default y
+    help
+        Advertise WeChat calls as video capable and proactively publish the
+        ESP32-P4 camera through the existing YUV420-to-H264 RTC pipeline after
+        CALL_CONNECTED. The WeChat audio path remains externally owned by the
+        dedicated PCMA capture task.
 
 endmenu
 
@@ -18,21 +42,31 @@ menu "RTC video uplink"
 
 config APP_RTC_H264_DIRECT_HW_ENCODER
     bool "Use direct ESP_H264 hardware encoder for RTC video"
-    default n
+    default y
     help
         Bypass the V4L2 memory-to-memory H264 wrapper on the RTC camera
         uplink hot path and call the ESP32-P4 hardware encoder directly.
-        Keep this disabled for the normal demo path: the V4L2 wrapper is the
-        vendor-supported camera-to-H264 path and applies the H264 codec
-        controls consistently before frames enter TiRTC.
+        The direct path keeps the native 1280x960 encoder output in PSRAM and leaves
+        enough internal DMA memory for ESP-Hosted SDIO during full-duplex
+        audio/video calls.
+
+config APP_RTC_H264_RESOURCE_FALLBACK_ENABLE
+    bool "Allow H264 resource-admission resolution fallback"
+    default y
+    help
+        If the requested hardware encoder cannot reserve one contiguous
+        internal reference-frame block, retry at the largest aligned size that
+        fits the current heap. This is a local resource safety net only: it
+        does not enable weak-network adaptation or change the saved RTC video
+        policy. A normally prewarmed encoder still uses the requested size.
 
 config APP_RTC_H264_BITRATE
     int "RTC H264 target bitrate"
     range 500000 12000000
-    default 6000000
+    default 4000000
     help
         Target bitrate used by the ESP32-P4 hardware H264 encoder for the
-        RTC camera uplink. The normal profile is tuned for sustained 1080p20
+        RTC camera uplink. The normal profile is tuned for sustained 1280x960 at 20fps
         with bounded send latency; raise this only after logs prove the
         transport keeps draining without backpressure.
 
@@ -42,10 +76,71 @@ config APP_RTC_H264_FPS
     default 20
     help
         Normal RTC camera uplink frame rate. Keep this separate from the
-        camera sensor mode: the OV5647 sensor can expose 1080p30, while the
-        current TiRTC demo target is sustained 1080p20 with bounded send
+        camera sensor mode: the OV5647 uses its 1280x960 binning mode, while
+        the current TiRTC demo target sends the native YUV420 frame at 20fps with bounded send
         latency. Weak-network adaptation remains disabled unless explicitly
         enabled below.
+
+config APP_DEVICE_CALL_VIDEO_WIDTH
+    int "Device-call H264 width"
+    range 320 1280
+    default 480
+    help
+        Video profile used only for bidirectional device calls. The default
+        matches the 480x320 landscape display and asks the ISP for the same
+        native YUV420 output, avoiding an application-side resize. IPC viewing
+        keeps the normal RTC profile above.
+
+config APP_DEVICE_CALL_VIDEO_HEIGHT
+    int "Device-call H264 height"
+    range 240 960
+    default 320
+
+config APP_DEVICE_CALL_VIDEO_FPS
+    int "Device-call H264 FPS"
+    range 5 30
+    default 15
+    help
+        The full-duplex call path defaults to a stable 15fps. This is the
+        minimum acceptance target under simultaneous encode, software decode,
+        audio, UI and Wi-Fi load; higher profiles can be selected only after
+        runtime statistics prove enough headroom.
+
+config APP_DEVICE_CALL_VIDEO_BITRATE
+    int "Device-call H264 target bitrate"
+    range 500000 6000000
+    default 2000000
+    help
+        Encoder target used only for P4-to-P4 video calls. It is restored to
+        the previous RTC setting when the call ends.
+
+config APP_DEVICE_CALL_VIDEO_MIN_QP
+    int "Device-call H264 minimum QP"
+    range 10 51
+    default 26
+    help
+        Quality floor used only for the 480x320 bidirectional call profile.
+        This is intentionally lower than the high-resolution IPC floor so a
+        call can use its bitrate budget without changing IPC behavior.
+
+config APP_DEVICE_CALL_VIDEO_MAX_QP
+    int "Device-call H264 maximum QP"
+    range 10 51
+    default 38
+    help
+        Quality ceiling used only for the bidirectional call profile. Keep it
+        greater than or equal to APP_DEVICE_CALL_VIDEO_MIN_QP.
+
+config APP_CALL_VIDEO_DIRECT_LCD
+    bool "Use PSRAM-direct LCD DMA for call video"
+    depends on SOC_PSRAM_DMA_CAPABLE && SPIRAM
+    default y
+    help
+        Send each decoded RGB565 call viewport to the SPI LCD as one direct
+        PSRAM DMA transfer, bypassing LVGL image composition and internal frame
+        bounce buffers. LVGL remains responsible for controls, touch input, and
+        all non-video pages. Disable this only to compare with the slower LVGL
+        image fallback path.
 
 config APP_RTC_H264_GOP
     int "RTC H264 GOP"
@@ -75,10 +170,10 @@ config APP_RTC_H264_MAX_QP
 config APP_RTC_H264_OUTPUT_BUFFER_BYTES
     int "RTC H264 output buffer bytes"
     range 524288 4194304
-    default 4194304
+    default 1048576
     help
         MMAP output buffer size for one encoded H264 frame. Keep enough room
-        for 1080p key frames and high-motion bursts. This buffer does not
+        for 1280x960 key frames and high-motion bursts. This buffer does not
         control adaptive downshift; it only protects the encoder output path.
 
 config APP_RTC_H264_MAX_DELTA_PAYLOAD_BYTES
@@ -89,7 +184,7 @@ config APP_RTC_H264_MAX_DELTA_PAYLOAD_BYTES
         Hard guard for abnormal non-key frame payloads. Normal operation must
         not drop H264 P frames after encoding, because that breaks the
         reference chain and can make the browser/proxy show a short recovery
-        hiccup. Keep the steady-state guard high enough for normal 1080p motion
+        hiccup. Keep the steady-state guard high enough for normal 1280x960 motion
         detail, while the startup guard below remains tighter during decoder
         warmup. GOP should remain short so recovery follows quickly.
 
@@ -136,13 +231,14 @@ config APP_RTC_WAIT_VIDEO_SUBSCRIBE_BEFORE_CAPTURE
 
 config APP_DEVICE_ONLINE_PAUSE_DURING_RTC
     bool "Pause device-online MQTT while RTC media is active"
-    default y
+    default n
     help
-        Give the TiRTC audio/video path priority while a realtime RTC session
-        is active. Device binding and online reporting still run before and
-        after the call; during the call the platform online MQTT client is
-        stopped so TLS keepalive/reconnect work cannot steal internal DMA
-        memory or network scheduling from sustained H264 uplink.
+        Keep this disabled for normal operation. The permanent MQTT connection
+        carries call_cancel, unbind, callers_update and other business events
+        that must remain available while RTC media is active.
+
+        Enable this only for isolated media stress tests where losing realtime
+        business notifications during the call is acceptable.
 
 config APP_DMA_ESCROW_BYTES
     int "Application DMA escrow bytes"
@@ -163,33 +259,25 @@ config APP_CAMERA_FRAME_TRACE_INITIAL_COUNT
         session starts. Keep this at zero for performance tuning; the periodic
         aggregate stats remain enabled and are enough for FPS/bitrate analysis.
 
-config APP_CAMERA_DRAIN_STALE_FRAMES
-    bool "Drain stale camera frames before RTC encode"
-    default y
-    help
-        The OV5647 1080p sensor mode runs at 30fps, while the normal RTC path
-        sends 1080p20. Keep only the newest queued V4L2 frame before H264
-        encoding so the RTC stream does not encode old camera buffers that can
-        look like a short repeated-frame stutter on the viewer side.
-
 config APP_CAMERA_FRAME_TRACE_INTERVAL_MS
     int "Camera slow/large frame trace interval in milliseconds"
     range 200 60000
     default 10000
     help
         Minimum interval for slow or large frame trace logs. This prevents
-        diagnostic logging from disturbing the 1080p H264 hot path while still
+        diagnostic logging from disturbing the 1280x960 H264 hot path while still
         keeping enough evidence when the encoder or transport stalls.
 
 config APP_RTC_H264_KEY_FRAME_REQUEST_MIN_INTERVAL_MS
     int "Minimum interval between local H264 key-frame requests"
     range 0 5000
-    default 100
+    default 2000
     help
-        Coalesce near-duplicate IDR requests from stream start and peer-side
-        key-frame callbacks. Keep the window short: the WebRTC proxy sends a
-        second key-frame request during startup, and suppressing it for too
-        long can leave the remote decoder waiting and trigger a remote close.
+        Coalesce repeated peer-side IDR requests against the last emitted IDR.
+        The normal 40-frame GOP at 20fps already emits an IDR every two
+        seconds. Reconfiguring the hardware encoder more often can reset GOP
+        progress and stall the bidirectional media path. Stream start still
+        explicitly requests the first key frame.
 
 config APP_RTC_TRANSPORT_BACKPRESSURE_HOLD_MS
     int "RTC transport backpressure hold in milliseconds"
@@ -198,7 +286,7 @@ config APP_RTC_TRANSPORT_BACKPRESSURE_HOLD_MS
     help
         Short camera hold window after the TiRTC send buffer crosses the
         transport guard waterline. This is not weak-network adaptation and
-        does not change the configured 1080p/bitrate profile; it only prevents
+        does not change the configured native-resolution/bitrate profile; it only prevents
         the SDK send buffer from filling so far that heartbeat/control traffic
         times out.
 
@@ -214,6 +302,24 @@ config APP_TIRTC_QUERY_SEND_BUFFER_USED
 endmenu
 
 menu "Debug utilities"
+
+config APP_VERBOSE_RUNTIME_LOGS
+    bool "Enable verbose runtime flow logs"
+    default n
+    help
+        Restore detailed HTTP, MQTT, ESP-Hosted, media handoff, and call-state
+        tracing for a focused diagnosis. Normal builds keep lifecycle, first
+        frame, warning, and error logs while suppressing repetitive internals.
+
+config APP_MEDIA_PERIODIC_DIAGNOSTICS
+    bool "Enable periodic media performance diagnostics"
+    default n
+    help
+        Print long camera, RTC transmit, decoder, audio-level, and whole-system
+        snapshots while media is running. These lines are useful for a focused
+        profiling session, but synchronous console output can pause realtime
+        media tasks and create visible periodic video stalls. Keep this off for
+        normal calls and enable it only while collecting performance evidence.
 
 config APP_DEBUG_SCREEN_SERVER_ENABLE
     bool "Enable LAN screen debug web server"

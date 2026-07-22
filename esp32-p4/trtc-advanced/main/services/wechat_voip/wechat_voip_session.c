@@ -3,7 +3,7 @@
  *
  * 业务服务器下发入会通知后,本文件保存本次 peer_id/token,
  * 再由界面接听或主动呼叫自动入会触发 WHIP 建连.
- * WHIP 建连后等待 CALL_CONNECTED, 确认通话进入媒体阶段后再发音频.
+ * WHIP 建连后等待 CALL_CONNECTED, 确认通话进入媒体阶段后再启动音视频.
  */
 #include "wechat_voip_session.h"
 
@@ -24,6 +24,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "app_memory_policy.h"
 #include "tiRTC.h"
 #include "tirtc_session.h"
 #include "tirtc_voip_cmdw.h"
@@ -37,8 +38,9 @@ enum
 {
     VOIP_ANSWER_TASK_STACK = 49152,
     VOIP_ANSWER_TASK_PRIORITY = 5,
-    VOIP_UI_ANSWER_DELAY_MS = 500,
-    VOIP_ACTIVE_ANSWER_DELAY_MS = 1200,
+    VOIP_UI_ANSWER_DELAY_MS = 0,
+    VOIP_ACTIVE_ANSWER_DELAY_MS = 0,
+    VOIP_ANSWER_RETRY_DELAY_MS = 100,
     VOIP_RING_TIMEOUT_MS = 35000,
     VOIP_CONNECT_TIMEOUT_MS = 20000,
     VOIP_CONNECTED_WAIT_TIMEOUT_MS = 15000,
@@ -148,7 +150,7 @@ static void ensure_init(void)
         return;
     }
 
-    s_mutex = xSemaphoreCreateMutexWithCaps(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_mutex = xSemaphoreCreateMutexWithCaps(APP_SYNC_CAPS_CONTROL);
     configASSERT(s_mutex != NULL);
     s_session.state = VOIP_STATE_IDLE;
     (void)ensure_work_worker();
@@ -799,18 +801,43 @@ static void answer_task(void *arg)
     delay_ms = s_answer_delay_ms;
     unlock_session();
 
-    /*
-     * 入会消息代表可以准备建连,但微信侧房间状态仍可能在切换中.
-     * 主动呼叫自动入会稍等更久一点,用于避开“刚接听就立刻 WHIP”的时序抖动.
-     */
+    /* 主呼收到入会参数后立即 WHIP，接听和挂断继续由 0x2000/0x2001 驱动。 */
     if (delay_ms > 0)
     {
         WX_VOIP_TRACEI(TAG, "接听任务等待房间稳定: source=%s delay=%ums", source, (unsigned)delay_ms);
         vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 
-    WX_VOIP_TRACEI(TAG, "接听任务开始: source=%s", source);
-    esp_err_t ret = answer_current_call(source);
+    esp_err_t ret = ESP_ERR_INVALID_STATE;
+    bool cancelled = false;
+    uint32_t attempts = 0;
+    while (true)
+    {
+        lock_session();
+        bool still_pending = s_answer_pending && s_session.state == VOIP_STATE_RINGING;
+        unlock_session();
+        if (!still_pending)
+        {
+            cancelled = true;
+            break;
+        }
+
+        attempts++;
+        WX_VOIP_TRACEI(TAG, "接听任务开始: source=%s attempt=%u", source, (unsigned)attempts);
+        ret = answer_current_call(source);
+        if (ret != ESP_ERR_INVALID_STATE && ret != ESP_ERR_NO_MEM)
+        {
+            break;
+        }
+
+        if (attempts == 1U)
+        {
+            ESP_LOGW(TAG,
+                     "%s,保留来电并等待重试",
+                     ret == ESP_ERR_NO_MEM ? "当前内存不足" : "当前 RTC 尚未就绪");
+        }
+        vTaskDelay(pdMS_TO_TICKS(VOIP_ANSWER_RETRY_DELAY_MS));
+    }
 
     lock_session();
     s_answer_pending = false;
@@ -819,11 +846,11 @@ static void answer_task(void *arg)
     s_answer_worker_task = NULL;
     unlock_session();
 
-    if (ret == ESP_ERR_INVALID_STATE)
+    if (!cancelled && ret == ESP_ERR_INVALID_STATE)
     {
         ESP_LOGW(TAG, "当前暂不能接听,等待来电或 RTC 就绪");
     }
-    else if (ret == ESP_ERR_NO_MEM)
+    else if (!cancelled && ret == ESP_ERR_NO_MEM)
     {
         ESP_LOGW(TAG, "当前内存不足,保留来电状态,请稍后再次接听");
     }
@@ -1043,7 +1070,7 @@ esp_err_t wechat_voip_session_handle_join_room(cJSON *root, bool auto_answer)
 
     if (auto_answer)
     {
-        ESP_LOGI(TAG, "主动呼叫入会参数已收到,等待微信接听");
+        ESP_LOGI(TAG, "主动呼叫入会参数已收到,立即 WHIP 建连,等待微信 0x2000/0x2001");
         return start_answer_task("主动呼叫入会", VOIP_ACTIVE_ANSWER_DELAY_MS);
     }
 
@@ -1457,11 +1484,25 @@ bool wechat_voip_session_on_command(tirtc_conn_t hconn, uint32_t cmdw, const voi
             abort_connected_media_start(hconn, "real audio start failed");
             return true;
         }
+        esp_err_t video_ret = tirtc_session_set_local_video_send_enabled(
+            WECHAT_VOIP_LOCAL_VIDEO_ENABLE != 0);
+        if (video_ret != ESP_OK)
+        {
+            ESP_LOGW(TAG, "微信本机视频策略应用失败: %s", esp_err_to_name(video_ret));
+        }
         esp_err_t rtc_ret = tirtc_session_set_external_audio_call_active(hconn, true);
         if (rtc_ret != ESP_OK)
         {
             ESP_LOGW(TAG, "微信通话态同步失败: %s", esp_err_to_name(rtc_ret));
+            (void)tirtc_session_set_local_video_send_enabled(false);
             abort_connected_media_start(hconn, "rtc state sync failed");
+        }
+        else if (WECHAT_VOIP_LOCAL_VIDEO_ENABLE)
+        {
+            ESP_LOGI(TAG,
+                     "微信本机 H264 视频主动上行已启用: target=%ux%u",
+                     (unsigned)WECHAT_VOIP_VIDEO_WIDTH,
+                     (unsigned)WECHAT_VOIP_VIDEO_HEIGHT);
         }
         return true;
     }

@@ -6,6 +6,7 @@
 
 #include "esp_check.h"
 #include "esp_app_desc.h"
+#include "esp_chip_info.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -13,10 +14,13 @@
 #include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
 
 #include "cJSON.h"
 
+#include "app_ai_chat_config.h"
 #include "app_audio_config.h"
+#include "app_audio_policy.h"
 #include "app_config.h"
 #include "app_internal.h"
 #include "app_rtc_config.h"
@@ -26,8 +30,10 @@
 #include "audio_device.h"
 #include "camera_driver.h"
 #include "camera_pipeline.h"
+#include "call_video_renderer.h"
 #include "device.h"
 #include "device_binding.h"
+#include "device_call.h"
 #include "device_identity.h"
 #include "device_online.h"
 #include "display.h"
@@ -40,6 +46,9 @@
 #include "rtc_transport.h"
 #include "sender_test.h"
 #include "system_time.h"
+#include "thing_mqtt_client.h"
+#include "thing_service_registry.h"
+#include "wechat_voip_config.h"
 #include "wechat_voip_service.h"
 
 #if APP_CONFIG_DEBUG_SCREEN_SERVER_ENABLE
@@ -48,13 +57,28 @@
 
 static const char *TAG = "app";
 
+static void app_log_performance_profile(void)
+{
+	esp_chip_info_t chip = {0};
+	esp_chip_info(&chip);
+
+	ESP_LOGI(TAG,
+		 "performance profile: chip_rev=%u.%02u cores=%u cpu=%uMHz pm=off "
+		 "flash=qio/%uMHz psram=hex/%uMHz/%uMB l2=%uKB sdio=4bit/%uMHz",
+		 (unsigned)(chip.revision / 100U),
+		 (unsigned)(chip.revision % 100U),
+		 (unsigned)chip.cores,
+		 (unsigned)CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+		 (unsigned)CONFIG_ESPTOOLPY_FLASHFREQ_VAL,
+		 (unsigned)CONFIG_SPIRAM_SPEED,
+		 (unsigned)(heap_caps_get_total_size(MALLOC_CAP_SPIRAM) / (1024U * 1024U)),
+		 (unsigned)(CONFIG_CACHE_L2_CACHE_SIZE / 1024U),
+		 (unsigned)(CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ / 1000U));
+}
+
 static void *app_calloc_psram(size_t count, size_t size)
 {
-	void *ptr = heap_caps_calloc(count, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-	if (ptr == NULL) {
-		ptr = calloc(count, size);
-	}
-	return ptr;
+	return app_memory_calloc_psram(count, size);
 }
 
 #define APP_CONTROL_TASK_STACK_SIZE 8192
@@ -70,6 +94,9 @@ static void *app_calloc_psram(size_t count, size_t size)
 #define APP_RUNTIME_SNAPSHOT_INTERVAL_MS 10000U
 #define APP_RUNTIME_MONITOR_TASK_STACK_SIZE 4096
 #define APP_RUNTIME_MONITOR_TASK_PRIORITY   1
+#define APP_DEVICE_UNBIND_ACK_WAIT_MS       2000U
+#define APP_THING_BOOTSTRAP_TASK_STACK_SIZE (12U * 1024U)
+#define APP_THING_BOOTSTRAP_TASK_PRIORITY   2
 
 typedef enum {
 	APP_CONTROL_EVENT_SPEAKER_VOLUME = 1,
@@ -77,6 +104,8 @@ typedef enum {
 	APP_CONTROL_EVENT_RTC_RECONFIGURE,
 	APP_CONTROL_EVENT_RTC_PREPARE_AFTER_IDENTITY,
 	APP_CONTROL_EVENT_RTC_IDENTITY_CONFLICT,
+	APP_CONTROL_EVENT_DEVICE_UNBIND,
+	APP_CONTROL_EVENT_CALL_SESSION_ENDED,
 } app_control_event_type_t;
 
 typedef enum {
@@ -99,12 +128,18 @@ typedef struct {
 	app_id_t app_id;
 } app_lifecycle_event_t;
 
+typedef struct {
+	char reason[APP_RTC_RECONFIGURE_REASON_MAX];
+} app_thing_bootstrap_context_t;
+
 static portMUX_TYPE s_app_lifecycle_lock = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t s_app_control_queue;
 static TaskHandle_t s_app_control_task;
 static QueueHandle_t s_app_lifecycle_queue;
 static TaskHandle_t s_app_lifecycle_task;
+#if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
 static TaskHandle_t s_app_runtime_monitor_task;
+#endif
 static app_id_t s_active_app = APP_ID_HOME;
 static uint32_t s_active_resources;
 static bool s_door_open;
@@ -114,47 +149,81 @@ static bool s_rtc_sdk_prepared;
 static bool s_rtc_identity_conflict_handled;
 static char s_rtc_identity_conflict_device_id[APP_RTC_CONFIG_TEXT_MAX];
 static char s_rtc_identity_conflict_client_id[APP_RTC_CONFIG_TEXT_MAX];
+static bool s_thing_bootstrap_running;
+
+static void app_ai_chat_media_active_changed(bool active, void *ctx);
+
+typedef struct {
+	bool video_renderer_started;
+	bool video_profile_applied;
+	media_governor_video_config_t previous_video_config;
+} app_call_resource_context_t;
+
+static app_call_resource_context_t s_call_resources;
+
+static esp_err_t app_configure_thing_service_registry(void)
+{
+	const thing_service_registry_config_t config = {
+		.discovery_url = APP_CONFIG_THING_SERVICE_DISCOVERY_URL,
+		.device_api_base = APP_CONFIG_DEVICE_BINDING_API_BASE,
+		.voip_api_base = APP_CONFIG_WECHAT_VOIP_API_BASE,
+		.ai_api_base = APP_CONFIG_DEVICE_BINDING_API_BASE,
+		.call_api_base = APP_CONFIG_DEVICE_BINDING_API_BASE,
+		.mqtt_uri = APP_CONFIG_DEVICE_BINDING_MQTT_URI,
+		.tirtc_endpoint = APP_CONFIG_RTC_SERVICE_ENDPOINT,
+	};
+
+	return thing_service_registry_init(&config);
+}
 
 static void app_log_heap_snapshot(const char *stage)
 {
-	size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-	size_t internal_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-	size_t dma_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-	size_t dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-	size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-	size_t psram_largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#if CONFIG_APP_VERBOSE_RUNTIME_LOGS
+	app_memory_snapshot_t memory = {0};
 	media_dma_reserve_snapshot_t dma_reserve = {0};
 
+	app_memory_get_snapshot(&memory);
 	media_dma_reserve_get_snapshot(&dma_reserve);
 
 	ESP_LOGI(TAG,
-		 "%s heap: internal_free=%u internal_largest=%u dma_free=%u dma_largest=%u psram_free=%u psram_largest=%u dma_escrow=%u/%u",
+		 "%s heap: internal_free=%u internal_largest=%u internal_min=%u dma_free=%u dma_largest=%u dma_min=%u "
+		 "psram_free=%u psram_largest=%u psram_min=%u psram_fail=%u dma_escrow=%u/%u",
 		 stage != NULL ? stage : "runtime",
-		 (unsigned)internal_free,
-		 (unsigned)internal_largest,
-		 (unsigned)dma_free,
-		 (unsigned)dma_largest,
-		 (unsigned)psram_free,
-		 (unsigned)psram_largest,
+		 (unsigned)memory.internal_free,
+		 (unsigned)memory.internal_largest,
+		 (unsigned)memory.internal_min_free,
+		 (unsigned)memory.dma_free,
+		 (unsigned)memory.dma_largest,
+		 (unsigned)memory.dma_min_free,
+		 (unsigned)memory.psram_free,
+		 (unsigned)memory.psram_largest,
+		 (unsigned)memory.psram_min_free,
+		 (unsigned)memory.psram_alloc_failures,
 		 (unsigned)dma_reserve.reserved_bytes,
 		 (unsigned)dma_reserve.configured_bytes);
+#else
+	(void)stage;
+#endif
 }
 
+#if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
 static void app_log_runtime_snapshot(void)
 {
-	size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-	size_t internal_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-	size_t dma_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-	size_t dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-	size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-	size_t psram_largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+	app_memory_snapshot_t memory = {0};
 	network_state_t network = {0};
 	rtc_transport_stats_t rtc = {0};
 	camera_pipeline_metrics_t camera = {0};
 	media_sink_stats_t sink = {0};
 	audio_stats_t audio = {0};
 	media_dma_reserve_snapshot_t dma_reserve = {0};
+	UBaseType_t control_stack_hwm = s_app_control_task != NULL ?
+		uxTaskGetStackHighWaterMark(s_app_control_task) : 0;
+	UBaseType_t lifecycle_stack_hwm = s_app_lifecycle_task != NULL ?
+		uxTaskGetStackHighWaterMark(s_app_lifecycle_task) : 0;
+	UBaseType_t monitor_stack_hwm = s_app_runtime_monitor_task != NULL ?
+		uxTaskGetStackHighWaterMark(s_app_runtime_monitor_task) : 0;
 
+	app_memory_get_snapshot(&memory);
 	network_get_state(&network);
 	rtc_transport_get_stats(&rtc);
 	camera_pipeline_get_metrics(&camera);
@@ -163,16 +232,22 @@ static void app_log_runtime_snapshot(void)
 	media_dma_reserve_get_snapshot(&dma_reserve);
 
 	ESP_LOGI(TAG,
-		 "runtime snapshot: internal_free=%u internal_largest=%u dma_free=%u dma_largest=%u psram_free=%u psram_largest=%u "
+		 "runtime snapshot: internal_free=%u internal_largest=%u internal_min=%u dma_free=%u dma_largest=%u dma_min=%u "
+		 "psram_free=%u psram_largest=%u psram_min=%u psram_fail=%u "
 		 "camera=%d rtc=%d %ux%u fps=%u.%u bitrate=%ukbps drop=%u enc_fail=%u direct=%d "
-		 "video_pool=%u video_slot=%u video_q=%u free=%u audio_tx_q=%u audio_rx_q=%u audio_buf_ms=%u "
-		 "wifi=%d rssi=%d rtc_sendbuf=%u audio_cap=%d speaker=%d dma_escrow=%u/%u rel=%u rec=%u fail=%u",
-		 (unsigned)internal_free,
-		 (unsigned)internal_largest,
-		 (unsigned)dma_free,
-		 (unsigned)dma_largest,
-		 (unsigned)psram_free,
-		 (unsigned)psram_largest,
+		 "video_pool=%u video_slot=%u video_q=%u free=%u audio_pool=%u audio_tx_q=%u audio_free=%u audio_rx_q=%u audio_buf_ms=%u "
+		 "wifi=%d rssi=%d rtc_sendbuf=%u audio_cap=%d speaker=%d dma_escrow=%u/%u rel=%u rec=%u fail=%u "
+		 "task_hwm=ctrl:%u,life:%u,monitor:%u",
+		 (unsigned)memory.internal_free,
+		 (unsigned)memory.internal_largest,
+		 (unsigned)memory.internal_min_free,
+		 (unsigned)memory.dma_free,
+		 (unsigned)memory.dma_largest,
+		 (unsigned)memory.dma_min_free,
+		 (unsigned)memory.psram_free,
+		 (unsigned)memory.psram_largest,
+		 (unsigned)memory.psram_min_free,
+		 (unsigned)memory.psram_alloc_failures,
 		 camera.running ? 1 : 0,
 		 camera.rtc_enabled ? 1 : 0,
 		 (unsigned)camera.width,
@@ -187,7 +262,9 @@ static void app_log_runtime_snapshot(void)
 		 (unsigned)rtc.local_video_tx_largest_slot,
 		 (unsigned)rtc.local_video_tx_queue_len,
 		 (unsigned)rtc.local_video_tx_free_slots,
+		 (unsigned)rtc.local_audio_tx_pool_capacity,
 		 (unsigned)rtc.local_audio_tx_queue_len,
+		 (unsigned)rtc.local_audio_tx_free_slots,
 		 (unsigned)sink.audio_queue_len,
 		 (unsigned)sink.audio_buffered_ms,
 		 network.connected ? 1 : 0,
@@ -199,8 +276,12 @@ static void app_log_runtime_snapshot(void)
 		 (unsigned)dma_reserve.configured_bytes,
 		 (unsigned)dma_reserve.release_count,
 		 (unsigned)dma_reserve.reclaim_count,
-		 (unsigned)dma_reserve.reserve_fail_count);
+		 (unsigned)dma_reserve.reserve_fail_count,
+		 (unsigned)control_stack_hwm,
+		 (unsigned)lifecycle_stack_hwm,
+		 (unsigned)monitor_stack_hwm);
 }
+#endif
 
 static void app_preload_persistent_state(void)
 {
@@ -224,10 +305,10 @@ static esp_err_t app_prepare_rtc_after_config_if_ready(const char *reason);
 static esp_err_t app_reconfigure_tirtc_after_settings_change(const char *reason);
 static void app_request_rtc_reconfigure_after_settings_change(const char *reason);
 static void app_request_rtc_prepare_after_identity(const char *reason);
-static void app_request_rtc_identity_conflict_rebind(int error,
-						     const char *device_id,
-						     const char *client_id,
-						     void *ctx);
+static void app_request_rtc_identity_conflict(int error,
+					      const char *device_id,
+					      const char *client_id,
+					      void *ctx);
 static bool app_rtc_identity_conflict_mark_pending(const char *device_id, const char *client_id);
 static void app_rtc_identity_conflict_clear_if_new_credentials(const char *device_id);
 static bool app_wait_device_binding_before_rtc(const char *reason);
@@ -235,7 +316,17 @@ static void app_wait_identity_before_rtc_prepare(const char *reason);
 static esp_err_t app_start_device_binding_reconcile_if_needed(const char *reason);
 static esp_err_t app_start_device_identity_services(const char *reason);
 static esp_err_t app_start_device_online_if_ready(const char *reason);
+static void app_start_device_call_ingress(void);
+static esp_err_t app_configure_device_call(void);
+static bool app_device_call_can_accept_incoming(void *ctx);
+static void app_device_call_session_ended(void *ctx);
+static void app_release_call_session_resources_if_idle(void);
+static void app_release_call_session_resources_internal(bool restore_video_profile);
+static esp_err_t app_handle_device_unbind(const char *reason);
+static void app_request_device_unbind(const char *reason);
+static void app_schedule_thing_bootstrap(const char *reason);
 static void app_time_sync_cb(esp_err_t result, bool time_valid, void *ctx);
+static esp_err_t app_reset_device_binding_internal(const char *reason);
 
 enum {
 	APP_RESOURCE_RTC = 1U << 0,
@@ -248,11 +339,15 @@ typedef struct {
 	uint32_t resources;
 } app_resource_profile_t;
 
+#define APP_WECHAT_RESOURCE_MASK \
+	(APP_RESOURCE_RTC | APP_RESOURCE_AUDIO | \
+	 ((APP_CONFIG_WECHAT_VOIP_LOCAL_VIDEO_ENABLE != 0) ? APP_RESOURCE_CAMERA : 0U))
+
 static const app_resource_profile_t s_app_resource_profiles[] = {
 	{ APP_ID_HOME, 0 },
 	{ APP_ID_DEVICE, 0 },
 	{ APP_ID_CALL, 0 },
-	{ APP_ID_WECHAT, APP_RESOURCE_RTC | APP_RESOURCE_AUDIO },
+	{ APP_ID_WECHAT, APP_WECHAT_RESOURCE_MASK },
 	{ APP_ID_AI_CHAT, APP_RESOURCE_RTC },
 	{ APP_ID_SYSTEM, 0 },
 };
@@ -358,11 +453,15 @@ static esp_err_t app_build_ai_chat_config(ai_chat_config_t *config)
 	app_get_rtc_config_snapshot(&rtc_settings);
 	memset(config, 0, sizeof(*config));
 	config->enabled = APP_CONFIG_AI_CHAT_ENABLE != 0;
+	config->media_active_cb = app_ai_chat_media_active_changed;
+	config->media_active_ctx = NULL;
 	strlcpy(config->device_id, rtc_settings.device_id, sizeof(config->device_id));
 	strlcpy(config->user_id, APP_CONFIG_AI_CHAT_USER_ID, sizeof(config->user_id));
 	strlcpy(config->role_id, APP_CONFIG_AI_CHAT_ROLE_ID, sizeof(config->role_id));
 	strlcpy(config->device_key, rtc_settings.device_secret, sizeof(config->device_key));
-	strlcpy(config->token_api_base, APP_CONFIG_DEVICE_BINDING_API_BASE, sizeof(config->token_api_base));
+	strlcpy(config->token_api_base,
+		thing_service_registry_ai_api_base(),
+		sizeof(config->token_api_base));
 	if (device_identity_get(&identity) == ESP_OK) {
 		strlcpy(config->device_mac, identity.mac, sizeof(config->device_mac));
 	}
@@ -456,28 +555,15 @@ static esp_err_t app_device_binding_load_credentials(device_binding_credentials_
 	return ESP_OK;
 }
 
-static esp_err_t app_device_binding_clear_credentials(void *ctx)
-{
-	(void)ctx;
-
-	ESP_RETURN_ON_ERROR(app_clear_rtc_device_credentials(),
-			    TAG,
-			    "clear stale rtc credentials failed");
-	device_online_notify_credentials_cleared("binding-unbound");
-	app_request_rtc_reconfigure_after_settings_change("binding-unbound");
-	return ESP_OK;
-}
-
 static esp_err_t app_configure_device_binding(void)
 {
 	device_binding_config_t config = {
 		.enabled = APP_CONFIG_DEVICE_BINDING_ENABLE != 0,
-		.api_base = APP_CONFIG_DEVICE_BINDING_API_BASE,
-		.mqtt_uri = APP_CONFIG_DEVICE_BINDING_MQTT_URI,
+		.api_base = thing_service_registry_device_api_base(),
+		.mqtt_uri = thing_service_registry_mqtt_uri(),
 		.wait_timeout_ms = APP_CONFIG_DEVICE_BINDING_WAIT_TIMEOUT_MS,
 		.load_credentials = app_device_binding_load_credentials,
 		.save_credentials = app_device_binding_save_credentials,
-		.clear_credentials = app_device_binding_clear_credentials,
 		.ctx = NULL,
 	};
 
@@ -526,12 +612,17 @@ static bool app_device_online_payload_is_unbind(const char *payload, size_t payl
 	return unbind;
 }
 
-static void app_start_binding_with_retained_credentials(const char *reason)
+static esp_err_t app_start_binding_with_retained_credentials(const char *reason)
 {
-	esp_err_t ret = device_binding_start_async(reason != NULL ? reason : "rebind");
+	const char *safe_reason = reason != NULL && reason[0] != '\0' ? reason : "rebind";
+
+	/* A retained-credential reconcile still needs a fresh signed Report session. */
+	device_binding_reset_state(safe_reason);
+	esp_err_t ret = device_binding_start_async(safe_reason);
 	if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
 		ESP_LOGW(TAG, "start retained binding failed: %s", esp_err_to_name(ret));
 	}
+	return ret == ESP_ERR_INVALID_STATE ? ESP_OK : ret;
 }
 
 static void app_device_online_message_cb(const char *topic,
@@ -543,8 +634,7 @@ static void app_device_online_message_cb(const char *topic,
 
 	if (app_device_online_payload_is_unbind(payload, payload_len)) {
 		ESP_LOGI(TAG, "device unbind command received");
-		device_online_stop();
-		app_start_binding_with_retained_credentials("unbind");
+		app_request_device_unbind("mqtt-unbind");
 	}
 }
 
@@ -611,15 +701,50 @@ static void app_device_online_rebind_required_cb(void *ctx)
 	(void)ctx;
 
 	ESP_LOGI(TAG, "device token reset reported by server");
-	app_start_binding_with_retained_credentials("token-reset");
+	(void)app_start_binding_with_retained_credentials("token-reset");
+}
+
+static esp_err_t app_handle_device_unbind(const char *reason)
+{
+	const char *safe_reason = reason != NULL && reason[0] != '\0' ? reason : "mqtt-unbind";
+	esp_err_t ack_ret = thing_mqtt_client_wait_last_command_ack(APP_DEVICE_UNBIND_ACK_WAIT_MS);
+
+	if (ack_ret == ESP_OK) {
+		ESP_LOGI(TAG, "device unbind command ACK confirmed by broker");
+	} else {
+		ESP_LOGW(TAG,
+			 "device unbind command ACK not confirmed before reset: ret=%s",
+			 esp_err_to_name(ack_ret));
+	}
+	ESP_LOGI(TAG,
+		 "device unbind command starts signed rebind with retained identity: reason=%s",
+		 safe_reason);
+	return app_reset_device_binding_internal(safe_reason);
+}
+
+static void app_request_device_unbind(const char *reason)
+{
+	if (s_app_control_queue == NULL) {
+		ESP_LOGW(TAG, "device unbind event dropped: control queue not ready");
+		return;
+	}
+
+	app_control_event_t event = {
+		.type = APP_CONTROL_EVENT_DEVICE_UNBIND,
+	};
+	strlcpy(event.reason, reason != NULL ? reason : "mqtt-unbind", sizeof(event.reason));
+
+	if (xQueueSendToBack(s_app_control_queue, &event, 0) != pdTRUE) {
+		ESP_LOGW(TAG, "device unbind event dropped: queue full reason=%s", event.reason);
+	}
 }
 
 static esp_err_t app_configure_device_online(void)
 {
 	device_online_config_t config = {
 		.enabled = APP_CONFIG_DEVICE_BINDING_ENABLE != 0,
-		.api_base = APP_CONFIG_DEVICE_BINDING_API_BASE,
-		.mqtt_uri = APP_CONFIG_DEVICE_BINDING_MQTT_URI,
+		.api_base = thing_service_registry_device_api_base(),
+		.mqtt_uri = thing_service_registry_mqtt_uri(),
 		.heartbeat_interval_ms = 0,
 		.load_credentials = app_device_online_load_credentials,
 		.on_message = app_device_online_message_cb,
@@ -631,6 +756,53 @@ static esp_err_t app_configure_device_online(void)
 	};
 
 	return device_online_init(&config);
+}
+
+static esp_err_t app_configure_device_call(void)
+{
+	const device_call_config_t config = {
+		.enabled = APP_CONFIG_DEVICE_BINDING_ENABLE != 0,
+		.api_base = thing_service_registry_call_api_base(),
+		.can_accept_incoming = app_device_call_can_accept_incoming,
+		.on_session_ended = app_device_call_session_ended,
+		.ctx = NULL,
+	};
+
+	return device_call_init(&config);
+}
+
+static bool app_device_call_can_accept_incoming(void *ctx)
+{
+	(void)ctx;
+
+	switch (app_get_active_app()) {
+	case APP_ID_HOME:
+	case APP_ID_DEVICE:
+	case APP_ID_CALL:
+	case APP_ID_SYSTEM:
+		return true;
+	case APP_ID_WECHAT:
+	case APP_ID_AI_CHAT:
+	default:
+		return false;
+	}
+}
+
+static void app_device_call_session_ended(void *ctx)
+{
+	(void)ctx;
+
+	if (s_app_control_queue == NULL) {
+		ESP_LOGW(TAG, "device call resource release dropped: control queue not ready");
+		return;
+	}
+
+	const app_control_event_t event = {
+		.type = APP_CONTROL_EVENT_CALL_SESSION_ENDED,
+	};
+	if (xQueueSendToBack(s_app_control_queue, &event, 0) != pdTRUE) {
+		ESP_LOGW(TAG, "device call resource release dropped: control queue full");
+	}
 }
 
 static void app_control_task(void *arg)
@@ -675,6 +847,7 @@ static void app_control_task(void *arg)
 			if (network_is_connected() && system_time_has_valid_time()) {
 				device_online_set_network_ready(true);
 			}
+			device_call_reset_identity_state();
 			(void)device_online_notify_credentials_changed(reason);
 			ret = app_reconfigure_tirtc_after_settings_change(reason);
 			if (ret != ESP_OK) {
@@ -715,21 +888,33 @@ static void app_control_task(void *arg)
 		{
 			if (!app_rtc_identity_conflict_mark_pending(event.rtc_device_id, event.rtc_client_id)) {
 				ESP_LOGW(TAG,
-					 "rtc identity conflict already handled: device_id=%s client_id=%s, wait for server-side identity reset or different binding",
+					 "rtc device ownership conflict already reported: device_id=%s physical_client_id=%s, binding preserved",
 					 event.rtc_device_id,
 					 event.rtc_client_id);
 				break;
 			}
 			ESP_LOGW(TAG,
-				 "rtc identity conflict: device_id=%s client_id=%s, reset local binding",
+				 "rtc device ownership conflict: device_id=%s is registered to another client_id; physical_client_id=%s, preserve binding and wait for server mapping repair",
 				 event.rtc_device_id,
 				 event.rtc_client_id);
-			esp_err_t ret = app_reset_device_binding();
+			(void)device_online_report_state_async("rtc-client-conflict");
+			break;
+		}
+		case APP_CONTROL_EVENT_DEVICE_UNBIND:
+		{
+			const char *reason = event.reason[0] != '\0' ? event.reason : "mqtt-unbind";
+			esp_err_t ret = app_handle_device_unbind(reason);
 			if (ret != ESP_OK) {
-				ESP_LOGW(TAG, "rtc identity conflict reset failed: %s", esp_err_to_name(ret));
+				ESP_LOGW(TAG,
+					 "device unbind flow failed: reason=%s ret=%s",
+					 reason,
+					 esp_err_to_name(ret));
 			}
 			break;
 		}
+		case APP_CONTROL_EVENT_CALL_SESSION_ENDED:
+			app_release_call_session_resources_if_idle();
+			break;
 		default:
 			ESP_LOGW(TAG, "unknown app control event: type=%u", (unsigned)event.type);
 			break;
@@ -787,7 +972,7 @@ static esp_err_t app_start_control_task(void)
 	if (s_app_control_queue == NULL) {
 		s_app_control_queue = xQueueCreateWithCaps(APP_CONTROL_QUEUE_LENGTH,
 							   sizeof(app_control_event_t),
-							   APP_QUEUE_CAPS_BACKGROUND);
+							   APP_QUEUE_CAPS_CONTROL);
 		if (s_app_control_queue == NULL) {
 			return ESP_ERR_NO_MEM;
 		}
@@ -802,15 +987,6 @@ static esp_err_t app_start_control_task(void)
 							  &s_app_control_task,
 							  APP_TASK_STACK_CAPS_CONTROL);
 		if (task_ret != pdPASS) {
-			task_ret = xTaskCreateWithCaps(app_control_task,
-						       "app_ctrl",
-						       APP_CONTROL_TASK_STACK_SIZE,
-						       NULL,
-						       APP_CONTROL_TASK_PRIORITY,
-						       &s_app_control_task,
-						       APP_TASK_STACK_CAPS_INTERNAL);
-		}
-		if (task_ret != pdPASS) {
 			vQueueDeleteWithCaps(s_app_control_queue);
 			s_app_control_queue = NULL;
 			return ESP_ERR_NO_MEM;
@@ -820,7 +996,7 @@ static esp_err_t app_start_control_task(void)
 	if (s_app_lifecycle_queue == NULL) {
 		s_app_lifecycle_queue = xQueueCreateWithCaps(APP_LIFECYCLE_QUEUE_LENGTH,
 							     sizeof(app_lifecycle_event_t),
-							     APP_QUEUE_CAPS_BACKGROUND);
+							     APP_QUEUE_CAPS_CONTROL);
 		if (s_app_lifecycle_queue == NULL) {
 			return ESP_ERR_NO_MEM;
 		}
@@ -834,15 +1010,6 @@ static esp_err_t app_start_control_task(void)
 							  APP_LIFECYCLE_TASK_PRIORITY,
 							  &s_app_lifecycle_task,
 							  APP_TASK_STACK_CAPS_CONTROL);
-		if (task_ret != pdPASS) {
-			task_ret = xTaskCreateWithCaps(app_lifecycle_task,
-						       "app_lifecycle",
-						       APP_LIFECYCLE_TASK_STACK_SIZE,
-						       NULL,
-						       APP_LIFECYCLE_TASK_PRIORITY,
-						       &s_app_lifecycle_task,
-						       APP_TASK_STACK_CAPS_INTERNAL);
-		}
 		if (task_ret != pdPASS) {
 			vQueueDeleteWithCaps(s_app_lifecycle_queue);
 			s_app_lifecycle_queue = NULL;
@@ -889,10 +1056,7 @@ static void app_request_rtc_reconfigure_after_settings_change(const char *reason
 
 static bool app_ai_chat_can_auto_start(void)
 {
-	ai_chat_snapshot_t snapshot = {0};
-
-	ai_chat_get_snapshot(&snapshot);
-	return snapshot.state == AI_CHAT_STATE_IDLE && snapshot.last_error == 0;
+	return ai_chat_can_start();
 }
 
 static void app_request_ai_chat_start_if_idle(const char *reason)
@@ -947,14 +1111,75 @@ static esp_err_t app_rtc_set_door_open(bool open, void *ctx)
 	return ESP_OK;
 }
 
+static bool app_rtc_media_uses_echo_cancel(app_id_t app_id)
+{
+	switch (app_id) {
+	case APP_ID_HOME:
+		/* Incoming IPC/device calls can become active before the UI changes page. */
+	case APP_ID_DEVICE:
+	case APP_ID_CALL:
+	case APP_ID_WECHAT:
+	case APP_ID_AI_CHAT:
+		return true;
+	case APP_ID_SYSTEM:
+	default:
+		return false;
+	}
+}
+
+static void app_set_rtc_echo_cancel_active(bool active, app_id_t active_app)
+{
+	esp_err_t ret = app_audio_policy_set_aec_source_active(
+		APP_AUDIO_AEC_SOURCE_RTC_MEDIA,
+		active && app_rtc_media_uses_echo_cancel(active_app));
+	if (ret != ESP_OK) {
+		ESP_LOGW(TAG,
+			 "sync RTC echo cancellation failed: active=%d app=%s ret=%s",
+			 active ? 1 : 0,
+			 app_id_name(active_app),
+			 esp_err_to_name(ret));
+	}
+}
+
+static void app_ai_chat_media_active_changed(bool active, void *ctx)
+{
+	(void)ctx;
+
+	esp_err_t ret = app_audio_policy_set_aec_source_active(
+		APP_AUDIO_AEC_SOURCE_AI_CHAT_MEDIA,
+		active);
+	if (ret != ESP_OK) {
+		ESP_LOGW(TAG,
+			 "sync AI Chat echo cancellation failed: active=%d ret=%s",
+			 active ? 1 : 0,
+			 esp_err_to_name(ret));
+	}
+}
+
+void app_reset_rtc_call_media_state(void)
+{
+	(void)app_state_sync_call_media_defaults(false, NULL);
+	app_set_rtc_echo_cancel_active(false, APP_ID_HOME);
+}
+
 static void app_rtc_call_active_changed(bool active, void *ctx)
 {
 	app_control_state_t control = {0};
+	app_id_t active_app = APP_ID_HOME;
+	bool media_defaults_changed = false;
 
 	(void)ctx;
 
-	if (!app_state_sync_call_media_defaults(active, &control)) {
+	media_defaults_changed = app_state_sync_call_media_defaults(active, &control);
+	active_app = app_get_active_app();
+	app_set_rtc_echo_cancel_active(active, active_app);
+	if (!media_defaults_changed) {
 		return;
+	}
+	if (active && active_app == APP_ID_WECHAT &&
+	    APP_CONFIG_WECHAT_VOIP_LOCAL_VIDEO_ENABLE == 0) {
+		app_state_set_video_enabled(false);
+		control.video_enabled = false;
 	}
 
 	ESP_LOGI(TAG,
@@ -985,7 +1210,7 @@ static esp_err_t app_register_rtc_observer(void)
 {
 	const rtc_transport_observer_t observer = {
 		.on_call_active = app_rtc_call_active_changed,
-		.on_start_error = app_request_rtc_identity_conflict_rebind,
+		.on_start_error = app_request_rtc_identity_conflict,
 	};
 
 	return rtc_transport_register_observer(&observer, NULL);
@@ -1108,6 +1333,10 @@ static esp_err_t app_prepare_rtc_if_network_ready(void)
 	}
 
 	if (system_time_has_valid_time()) {
+		if (!thing_service_registry_is_ready()) {
+			app_schedule_thing_bootstrap("prepare");
+			return ESP_ERR_INVALID_STATE;
+		}
 		esp_err_t identity_ret = app_start_device_identity_services("prepare");
 		if (identity_ret != ESP_OK && identity_ret != ESP_ERR_INVALID_STATE) {
 			ESP_LOGW(TAG, "device identity start before rtc prepare failed: %s", esp_err_to_name(identity_ret));
@@ -1144,6 +1373,20 @@ static esp_err_t app_prepare_rtc_after_time_sync(const char *reason)
 		}
 		return ESP_ERR_INVALID_STATE;
 	}
+
+#if APP_CONFIG_DEVICE_BINDING_ENABLE != 0
+	device_online_snapshot_t online = {0};
+	if (!device_online_is_online()) {
+		device_online_get_snapshot(&online);
+		ESP_LOGW(TAG,
+			 "rtc prepare waits for ThingConnect online identity: reason=%s state=%d running=%d mqtt=%d",
+			 reason != NULL ? reason : "time",
+			 (int)online.state,
+			 online.running ? 1 : 0,
+			 online.mqtt_connected ? 1 : 0);
+		return ESP_ERR_INVALID_STATE;
+	}
+#endif
 
 	esp_err_t ret = app_init_rtc_transport();
 	if (ret != ESP_OK) {
@@ -1272,6 +1515,15 @@ static void app_wait_identity_before_rtc_prepare(const char *reason)
 		 online.running ? 1 : 0,
 		 online.mqtt_connected ? 1 : 0,
 		 (unsigned)waited_ms);
+	if (!device_online_is_online()) {
+		ESP_LOGW(TAG,
+			 "rtc prepare skipped: ThingConnect identity is not online reason=%s state=%d running=%d mqtt=%d",
+			 reason != NULL ? reason : "identity-ready",
+			 (int)online.state,
+			 online.running ? 1 : 0,
+			 online.mqtt_connected ? 1 : 0);
+		return;
+	}
 
 	esp_err_t ret = app_prepare_rtc_after_time_sync(reason != NULL ? reason : "identity-ready");
 	if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
@@ -1294,10 +1546,10 @@ static void app_request_rtc_prepare_after_identity(const char *reason)
 	}
 }
 
-static void app_request_rtc_identity_conflict_rebind(int error,
-						     const char *device_id,
-						     const char *client_id,
-						     void *ctx)
+static void app_request_rtc_identity_conflict(int error,
+					      const char *device_id,
+					      const char *client_id,
+					      void *ctx)
 {
 	(void)ctx;
 
@@ -1332,10 +1584,103 @@ static bool app_should_prepare_rtc_for_active_app(app_id_t app_id)
 	return true;
 }
 
+static void app_thing_bootstrap_task(void *arg)
+{
+	app_thing_bootstrap_context_t *context = (app_thing_bootstrap_context_t *)arg;
+	char reason[APP_RTC_RECONFIGURE_REASON_MAX] = "thing-bootstrap";
+
+	if (context != NULL && context->reason[0] != '\0') {
+		strlcpy(reason, context->reason, sizeof(reason));
+	}
+
+	if (network_is_connected() && system_time_has_valid_time()) {
+		esp_err_t discovery_ret = thing_service_registry_refresh();
+		if (discovery_ret != ESP_OK) {
+			ESP_LOGW(TAG,
+				 "service discovery failed, using configured fallback endpoints: %s",
+				 esp_err_to_name(discovery_ret));
+		}
+		esp_err_t call_endpoint_ret =
+			device_call_set_api_base(thing_service_registry_call_api_base());
+		if (call_endpoint_ret != ESP_OK) {
+			ESP_LOGW(TAG,
+				 "device call endpoint update failed: %s",
+				 esp_err_to_name(call_endpoint_ret));
+		}
+
+		if (network_is_connected() && system_time_has_valid_time()) {
+			app_id_t active_app = app_get_active_app();
+			esp_err_t identity_ret = app_start_device_identity_services(reason);
+			if (identity_ret != ESP_OK && identity_ret != ESP_ERR_INVALID_STATE) {
+				ESP_LOGW(TAG,
+					 "device identity start after service discovery failed: %s",
+					 esp_err_to_name(identity_ret));
+			}
+			(void)device_online_report_state_async(reason);
+			if (app_should_prepare_rtc_for_active_app(active_app)) {
+				app_request_rtc_prepare_after_identity(reason);
+			}
+			if (active_app == APP_ID_AI_CHAT) {
+				app_request_ai_chat_start_if_idle(reason);
+			}
+		}
+	}
+
+	taskENTER_CRITICAL(&s_app_lifecycle_lock);
+	s_thing_bootstrap_running = false;
+	taskEXIT_CRITICAL(&s_app_lifecycle_lock);
+	free(context);
+	vTaskDeleteWithCaps(NULL);
+}
+
+static void app_schedule_thing_bootstrap(const char *reason)
+{
+	app_thing_bootstrap_context_t *context = NULL;
+	bool already_running = false;
+
+	if (!network_is_connected() || !system_time_has_valid_time()) {
+		return;
+	}
+
+	context = app_calloc_psram(1, sizeof(*context));
+	if (context == NULL) {
+		ESP_LOGW(TAG, "service bootstrap context allocation failed");
+		return;
+	}
+	strlcpy(context->reason,
+		reason != NULL && reason[0] != '\0' ? reason : "thing-bootstrap",
+		sizeof(context->reason));
+
+	taskENTER_CRITICAL(&s_app_lifecycle_lock);
+	already_running = s_thing_bootstrap_running;
+	if (!already_running) {
+		s_thing_bootstrap_running = true;
+	}
+	taskEXIT_CRITICAL(&s_app_lifecycle_lock);
+	if (already_running) {
+		free(context);
+		return;
+	}
+
+	BaseType_t task_ret = xTaskCreatePinnedToCoreWithCaps(app_thing_bootstrap_task,
+							     "thing_bootstrap",
+							     APP_THING_BOOTSTRAP_TASK_STACK_SIZE,
+							     context,
+							     APP_THING_BOOTSTRAP_TASK_PRIORITY,
+							     NULL,
+							     APP_TASK_CORE_BACKGROUND,
+							     APP_TASK_STACK_CAPS_BACKGROUND);
+	if (task_ret != pdPASS) {
+		taskENTER_CRITICAL(&s_app_lifecycle_lock);
+		s_thing_bootstrap_running = false;
+		taskEXIT_CRITICAL(&s_app_lifecycle_lock);
+		free(context);
+		ESP_LOGW(TAG, "service bootstrap task create failed");
+	}
+}
+
 static void app_time_sync_cb(esp_err_t result, bool time_valid, void *ctx)
 {
-	app_id_t active_app = app_get_active_app();
-
 	(void)ctx;
 
 	if (result != ESP_OK || !time_valid) {
@@ -1346,18 +1691,7 @@ static void app_time_sync_cb(esp_err_t result, bool time_valid, void *ctx)
 		return;
 	}
 
-	esp_err_t identity_ret = app_start_device_identity_services("time-sync");
-	if (identity_ret != ESP_OK && identity_ret != ESP_ERR_INVALID_STATE) {
-		ESP_LOGW(TAG, "device identity start after time sync failed: %s", esp_err_to_name(identity_ret));
-	}
-	(void)device_online_report_state_async("time-sync");
-
-	if (app_should_prepare_rtc_for_active_app(active_app)) {
-		app_request_rtc_prepare_after_identity("time-sync");
-	}
-	if (active_app == APP_ID_AI_CHAT) {
-		app_request_ai_chat_start_if_idle("time-sync");
-	}
+	app_schedule_thing_bootstrap("time-sync");
 }
 
 static esp_err_t app_acquire_rtc_resource(void)
@@ -1374,7 +1708,7 @@ static void app_release_rtc_resource(void)
 		ESP_LOGW(TAG, "app lifecycle rtc disconnect failed: %s", esp_err_to_name(disconnect_ret));
 	}
 	rtc_transport_flush_remote_media();
-	(void)app_state_sync_call_media_defaults(false, NULL);
+	app_reset_rtc_call_media_state();
 }
 
 static bool app_rtc_session_needs_hangup(const rtc_transport_stats_t *stats)
@@ -1426,7 +1760,7 @@ static esp_err_t app_hangup_rtc_session_if_active(app_id_t owner)
 	}
 	rtc_transport_flush_remote_media();
 
-	(void)app_state_sync_call_media_defaults(false, NULL);
+	app_reset_rtc_call_media_state();
 	if (disconnect_ret != ESP_OK && disconnect_ret != ESP_ERR_INVALID_STATE) {
 		return disconnect_ret;
 	}
@@ -1438,7 +1772,17 @@ static esp_err_t app_hangup_rtc_session_if_active(app_id_t owner)
 
 static esp_err_t app_acquire_audio_resource(void)
 {
-	return audio_device_prepare();
+	esp_err_t ret = audio_device_prepare();
+
+	if (ret != ESP_OK) {
+		return ret;
+	}
+	esp_err_t echo_ret = audio_device_prepare_echo_cancel();
+	if (echo_ret != ESP_OK) {
+		/* AEC is an enhancement: keep the call usable if it cannot reserve resources. */
+		ESP_LOGW(TAG, "prepare call echo cancellation failed: %s", esp_err_to_name(echo_ret));
+	}
+	return ESP_OK;
 }
 
 static void app_release_audio_resource(void)
@@ -1507,8 +1851,6 @@ static esp_err_t app_switch_resources(uint32_t target_resources)
 
 static void app_network_state_cb(const network_state_t *state, void *ctx)
 {
-	app_id_t active_app = app_get_active_app();
-
 	(void)ctx;
 
 	if (state == NULL) {
@@ -1523,13 +1865,7 @@ static void app_network_state_cb(const network_state_t *state, void *ctx)
 			ESP_LOGW(TAG, "schedule system time sync failed: %s", esp_err_to_name(time_ret));
 		}
 		if (system_time_has_valid_time()) {
-			esp_err_t identity_ret = app_start_device_identity_services("network-ready");
-			if (identity_ret != ESP_OK && identity_ret != ESP_ERR_INVALID_STATE) {
-				ESP_LOGW(TAG, "device identity start failed: %s", esp_err_to_name(identity_ret));
-			}
-			if (app_should_prepare_rtc_for_active_app(active_app)) {
-				app_request_rtc_prepare_after_identity("network-ready");
-			}
+			app_schedule_thing_bootstrap("network-ready");
 		}
 	} else {
 		device_online_set_network_ready(false);
@@ -1542,9 +1878,6 @@ static void app_network_state_cb(const network_state_t *state, void *ctx)
 		rtc_transport_on_network_state_changed(&rtc_network);
 	}
 
-	if (state->connected && active_app == APP_ID_AI_CHAT) {
-		app_request_ai_chat_start_if_idle("network-ready");
-	}
 }
 
 static bool app_rtc_test_video_active(void *ctx)
@@ -1590,16 +1923,28 @@ static bool app_capture_uplink_allowed(void)
 	return audio.capture_gain_percent > 0U;
 }
 
-static void app_stop_app_services(app_id_t app_id)
+static esp_err_t app_stop_app_services(app_id_t app_id)
 {
 	switch (app_id) {
 	case APP_ID_CALL:
 	{
-		app_cancel_contact_scan_for_lifecycle();
-		esp_err_t hangup_ret = app_hangup_rtc_session_if_active(app_id);
-		if (hangup_ret != ESP_OK) {
-			ESP_LOGW(TAG, "app lifecycle rtc session close failed: %s", esp_err_to_name(hangup_ret));
+		esp_err_t start_ret = app_cancel_pending_call_start_for_lifecycle();
+		if (start_ret != ESP_OK) {
+			return start_ret;
 		}
+		app_cancel_contact_scan_for_lifecycle();
+		esp_err_t call_ret = device_call_hangup();
+		if (call_ret != ESP_OK && call_ret != ESP_ERR_INVALID_STATE) {
+			ESP_LOGW(TAG, "app lifecycle device call close failed: %s", esp_err_to_name(call_ret));
+		}
+		/* Never fall back to the legacy CALL/HANGUP signalling contract. */
+		rtc_transport_flush_remote_media();
+		esp_err_t disconnect_ret = rtc_transport_disconnect();
+		if (disconnect_ret != ESP_OK && disconnect_ret != ESP_ERR_INVALID_STATE) {
+			ESP_LOGW(TAG, "app lifecycle device call disconnect failed: %s",
+				 esp_err_to_name(disconnect_ret));
+		}
+		app_release_call_session_resources_internal(true);
 		break;
 	}
 	case APP_ID_AI_CHAT:
@@ -1632,6 +1977,7 @@ static void app_stop_app_services(app_id_t app_id)
 	default:
 		break;
 	}
+	return ESP_OK;
 }
 
 static esp_err_t app_start_app_services(app_id_t app_id)
@@ -1668,31 +2014,139 @@ static esp_err_t app_start_app_services(app_id_t app_id)
 	}
 }
 
-esp_err_t app_acquire_call_session_resources(void)
+esp_err_t app_acquire_call_session_resources(bool video)
 {
 	esp_err_t ret = ESP_OK;
+	uint32_t resources = APP_RESOURCE_RTC | APP_RESOURCE_AUDIO;
 
 	if (app_get_active_app() != APP_ID_CALL) {
 		return ESP_ERR_INVALID_STATE;
 	}
 
-	ret = app_switch_resources(APP_RESOURCE_RTC | APP_RESOURCE_AUDIO);
-	if (ret != ESP_OK) {
-		return ret;
+	if (video && !s_call_resources.video_renderer_started) {
+		/* The decoder owns unavoidable internal RAM. Start it while the normal
+		 * H264 encoder reservation still protects its large contiguous block;
+		 * large frame pools were already reserved in PSRAM at boot. */
+		ret = call_video_renderer_start();
+		if (ret != ESP_OK) {
+			ESP_LOGE(TAG, "start H264 call downlink failed: %s", esp_err_to_name(ret));
+			goto fail;
+		}
+		s_call_resources.video_renderer_started = true;
 	}
-	return app_prepare_rtc_after_time_sync("call-session");
+
+	/* Prepare the realtime audio/DMA path before replacing the normal encoder
+	 * reservation with the smaller call profile. The released reference block
+	 * then remains available for rebuilding the normal profile on page exit. */
+	ret = app_switch_resources(resources);
+	if (ret != ESP_OK) {
+		goto fail;
+	}
+
+	if (video) {
+		if (!s_call_resources.video_profile_applied) {
+			media_governor_video_config_t call_config = {0};
+
+			media_governor_get_rtc_video_config(&s_call_resources.previous_video_config);
+			media_governor_build_device_call_video_config(&call_config);
+			ret = media_governor_set_rtc_video_config(&call_config);
+			if (ret != ESP_OK) {
+				ESP_LOGE(TAG, "apply device-call video profile failed: %s", esp_err_to_name(ret));
+				goto fail;
+			}
+			s_call_resources.video_profile_applied = true;
+			camera_pipeline_on_rtc_video_config_changed();
+			ESP_LOGI(TAG,
+				 "device-call video profile applied: %ux%u@%u %ukbps",
+				 (unsigned)call_config.width,
+				 (unsigned)call_config.height,
+				 (unsigned)call_config.fps,
+					 (unsigned)(call_config.bitrate_bps / 1000U));
+		}
+	}
+	ret = app_prepare_rtc_after_time_sync("call-session");
+	if (ret != ESP_OK) {
+		goto fail;
+	}
+	return ESP_OK;
+
+fail:
+	app_release_call_session_resources();
+	return ret;
+}
+
+static void app_release_call_session_resources_internal(bool restore_video_profile)
+{
+	restore_video_profile = restore_video_profile && s_call_resources.video_profile_applied;
+
+	if (s_call_resources.video_renderer_started) {
+		esp_err_t video_ret = call_video_renderer_stop();
+		if (video_ret == ESP_OK || video_ret == ESP_ERR_INVALID_STATE) {
+			s_call_resources.video_renderer_started = false;
+		} else {
+			ESP_LOGW(TAG, "stop H264 call downlink failed: %s", esp_err_to_name(video_ret));
+		}
+	}
+
+	/* Release the call's RTC/audio allocations first. On lifecycle exit the
+	 * normal H264 profile is rebuilt only after those internal allocations are
+	 * gone; between calls the smaller encoder reservation stays warm. */
+	if (app_get_active_app() == APP_ID_CALL) {
+		esp_err_t ret = app_switch_resources(app_resource_mask_for_app(APP_ID_CALL));
+		if (ret != ESP_OK) {
+			ESP_LOGW(TAG, "release call session resources failed: %s", esp_err_to_name(ret));
+		}
+		app_state_reset_call_media_policy();
+	}
+
+	if (restore_video_profile) {
+		esp_err_t profile_ret = media_governor_set_rtc_video_config(
+			&s_call_resources.previous_video_config);
+		if (profile_ret == ESP_OK) {
+			camera_pipeline_on_rtc_video_config_changed();
+			ESP_LOGI(TAG,
+				 "device-call video profile restored: %ux%u@%u %ukbps",
+				 (unsigned)s_call_resources.previous_video_config.width,
+				 (unsigned)s_call_resources.previous_video_config.height,
+				 (unsigned)s_call_resources.previous_video_config.fps,
+				 (unsigned)(s_call_resources.previous_video_config.bitrate_bps / 1000U));
+			s_call_resources.video_profile_applied = false;
+		} else {
+			ESP_LOGW(TAG, "restore RTC video profile failed: %s", esp_err_to_name(profile_ret));
+		}
+	}
 }
 
 void app_release_call_session_resources(void)
 {
+	/* Keep the call-sized encoder reservation while the call page remains open.
+	 * Rebuilding the large IPC profile after every hangup fragments scarce
+	 * internal DMA memory and makes the next call pay the allocation cost again. */
+	app_release_call_session_resources_internal(false);
+}
+
+static void app_release_call_session_resources_if_idle(void)
+{
+	device_call_snapshot_t call = {0};
+
 	if (app_get_active_app() != APP_ID_CALL) {
 		return;
 	}
-
-	esp_err_t ret = app_switch_resources(app_resource_mask_for_app(APP_ID_CALL));
-	if (ret != ESP_OK) {
-		ESP_LOGW(TAG, "release call session resources failed: %s", esp_err_to_name(ret));
+	if (app_call_start_is_in_progress()) {
+		return;
 	}
+	device_call_get_snapshot(&call);
+	if (call.state == DEVICE_CALL_STATE_OUTGOING ||
+	    call.state == DEVICE_CALL_STATE_CONNECTING ||
+	    call.state == DEVICE_CALL_STATE_IN_CALL) {
+		return;
+	}
+	ESP_LOGI(TAG,
+		 "device-call session complete: state=%u error=%s reason=%s",
+		 (unsigned)call.state,
+		 esp_err_to_name(call.last_error),
+		 call.message[0] != '\0' ? call.message : "-");
+	app_release_call_session_resources();
 }
 
 esp_err_t app_suspend_call_scan_resources(void)
@@ -1783,21 +2237,41 @@ esp_err_t app_init(void)
 	if (dma_escrow_ret != ESP_OK) {
 		ESP_LOGW(TAG, "DMA escrow init unavailable: %s", esp_err_to_name(dma_escrow_ret));
 	}
-	app_log_heap_snapshot("h264 prewarm before");
+	app_log_heap_snapshot("media prewarm before");
 	esp_err_t h264_prewarm_ret = camera_pipeline_prewarm_h264();
 	if (h264_prewarm_ret != ESP_OK) {
 		ESP_LOGW(TAG, "H264 early prewarm unavailable: %s", esp_err_to_name(h264_prewarm_ret));
 	}
-	app_log_heap_snapshot("h264 prewarm after");
+	esp_err_t scaler_prewarm_ret = camera_pipeline_prewarm_call_scaler();
+	if (scaler_prewarm_ret != ESP_OK && scaler_prewarm_ret != ESP_ERR_NOT_SUPPORTED) {
+		ESP_LOGW(TAG,
+			 "device-call scaler early prewarm unavailable: %s",
+			 esp_err_to_name(scaler_prewarm_ret));
+	}
+	esp_err_t renderer_prewarm_ret = call_video_renderer_prewarm();
+	if (renderer_prewarm_ret != ESP_OK) {
+		ESP_LOGW(TAG,
+			 "device-call video pool prewarm unavailable: %s",
+			 esp_err_to_name(renderer_prewarm_ret));
+	}
+	app_log_heap_snapshot("media prewarm after");
+	ESP_RETURN_ON_ERROR(app_audio_policy_init(), TAG, "audio policy init failed");
 	ESP_RETURN_ON_ERROR(device_init(app_on_boot_button_changed, NULL), TAG, "device init failed");
 	app_preload_persistent_state();
 	ESP_RETURN_ON_ERROR(app_start_control_task(), TAG, "app control worker init failed");
+	ESP_RETURN_ON_ERROR(app_configure_thing_service_registry(), TAG, "thing service registry init failed");
 	ESP_RETURN_ON_ERROR(app_configure_device_binding(), TAG, "device binding init failed");
 	ESP_RETURN_ON_ERROR(app_configure_device_online(), TAG, "device online init failed");
+	ESP_RETURN_ON_ERROR(app_configure_device_call(), TAG, "device call init failed");
 	ESP_RETURN_ON_ERROR(rtc_transport_set_media_bridge(rtc_media_bridge_get_ops(),
 							   rtc_media_bridge_get_context()),
 			    TAG,
 			    "rtc media bridge configure failed");
+	app_ai_chat_config_t ai_chat_ui_config = {0};
+	esp_err_t ai_chat_ui_ret = app_ai_chat_config_load(&ai_chat_ui_config);
+	if (ai_chat_ui_ret != ESP_OK) {
+		ESP_LOGW(TAG, "AI Chat UI preference init failed: %s", esp_err_to_name(ai_chat_ui_ret));
+	}
 	esp_err_t audio_pref_ret = app_apply_audio_preferences();
 	if (audio_pref_ret != ESP_OK) {
 		ESP_LOGW(TAG, "audio preference init failed: %s", esp_err_to_name(audio_pref_ret));
@@ -1827,10 +2301,12 @@ esp_err_t app_init(void)
 #endif
 
 	app_log_heap_snapshot("system ready");
+	app_log_performance_profile();
 	ESP_LOGI(TAG, "system ready: ESP32-P4 TiRTC dashboard");
 	return ESP_OK;
 }
 
+#if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
 static void app_runtime_monitor_task(void *arg)
 {
 	(void)arg;
@@ -1840,9 +2316,14 @@ static void app_runtime_monitor_task(void *arg)
 		app_log_runtime_snapshot();
 	}
 }
+#endif
 
 void app_run(void)
 {
+#if !CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
+	ESP_LOGI(TAG, "periodic media diagnostics disabled; main task can exit");
+	return;
+#else
 	if (s_app_runtime_monitor_task != NULL) {
 		return;
 	}
@@ -1853,16 +2334,7 @@ void app_run(void)
 						  NULL,
 						  APP_RUNTIME_MONITOR_TASK_PRIORITY,
 						  &s_app_runtime_monitor_task,
-						  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-	if (task_ret != pdPASS) {
-		task_ret = xTaskCreateWithCaps(app_runtime_monitor_task,
-					       "app_runtime",
-					       APP_RUNTIME_MONITOR_TASK_STACK_SIZE,
-					       NULL,
-					       APP_RUNTIME_MONITOR_TASK_PRIORITY,
-					       &s_app_runtime_monitor_task,
-					       MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-	}
+						  APP_TASK_STACK_CAPS_BACKGROUND);
 	if (task_ret != pdPASS) {
 		ESP_LOGE(TAG, "runtime monitor task start failed; keeping main task alive");
 		while (true) {
@@ -1872,6 +2344,7 @@ void app_run(void)
 	}
 
 	ESP_LOGI(TAG, "runtime monitor task started; main task can exit");
+#endif
 }
 
 static esp_err_t app_enter_app_sync(app_id_t app_id)
@@ -1887,7 +2360,11 @@ static esp_err_t app_enter_app_sync(app_id_t app_id)
 
 	if (current != APP_ID_HOME) {
 		ESP_LOGI(TAG, "app release: %s", app_id_name(current));
-		app_stop_app_services(current);
+		esp_err_t stop_ret = app_stop_app_services(current);
+		if (stop_ret != ESP_OK) {
+			ESP_LOGW(TAG, "app stop failed: %s ret=%s", app_id_name(current), esp_err_to_name(stop_ret));
+			return stop_ret;
+		}
 		esp_err_t release_ret = app_switch_resources(app_resource_mask_for_app(APP_ID_HOME));
 		if (release_ret != ESP_OK) {
 			ESP_LOGW(TAG, "app release failed: %s ret=%s", app_id_name(current), esp_err_to_name(release_ret));
@@ -1905,7 +2382,7 @@ static esp_err_t app_enter_app_sync(app_id_t app_id)
 	}
 	if (ret != ESP_OK) {
 		ESP_LOGW(TAG, "app enter failed: %s ret=%s", app_id_name(app_id), esp_err_to_name(ret));
-		app_stop_app_services(app_id);
+		(void)app_stop_app_services(app_id);
 		(void)app_switch_resources(app_resource_mask_for_app(APP_ID_HOME));
 		app_set_active_app(APP_ID_HOME);
 		return ret;
@@ -1921,7 +2398,9 @@ static esp_err_t app_return_home_sync(void)
 
 	if (previous != APP_ID_HOME) {
 		ESP_LOGI(TAG, "app return home: release %s", app_id_name(previous));
-		app_stop_app_services(previous);
+		ESP_RETURN_ON_ERROR(app_stop_app_services(previous),
+				    TAG,
+				    "stop current app failed");
 	}
 	ESP_RETURN_ON_ERROR(app_switch_resources(app_resource_mask_for_app(APP_ID_HOME)),
 			    TAG,
@@ -2030,7 +2509,7 @@ esp_err_t app_disconnect_rtc(void)
 		return ret;
 	}
 
-	(void)app_state_sync_call_media_defaults(false, NULL);
+	app_reset_rtc_call_media_state();
 	return ESP_OK;
 }
 
@@ -2080,8 +2559,10 @@ esp_err_t app_update_rtc_device_credentials(const char *device_id, const char *d
 	if (network_is_connected() && system_time_has_valid_time()) {
 		device_online_set_network_ready(true);
 	}
+	device_call_reset_identity_state();
 	(void)device_online_notify_credentials_changed("credentials");
 	app_request_rtc_reconfigure_after_settings_change("credential-scan");
+	app_request_rtc_prepare_after_identity("credentials");
 	return ESP_OK;
 }
 
@@ -2121,11 +2602,28 @@ static esp_err_t app_start_device_online_if_ready(const char *reason)
 		return ESP_ERR_NOT_FOUND;
 	}
 
-	return device_online_start_async(reason != NULL ? reason : "auto");
+	esp_err_t ret = device_online_start_async(reason != NULL ? reason : "auto");
+	if (ret == ESP_OK || ret == ESP_ERR_INVALID_STATE) {
+		app_start_device_call_ingress();
+	}
+	return ret;
+}
+
+static void app_start_device_call_ingress(void)
+{
+	esp_err_t ret = device_call_start();
+
+	if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+		ESP_LOGW(TAG, "device call listener start failed: %s", esp_err_to_name(ret));
+	}
 }
 
 static esp_err_t app_start_device_identity_services(const char *reason)
 {
+	if (!thing_service_registry_is_ready()) {
+		return ESP_ERR_INVALID_STATE;
+	}
+
 	esp_err_t binding_ret = app_start_device_binding_reconcile_if_needed(reason);
 	esp_err_t ret = app_start_device_online_if_ready(reason);
 	if (ret == ESP_OK) {
@@ -2142,36 +2640,47 @@ esp_err_t app_start_device_binding(void)
 	if (!network_is_connected() || !system_time_has_valid_time()) {
 		return ESP_ERR_INVALID_STATE;
 	}
+	if (!thing_service_registry_is_ready()) {
+		app_schedule_thing_bootstrap("manual");
+		return ESP_ERR_INVALID_STATE;
+	}
 
 	return app_start_device_identity_services("manual");
 }
 
-esp_err_t app_reset_device_binding(void)
+static esp_err_t app_reset_device_binding_internal(const char *reason)
 {
 	esp_err_t ret = ESP_OK;
+	const char *safe_reason = reason != NULL && reason[0] != '\0' ? reason : "reset-binding";
 
-	ESP_LOGD(TAG, "device binding reset begin");
+	if (!app_rtc_device_credentials_available()) {
+		ESP_LOGW(TAG, "device binding reconcile needs retained credentials: reason=%s", safe_reason);
+		return ESP_ERR_NOT_FOUND;
+	}
+
+	ESP_LOGI(TAG, "device binding reconcile begin: reason=%s identity=retained", safe_reason);
+	device_call_reset_identity_state();
 	(void)rtc_transport_disconnect();
-	(void)app_state_sync_call_media_defaults(false, NULL);
+	app_reset_rtc_call_media_state();
 	device_online_stop();
-
-	ESP_RETURN_ON_ERROR(app_clear_rtc_device_credentials(),
-			    TAG,
-			    "clear rtc credentials failed");
-
-	device_binding_reset_state("binding reset");
-	device_online_notify_credentials_cleared("reset-binding");
-	app_request_rtc_reconfigure_after_settings_change("reset-binding");
+	device_online_invalidate_cache();
+	device_binding_reset_state(safe_reason);
 
 	if (network_is_connected() && system_time_has_valid_time()) {
-		ret = app_start_device_identity_services("reset-binding");
-		if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE && ret != ESP_ERR_NOT_FOUND) {
-			ESP_LOGW(TAG, "binding restart after reset failed: %s", esp_err_to_name(ret));
+		ret = device_binding_start_async(safe_reason);
+		if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+			ESP_LOGW(TAG, "signed binding reconcile start failed: %s", esp_err_to_name(ret));
+			return ret;
 		}
 	}
 
-	ESP_LOGD(TAG, "device binding reset done");
+	ESP_LOGI(TAG, "device binding reconcile queued: reason=%s identity=retained", safe_reason);
 	return ESP_OK;
+}
+
+esp_err_t app_reset_device_binding(void)
+{
+	return app_reset_device_binding_internal("reset-binding");
 }
 
 esp_err_t app_request_update_rtc_device_credentials(const char *device_id, const char *device_secret)
@@ -2282,6 +2791,15 @@ esp_err_t app_clear_ai_chat_messages(void)
 esp_err_t app_handle_ai_chat_button(bool pressed)
 {
 	return ai_chat_handle_control_button(pressed);
+}
+
+esp_err_t app_set_ai_chat_avatar(uint8_t avatar)
+{
+	esp_err_t ret = app_ai_chat_config_set_avatar(avatar);
+	if (ret != ESP_OK) {
+		ESP_LOGW(TAG, "save AI Chat avatar failed: %s", esp_err_to_name(ret));
+	}
+	return ret;
 }
 
 static esp_err_t app_set_speaker_volume_internal(uint8_t percent, bool persist)

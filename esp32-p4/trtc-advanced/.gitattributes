@@ -1,0 +1,18 @@
+*.a binary
+*.bin binary
+*.zip binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.h264 binary
+*.pcma binary
+*.ttf binary
+
+# Preserve third-party source as delivered while keeping whitespace checks strict
+# for application code and release documentation.
+components/esp_lcd/** -whitespace
+components/espressif__esp_codec_dev/** -whitespace
+components/espressif__esp_h264/** -whitespace
+components/espressif__esp_hosted/** -whitespace
+components/espressif__esp_lvgl_port/** -whitespace
+components/espressif__esp_video/** -whitespace

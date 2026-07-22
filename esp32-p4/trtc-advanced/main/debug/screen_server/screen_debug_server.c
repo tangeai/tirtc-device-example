@@ -663,16 +663,6 @@ esp_err_t screen_debug_server_start(void)
                                                           APP_TASK_CORE_UI,
                                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (task_ret != pdPASS || task == NULL) {
-        task_ret = xTaskCreatePinnedToCoreWithCaps(screen_debug_task,
-                                                   "screen_debug",
-                                                   SCREEN_DEBUG_TASK_STACK_SIZE,
-                                                   NULL,
-                                                   SCREEN_DEBUG_TASK_PRIORITY,
-                                                   &task,
-                                                   APP_TASK_CORE_UI,
-                                                   MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    }
-    if (task_ret != pdPASS || task == NULL) {
         ESP_LOGE(TAG, "create screen debug task failed");
         return ESP_ERR_NO_MEM;
     }

@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "esp_heap_caps.h"
+#include "app_memory_policy.h"
 
 #define DEVICE_VIDEO_H264_READ_CHUNK_BYTES 4096U
 #define DEVICE_VIDEO_H264_BUFFER_INIT_BYTES (16U * 1024U)
@@ -151,11 +152,7 @@ static int device_video_source_file_reserve(device_video_h264_file_t *file,
     }
   }
 
-  new_data =
-      (uint8_t *)heap_caps_malloc(new_capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (new_data == NULL) {
-    new_data = (uint8_t *)malloc(new_capacity);
-  }
+  new_data = (uint8_t *)app_memory_alloc_psram(new_capacity);
   if (new_data == NULL) {
     return DEVICE_VIDEO_ERR_IO;
   }

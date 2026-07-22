@@ -13,11 +13,44 @@
 | `application` | App entry/exit orchestration and resource acquire/release decisions. |
 | `ui` | Visual state and user actions only. |
 
+## Memory Ownership
+
+P4 uses capability-based allocation rather than treating all heap as interchangeable. The common policy is defined in `main/platform/app_memory_policy.h`.
+
+| Memory class | Long-term owners | Allocation rule |
+| --- | --- | --- |
+| Internal RAM | DMA descriptors, realtime control queues, mutexes, audio I/O control, flash/NVS task stacks | Explicit `MALLOC_CAP_INTERNAL`; never used as a fallback for a failed media allocation. |
+| DMA-capable internal RAM | ESP-Hosted, camera/H264 driver DMA and the DMA escrow | Protected by the `192KB` IDF reserve and a `64KB` runtime escrow. |
+| PSRAM | H264 payloads, RTC TX pools, decoded video frames, HTTP/MQTT payload copies, UI snapshots and background task stacks | Explicit `MALLOC_CAP_SPIRAM`; allocation failure is returned to the owning service. |
+
+The RTC send path allocates its pools once and reuses them:
+
+- Video TX starts with four `512KB` PSRAM slots and grows a slot only when an encoded frame requires it.
+- Audio TX owns eighteen fixed `8KB` PSRAM slots. Per-packet `malloc/free` is not used on the live path.
+- Queue storage contains descriptors and slot indexes only. Payload bytes stay in the corresponding PSRAM pool.
+
+Tasks that may execute while flash cache is unavailable, including OTA and NVS persistence workers, keep internal stacks. Network, media, UI snapshot and other background workers use PSRAM stacks. This distinction is intentional and must be preserved when adding a task.
+
+Task memory is reviewed at three levels:
+
+- Every task creation declares its stack capability explicitly. Background and media stacks use PSRAM; realtime audio, flash/NVS and small application control stacks remain internal.
+- Compiler stack-usage output is used to inspect task entries and their callees. The build warns when a single function needs more than `8KB`, so large snapshots and protocol payloads must be moved into an owner-specific PSRAM workspace.
+- Stack sizes are reduced only after runtime high-water marks prove enough reserve. Static frame size alone is not a safe reason to shrink a task stack.
+
+The device online worker and its HTTP/MQTT credentials use PSRAM. Device binding keeps an internal stack because it persists pending sessions, but its network/session workspace is PSRAM-backed and only the small NVS blobs stay on the internal stack. Long-lived call, contact and service-registry caches use external BSS; mutexes, queues, spinlocks and hot RTC configuration remain internal.
+
+LVGL renders through PSRAM draw buffers and copies through one bounded internal DMA transfer buffer. That transfer buffer uses the same internal-RAM budget as the former pair of small DMA draw buffers, while larger transactions reduce synchronous SPI overhead during call video.
+
+H264 is prewarmed before service discovery, binding, MQTT, TiRTC and UI workloads allocate their long-lived state. The DMA escrow is temporarily lent to H264 during encoder or decoder bootstrap and reclaimed afterward only when the contiguous block is still available. An escrow already lent to the retained encoder is a valid state and must not block decoder recovery.
+
+Runtime snapshots report current, largest-block and minimum-ever values for internal RAM, DMA RAM and PSRAM, together with PSRAM allocation failures and media pool occupancy. The minimum-ever values are the acceptance metric for long calls; current free memory alone does not reveal transient pressure or fragmentation.
+
 ## Camera Pipeline
 
 `main/media/camera_pipeline.c` is the owner of live RTC camera capture.
 
 - RTC camera uplink uses OV5647 YUV420 frames as the H264 encoder input.
+- The sensor and RTC encoder share the supported `1280x960` YUV420 frame directly; no scaling, crop buffer or per-frame copy is used.
 - The hot path is `camera_driver -> camera_pipeline -> ESP32-P4 H264 encoder -> tirtc_session`.
 - RTC video does not render a local preview. This keeps display refresh from competing with H264 encoding and ESP-Hosted Wi-Fi.
 - QR scanning owns the camera only while the scan page is active and releases it before RTC video starts.
@@ -35,10 +68,11 @@ Public wrappers remain stable:
 
 | Item | Default |
 | --- | --- |
-| Capture / RTC target | `1920x1080@20fps` |
-| H264 bitrate | `6Mbps` |
+| Sensor capture | `1280x960` binning mode |
+| RTC target | `1280x960@20fps` |
+| H264 bitrate | `4Mbps` |
 | GOP | `40` |
-| H264 output buffer | `4MB` |
+| H264 output buffer | `1MB` |
 | Max delta payload | `256KB` |
 | Startup max delta payload | `128KB` for the first `2500ms` |
 | Auto weak-network adaptation | Disabled |

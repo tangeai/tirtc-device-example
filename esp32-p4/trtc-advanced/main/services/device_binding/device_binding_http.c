@@ -8,6 +8,7 @@
 #include <time.h>
 
 #include "cJSON.h"
+#include "app_memory_policy.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
@@ -33,8 +34,6 @@ static const char *TAG = "binding_http";
 #define DEVICE_BINDING_HTTP_DEFAULT_RETRY_AFTER_SEC 10U
 #define DEVICE_BINDING_HTTP_NONCE_HEX_LEN 16
 #define DEVICE_BINDING_HTTP_SIGNATURE_MAX 96
-#define DEVICE_BINDING_HTTP_DEVICE_RAND_MAX 1000000U
-#define DEVICE_BINDING_HTTP_DEVICE_RAND_LEN 6U
 
 typedef struct {
     char *data;
@@ -84,16 +83,6 @@ static void device_binding_http_make_nonce(char *nonce, size_t nonce_size)
     for (size_t index = 0; index < sizeof(raw) && (index * 2U + 2U) < nonce_size; ++index) {
         snprintf(nonce + index * 2U, 3, "%02x", raw[index]);
     }
-}
-
-static void device_binding_http_make_device_rand(char *device_rand, size_t device_rand_size)
-{
-    if (device_rand == NULL || device_rand_size <= DEVICE_BINDING_HTTP_DEVICE_RAND_LEN) {
-        return;
-    }
-
-    uint32_t value = esp_random() % DEVICE_BINDING_HTTP_DEVICE_RAND_MAX;
-    snprintf(device_rand, device_rand_size, "%06lu", (unsigned long)value);
 }
 
 static esp_err_t device_binding_http_sign(const char *device_id,
@@ -281,6 +270,14 @@ static esp_err_t device_binding_http_post_json(const char *url,
         return ESP_ERR_INVALID_ARG;
     }
 
+    response_buf[0] = '\0';
+    if (status_code != NULL) {
+        *status_code = 0;
+    }
+    if (retry_after_sec != NULL) {
+        *retry_after_sec = 0;
+    }
+
     for (uint8_t attempt = 1; attempt <= (DEVICE_BINDING_HTTP_RETRY_COUNT + 1U); ++attempt) {
         device_binding_http_response_t response = {
             .data = response_buf,
@@ -386,8 +383,6 @@ static esp_err_t device_binding_parse_report_response(const char *json,
     const cJSON *verify_code = NULL;
     const cJSON *temp_token = NULL;
     const cJSON *temp_client_id = NULL;
-    const cJSON *device_id = NULL;
-    const cJSON *device_key = NULL;
 
     if (json == NULL || result == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -407,17 +402,6 @@ static esp_err_t device_binding_parse_report_response(const char *json,
     memset(result, 0, sizeof(*result));
     code = cJSON_GetObjectItemCaseSensitive(root, "code");
     result->service_code = cJSON_IsNumber(code) ? code->valueint : 0;
-
-    device_id = cJSON_GetObjectItemCaseSensitive(data, "device_id");
-    device_key = cJSON_GetObjectItemCaseSensitive(data, "device_key");
-    if (cJSON_IsString(device_id) && device_id->valuestring[0] != '\0' &&
-        cJSON_IsString(device_key) && device_key->valuestring[0] != '\0') {
-        result->type = DEVICE_BINDING_HTTP_REPORT_BOUND;
-        strlcpy(result->device_id, device_id->valuestring, sizeof(result->device_id));
-        strlcpy(result->device_key, device_key->valuestring, sizeof(result->device_key));
-        cJSON_Delete(root);
-        return ESP_OK;
-    }
 
     verify_code = cJSON_GetObjectItemCaseSensitive(data, "code");
     temp_token = cJSON_GetObjectItemCaseSensitive(data, "temp_token");
@@ -450,7 +434,6 @@ static esp_err_t device_binding_parse_report_response(const char *json,
 
 esp_err_t device_binding_http_report(const char *api_base,
                                      const char *mac,
-                                     const char *chip_uid,
                                      const char *device_id,
                                      const char *device_key,
                                      device_binding_http_report_result_t *result)
@@ -460,7 +443,6 @@ esp_err_t device_binding_http_report(const char *api_base,
     char timestamp[24] = {0};
     char nonce[DEVICE_BINDING_HTTP_NONCE_HEX_LEN + 1] = {0};
     char signature[DEVICE_BINDING_HTTP_SIGNATURE_MAX] = {0};
-    char device_rand[DEVICE_BINDING_HTTP_DEVICE_RAND_LEN + 1] = {0};
     device_binding_http_auth_headers_t auth = {0};
     char *response = NULL;
     int status_code = 0;
@@ -471,7 +453,7 @@ esp_err_t device_binding_http_report(const char *api_base,
 
     if (api_base == NULL || api_base[0] == '\0' ||
         mac == NULL || mac[0] == '\0' ||
-        chip_uid == NULL || result == NULL) {
+        result == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     if (has_device_id != has_device_key) {
@@ -479,15 +461,7 @@ esp_err_t device_binding_http_report(const char *api_base,
     }
 
     device_binding_http_join_url(url, sizeof(url), api_base, "/v1/device/report");
-    if (!has_device_id) {
-        device_binding_http_make_device_rand(device_rand, sizeof(device_rand));
-    }
-    snprintf(body,
-             sizeof(body),
-             "{\"mac\":\"%s\",\"chip_uid\":\"%s\",\"device_rand\":\"%s\"}",
-             mac,
-             chip_uid,
-             device_rand);
+    snprintf(body, sizeof(body), "{\"mac\":\"%s\"}", mac);
     if (has_device_id) {
         snprintf(timestamp, sizeof(timestamp), "%lld", (long long)time(NULL));
         device_binding_http_make_nonce(nonce, sizeof(nonce));
@@ -508,21 +482,15 @@ esp_err_t device_binding_http_report(const char *api_base,
         auth.signature = signature;
     }
 
-    response = heap_caps_calloc(1,
-                                DEVICE_BINDING_HTTP_RESPONSE_MAX_LEN,
-                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (response == NULL) {
-        response = calloc(1, DEVICE_BINDING_HTTP_RESPONSE_MAX_LEN);
-    }
+    response = app_memory_calloc_psram(1, DEVICE_BINDING_HTTP_RESPONSE_MAX_LEN);
     if (response == NULL) {
         return ESP_ERR_NO_MEM;
     }
 
     ESP_LOGD(TAG,
-             "binding report begin: signed=%d device_id_len=%u device_rand=%s",
+             "binding report begin: signed=%d device_id_len=%u",
              auth.enabled ? 1 : 0,
-             has_device_id ? (unsigned)strlen(device_id) : 0U,
-             device_rand[0] != '\0' ? device_rand : "none");
+             has_device_id ? (unsigned)strlen(device_id) : 0U);
     ret = device_binding_http_post_json(url,
                                         body,
                                         &auth,

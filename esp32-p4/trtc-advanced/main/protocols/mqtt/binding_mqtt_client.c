@@ -19,9 +19,12 @@ static const char *TAG = "binding_mqtt";
 #define BINDING_MQTT_PAYLOAD_MAX_LEN 512
 #define BINDING_MQTT_DEFAULT_READY_TIMEOUT_MS 25000U
 #define BINDING_MQTT_NETWORK_TIMEOUT_MS 20000U
+#define BINDING_MQTT_ACK_TIMEOUT_MS 5000U
+#define BINDING_MQTT_WAIT_POLL_MS 500U
 #define BINDING_MQTT_GRANT_BIT BIT0
 #define BINDING_MQTT_ERROR_BIT BIT1
 #define BINDING_MQTT_READY_BIT BIT2
+#define BINDING_MQTT_GRANT_RECEIVED_BIT BIT3
 
 typedef struct {
     EventGroupHandle_t events;
@@ -33,7 +36,9 @@ typedef struct {
     binding_mqtt_auth_grant_t grant;
     esp_err_t last_error;
     int subscribe_msg_id;
+    int ack_msg_id;
     bool ready;
+    bool grant_received;
 } binding_mqtt_runtime_t;
 
 static bool binding_mqtt_topic_equals(const esp_mqtt_event_t *event, const char *topic)
@@ -201,12 +206,12 @@ cleanup:
     return ret;
 }
 
-static void binding_mqtt_publish_ack(binding_mqtt_runtime_t *runtime)
+static int binding_mqtt_publish_ack(binding_mqtt_runtime_t *runtime)
 {
     static const char ack_payload[] = "{\"ack\":true}";
 
     if (runtime == NULL || runtime->client == NULL || runtime->ack_topic[0] == '\0') {
-        return;
+        return -1;
     }
 
     int msg_id = esp_mqtt_client_publish(runtime->client,
@@ -216,6 +221,7 @@ static void binding_mqtt_publish_ack(binding_mqtt_runtime_t *runtime)
                                          1,
                                          0);
     ESP_LOGD(TAG, "binding ack published: msg_id=%d", msg_id);
+    return msg_id;
 }
 
 static void binding_mqtt_handle_data(binding_mqtt_runtime_t *runtime, const esp_mqtt_event_t *event)
@@ -256,8 +262,15 @@ static void binding_mqtt_handle_data(binding_mqtt_runtime_t *runtime, const esp_
              (unsigned)runtime->payload_len);
     ret = binding_mqtt_parse_auth_grant(runtime, runtime->payload);
     if (ret == ESP_OK) {
-        binding_mqtt_publish_ack(runtime);
-        xEventGroupSetBits(runtime->events, BINDING_MQTT_GRANT_BIT);
+        runtime->grant_received = true;
+        runtime->ack_msg_id = binding_mqtt_publish_ack(runtime);
+        if (runtime->ack_msg_id < 0) {
+            runtime->last_error = ESP_FAIL;
+            xEventGroupSetBits(runtime->events, BINDING_MQTT_ERROR_BIT);
+        } else {
+            /* Wait for the QoS1 PUBACK before tearing down temporary MQTT. */
+            xEventGroupSetBits(runtime->events, BINDING_MQTT_GRANT_RECEIVED_BIT);
+        }
     } else if (ret != ESP_ERR_NOT_FOUND) {
         ESP_LOGW(TAG, "binding command parse failed: %s", esp_err_to_name(ret));
     }
@@ -299,6 +312,14 @@ static void binding_mqtt_event_handler(void *handler_args,
     case MQTT_EVENT_DATA:
         binding_mqtt_handle_data(runtime, event);
         break;
+    case MQTT_EVENT_PUBLISHED:
+        if (runtime->grant_received &&
+            runtime->ack_msg_id >= 0 &&
+            event->msg_id == runtime->ack_msg_id) {
+            ESP_LOGD(TAG, "binding ack confirmed: msg_id=%d", event->msg_id);
+            xEventGroupSetBits(runtime->events, BINDING_MQTT_GRANT_BIT);
+        }
+        break;
     case MQTT_EVENT_ERROR:
         runtime->last_error = ESP_FAIL;
         if (event->error_handle != NULL) {
@@ -333,8 +354,12 @@ esp_err_t binding_mqtt_client_wait_auth_grant(const binding_mqtt_client_config_t
     EventBits_t bits = 0;
     esp_err_t ret = ESP_OK;
     bool ready_notified = false;
-    uint32_t elapsed_ms = 0;
     uint32_t ready_timeout_ms = 0;
+    bool ack_pending = false;
+    int64_t wait_started_us = 0;
+    int64_t overall_deadline_us = 0;
+    int64_t ready_deadline_us = 0;
+    int64_t ack_deadline_us = 0;
 
     if (config == NULL || grant == NULL ||
         config->broker_uri == NULL || config->broker_uri[0] == '\0' ||
@@ -351,6 +376,7 @@ esp_err_t binding_mqtt_client_wait_auth_grant(const binding_mqtt_client_config_t
     ready_timeout_ms = config->ready_timeout_ms != 0U ?
                        config->ready_timeout_ms :
                        BINDING_MQTT_DEFAULT_READY_TIMEOUT_MS;
+    runtime.ack_msg_id = -1;
     runtime.events = xEventGroupCreate();
     if (runtime.events == NULL) {
         return ESP_ERR_NO_MEM;
@@ -393,32 +419,42 @@ esp_err_t binding_mqtt_client_wait_auth_grant(const binding_mqtt_client_config_t
         return ret;
     }
 
+    wait_started_us = esp_timer_get_time();
+    overall_deadline_us = wait_started_us + (int64_t)config->wait_timeout_ms * 1000LL;
+    ready_deadline_us = wait_started_us + (int64_t)ready_timeout_ms * 1000LL;
+
     while (true) {
-        uint32_t current_timeout_ms = ready_notified ?
-                                      config->wait_timeout_ms :
-                                      ready_timeout_ms;
-        uint32_t remaining_ms = elapsed_ms < config->wait_timeout_ms ?
-                                config->wait_timeout_ms - elapsed_ms :
-                                0U;
-        if (current_timeout_ms < config->wait_timeout_ms) {
-            remaining_ms = elapsed_ms < current_timeout_ms ?
-                           current_timeout_ms - elapsed_ms :
-                           0U;
+        if (config->should_cancel != NULL && config->should_cancel(config->cancel_ctx)) {
+            ret = ESP_ERR_INVALID_STATE;
+            break;
         }
-        int64_t wait_start_us = esp_timer_get_time();
-        if (remaining_ms == 0U) {
+
+        int64_t now_us = esp_timer_get_time();
+        int64_t phase_deadline_us = overall_deadline_us;
+        if (!ready_notified && ready_deadline_us < phase_deadline_us) {
+            phase_deadline_us = ready_deadline_us;
+        }
+        if (ack_pending && ack_deadline_us < phase_deadline_us) {
+            phase_deadline_us = ack_deadline_us;
+        }
+        if (now_us >= phase_deadline_us) {
             ret = ESP_ERR_TIMEOUT;
             break;
         }
 
+        uint32_t remaining_ms = (uint32_t)((phase_deadline_us - now_us + 999LL) / 1000LL);
+        uint32_t wait_ms = remaining_ms < BINDING_MQTT_WAIT_POLL_MS ?
+                           remaining_ms :
+                           BINDING_MQTT_WAIT_POLL_MS;
+
         bits = xEventGroupWaitBits(runtime.events,
                                    BINDING_MQTT_GRANT_BIT |
                                    BINDING_MQTT_ERROR_BIT |
-                                   BINDING_MQTT_READY_BIT,
+                                   BINDING_MQTT_READY_BIT |
+                                   BINDING_MQTT_GRANT_RECEIVED_BIT,
                                    pdTRUE,
                                    pdFALSE,
-                                   pdMS_TO_TICKS(remaining_ms));
-        elapsed_ms += (uint32_t)((esp_timer_get_time() - wait_start_us) / 1000);
+                                   pdMS_TO_TICKS(wait_ms));
 
         if ((bits & BINDING_MQTT_GRANT_BIT) != 0) {
             *grant = runtime.grant;
@@ -434,11 +470,18 @@ esp_err_t binding_mqtt_client_wait_auth_grant(const binding_mqtt_client_config_t
             if (config->ready_cb != NULL) {
                 config->ready_cb(config->ready_ctx);
             }
-            continue;
+        }
+        if ((bits & BINDING_MQTT_GRANT_RECEIVED_BIT) != 0 && !ack_pending) {
+            ack_pending = true;
+            ack_deadline_us = esp_timer_get_time() +
+                              (int64_t)BINDING_MQTT_ACK_TIMEOUT_MS * 1000LL;
+            ESP_LOGD(TAG,
+                     "binding grant parsed, waiting PUBACK: msg_id=%d timeout=%ums",
+                     runtime.ack_msg_id,
+                     (unsigned)BINDING_MQTT_ACK_TIMEOUT_MS);
         }
         if (bits == 0) {
-            ret = ESP_ERR_TIMEOUT;
-            break;
+            continue;
         }
     }
     ESP_LOGI(TAG,
@@ -446,7 +489,7 @@ esp_err_t binding_mqtt_client_wait_auth_grant(const binding_mqtt_client_config_t
              esp_err_to_name(ret),
              ready_notified ? 1 : 0,
              grant->has_credentials ? 1 : 0,
-             (unsigned)elapsed_ms);
+             (unsigned)((esp_timer_get_time() - wait_started_us) / 1000LL));
 
     (void)esp_mqtt_client_stop(runtime.client);
     vTaskDelay(pdMS_TO_TICKS(100));

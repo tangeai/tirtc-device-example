@@ -8,3 +8,4 @@ sdkconfig.old
 *.pyc
 __pycache__/
 .playwright-cli/
+dependencies.lock

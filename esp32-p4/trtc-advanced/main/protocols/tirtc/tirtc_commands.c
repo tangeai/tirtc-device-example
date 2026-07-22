@@ -554,6 +554,17 @@ static esp_err_t tirtc_session_send_request(uint16_t cmd, const void *data, size
     return tirtc_session_send_command_raw(conn, cmdw, data, data_len);
 }
 
+esp_err_t tirtc_session_send_active_command(uint32_t cmdw, const void *data, size_t data_len)
+{
+    tirtc_conn_t conn = NULL;
+
+    ESP_RETURN_ON_FALSE(tirtc_session_try_get_active_conn(&conn),
+                        ESP_ERR_INVALID_STATE,
+                        TAG,
+                        "rtc connection not ready");
+    return tirtc_session_send_command_raw(conn, cmdw, data, data_len);
+}
+
 static esp_err_t tirtc_session_send_response(tirtc_conn_t conn, uint32_t request_cmdw, const void *data, size_t data_len)
 {
     return tirtc_session_send_command_raw(conn,

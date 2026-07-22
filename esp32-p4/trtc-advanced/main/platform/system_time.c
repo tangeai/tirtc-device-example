@@ -78,15 +78,6 @@ esp_err_t system_time_request_sync(bool force_sync)
                                   NULL,
                                   APP_TASK_STACK_CAPS_BACKGROUND);
     if (task_ok != pdPASS) {
-        task_ok = xTaskCreateWithCaps(system_time_sync_task,
-                                      "system_time_sync",
-                                      TIME_SYNC_TASK_STACK_SIZE,
-                                      NULL,
-                                      TIME_SYNC_TASK_PRIORITY,
-                                      NULL,
-                                      APP_TASK_STACK_CAPS_INTERNAL);
-    }
-    if (task_ok != pdPASS) {
         taskENTER_CRITICAL(&s_time_sync_lock);
         s_time_sync_running = false;
         taskEXIT_CRITICAL(&s_time_sync_lock);

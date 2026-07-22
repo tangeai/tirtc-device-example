@@ -18,6 +18,7 @@
 
 #include "ai_chat_token.h"
 #include "audio_device.h"
+#include "app_memory_policy.h"
 #include "system_time.h"
 #include "tirtc_session.h"
 #include "tiRTC.h"
@@ -43,7 +44,7 @@ static const char *TAG = "ai_chat";
 #define AI_CHAT_START_TASK_PRIORITY   5
 #define AI_CHAT_SESSION_TASK_STACK    (6 * 1024)
 #define AI_CHAT_SESSION_TASK_PRIORITY 5
-#define AI_CHAT_START_SESSION_SETTLE_MS 100U
+#define AI_CHAT_START_SESSION_SETTLE_MS 300U
 #define AI_CHAT_HEARTBEAT_TASK_STACK  (4 * 1024)
 #define AI_CHAT_HEARTBEAT_TASK_PRIORITY 5
 #define AI_CHAT_RTC_READY_WAIT_MS     30000U
@@ -116,11 +117,7 @@ typedef struct {
 
 static void *ai_chat_calloc_psram(size_t count, size_t size)
 {
-    void *ptr = heap_caps_calloc(count, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (ptr == NULL) {
-        ptr = calloc(count, size);
-    }
-    return ptr;
+    return app_memory_calloc_psram(count, size);
 }
 
 typedef struct {
@@ -155,6 +152,23 @@ static TaskHandle_t s_start_task;
 static TaskHandle_t s_session_task;
 static TaskHandle_t s_heartbeat_task;
 static uint32_t s_heartbeat_generation;
+
+static void ai_chat_notify_media_active(bool active)
+{
+    ai_chat_media_active_cb_t callback = NULL;
+    void *callback_ctx = NULL;
+
+    if (s_lock != NULL) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        callback = s_ai.config.media_active_cb;
+        callback_ctx = s_ai.config.media_active_ctx;
+        xSemaphoreGive(s_lock);
+    }
+
+    if (callback != NULL) {
+        callback(active, callback_ctx);
+    }
+}
 
 static void ai_chat_start_task(void *ctx);
 static void ai_chat_session_task(void *ctx);
@@ -349,6 +363,93 @@ static void ai_chat_update_message_locked(int caption_type,
     }
     message->final = final;
     ai_chat_copy_str(message->text, sizeof(message->text), text);
+}
+
+static bool ai_chat_text_has_prefix(const char *text, const char *prefix)
+{
+    size_t prefix_len = 0;
+
+    if (text == NULL || prefix == NULL) {
+        return false;
+    }
+
+    prefix_len = strlen(prefix);
+    return prefix_len == 0U || strncmp(text, prefix, prefix_len) == 0;
+}
+
+static bool ai_chat_utf8_is_boundary(const char *text, size_t offset)
+{
+    if (text == NULL) {
+        return false;
+    }
+    if (offset == 0U || text[offset] == '\0') {
+        return true;
+    }
+    return (((uint8_t)text[offset] & 0xC0U) != 0x80U);
+}
+
+static size_t ai_chat_text_tail_head_overlap(const char *existing, const char *incoming)
+{
+    size_t existing_len = 0;
+    size_t incoming_len = 0;
+
+    if (existing == NULL || incoming == NULL) {
+        return 0U;
+    }
+
+    existing_len = strlen(existing);
+    incoming_len = strlen(incoming);
+    size_t max_len = existing_len < incoming_len ? existing_len : incoming_len;
+
+    for (size_t overlap = max_len; overlap > 0U; --overlap) {
+        size_t existing_offset = existing_len - overlap;
+        if (!ai_chat_utf8_is_boundary(existing, existing_offset) ||
+            !ai_chat_utf8_is_boundary(incoming, overlap)) {
+            continue;
+        }
+        if (memcmp(existing + existing_offset, incoming, overlap) == 0) {
+            return overlap;
+        }
+    }
+    return 0U;
+}
+
+static void ai_chat_apply_caption_text(ai_chat_caption_group_t *group,
+                                       const ai_chat_event_t *event)
+{
+    if (group == NULL || event == NULL) {
+        return;
+    }
+
+    size_t used = strlen(group->text);
+    size_t incoming_len = strlen(event->text);
+
+    /* ASR mode=1 carries the latest full hypothesis; TTS mode=1 may be chunks. */
+    if (event->mode != 1 || event->caption_type == 0) {
+        ai_chat_copy_str(group->text, sizeof(group->text), event->text);
+        return;
+    }
+    if (used == 0U) {
+        ai_chat_copy_str(group->text, sizeof(group->text), event->text);
+        return;
+    }
+    if (strcmp(group->text, event->text) == 0) {
+        return;
+    }
+    if (incoming_len > used && ai_chat_text_has_prefix(event->text, group->text)) {
+        ai_chat_copy_str(group->text, sizeof(group->text), event->text);
+        return;
+    }
+    if (incoming_len < used && ai_chat_text_has_prefix(group->text, event->text)) {
+        return;
+    }
+
+    size_t overlap = ai_chat_text_tail_head_overlap(group->text, event->text);
+    const char *append_text = event->text + overlap;
+    if (append_text[0] != '\0' && used < sizeof(group->text) - 1U) {
+        strlcpy(group->text + used, append_text, sizeof(group->text) - used);
+        ai_chat_trim_utf8_tail(group->text);
+    }
 }
 
 static bool ai_chat_is_blank(const char *value)
@@ -822,10 +923,13 @@ static esp_err_t ai_chat_media_start(tirtc_conn_t conn)
         s_media.conn = NULL;
         s_media.running = false;
         s_media.uplink_enabled = false;
+        s_media.audio_prepared = false;
         taskEXIT_CRITICAL(&s_media_lock);
+        audio_device_release();
         return ret;
     }
 
+    ai_chat_notify_media_active(true);
     ESP_LOGI(TAG,
              "AI Chat real audio path ready: capture=pcm/%uHz/%uch uplink=app-controlled",
              (unsigned)AI_CHAT_AUDIO_SAMPLE_RATE,
@@ -855,6 +959,7 @@ static void ai_chat_media_stop(tirtc_conn_t conn)
         if (s_media.queue != NULL) {
             xQueueReset(s_media.queue);
         }
+        ai_chat_notify_media_active(false);
         if (release_audio) {
             audio_device_release();
         }
@@ -1519,15 +1624,7 @@ static void ai_chat_apply_caption_locked(const ai_chat_event_t *event)
         group->text[0] = '\0';
     }
 
-    if (event->mode == 1) {
-        size_t used = strlen(group->text);
-        if (used < sizeof(group->text) - 1U) {
-            strlcpy(group->text + used, event->text, sizeof(group->text) - used);
-            ai_chat_trim_utf8_tail(group->text);
-        }
-    } else {
-        ai_chat_copy_str(group->text, sizeof(group->text), event->text);
-    }
+    ai_chat_apply_caption_text(group, event);
 
     group->final = event->is_final;
     ai_chat_update_message_locked(event->caption_type,
@@ -1609,7 +1706,7 @@ static void ai_chat_handle_event(tirtc_conn_t conn, const ai_chat_event_t *event
         (void)ai_chat_close();
         break;
     case AI_CHAT_EVENT_CAPTION:
-        ESP_LOGI(TAG,
+        ESP_LOGD(TAG,
                  "AI Chat caption: type=%s final=%d mode=%d seq=%d utterance=%lld text_len=%u",
                  event->caption_type == 0 ? "ASR" : (event->caption_type == 1 ? "TTS" : "invalid"),
                  event->is_final ? 1 : 0,
@@ -1780,7 +1877,7 @@ esp_err_t ai_chat_configure(const ai_chat_config_t *config)
     ESP_RETURN_ON_ERROR(ai_chat_validate_config(config), TAG, "invalid AI Chat config");
 
     if (s_lock == NULL) {
-        s_lock = xSemaphoreCreateMutexWithCaps(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_lock = xSemaphoreCreateMutexWithCaps(APP_SYNC_CAPS_CONTROL);
         if (s_lock == NULL) {
             return ESP_ERR_NO_MEM;
         }
@@ -2015,6 +2112,19 @@ bool ai_chat_owns_control_button(void)
            state == AI_CHAT_STATE_CONNECTED ||
            state == AI_CHAT_STATE_STARTING_SESSION ||
            state == AI_CHAT_STATE_IN_SESSION;
+}
+
+bool ai_chat_can_start(void)
+{
+    if (s_lock == NULL) {
+        return true;
+    }
+
+    bool can_start = false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    can_start = s_ai.state == AI_CHAT_STATE_IDLE && s_ai.last_error == 0;
+    xSemaphoreGive(s_lock);
+    return can_start;
 }
 
 void ai_chat_get_snapshot(ai_chat_snapshot_t *snapshot)

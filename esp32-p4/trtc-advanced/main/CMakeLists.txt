@@ -20,7 +20,9 @@ idf_component_register(
     SRCS
         "app_main.c"
         "application/app.c"
+        "application/app_ai_chat_config.c"
         "application/app_audio_config.c"
+        "application/app_audio_policy.c"
         "application/app_call.c"
         "application/app_call_contacts.c"
         "application/app_rtc_config.c"
@@ -36,12 +38,15 @@ idf_component_register(
         "ui/font/ai_chat_font.c"
         "ui/font/lv_font_cn_14.c"
         "ui/ai_chat_assets.c"
+        "ui/ai_chat_avatar_assets.c"
         "ui/home_assets.c"
         "ui/text_assets.c"
         "hardware/hardware_board.c"
         "connectivity/network.c"
         "connectivity/wifi.c"
+        "platform/app_log_policy.c"
         "platform/platform_storage.c"
+        "platform/app_memory_policy.c"
         "platform/system_time.c"
         "drivers/audio/audio_device.c"
         "drivers/audio/audio_alaw_codec.c"
@@ -57,6 +62,8 @@ idf_component_register(
         "media/camera_pipeline.c"
         "media/media_dma_reserve.c"
         "media/media_governor.c"
+        "media/video_frame_converter.c"
+        "media/video_yuv420_scaler.c"
         "protocols/tirtc/tirtc_session.c"
         "protocols/tirtc/tirtc_connect.c"
         "protocols/tirtc/tirtc_commands.c"
@@ -75,6 +82,9 @@ idf_component_register(
         "services/device_binding/device_binding_http.c"
         "services/device_binding/device_identity.c"
         "services/device_online/device_online.c"
+        "services/device_call/device_call.c"
+        "services/call_video_renderer.c"
+        "services/thing_connect/thing_service_registry.c"
         "services/media_sink.c"
         "services/camera_video_source.c"
         "services/ota.c"
@@ -108,15 +118,19 @@ idf_component_register(
                  "services"
                  "services/device_binding"
                  "services/device_online"
+                 "services/device_call"
+                 "services/thing_connect"
                  "services/wechat_voip"
                  ${APP_DEBUG_SCREEN_SERVER_INCLUDE_DIRS}
-    REQUIRES driver esp_driver_jpeg esp_event esp_netif esp_wifi nvs_flash esp_timer esp_codec_dev tirtc_sdk esp_lcd lwip esp_hw_support esp_http_client app_update esp_app_format json mbedtls mqtt esp_video esp_h264 esp32_p4_wifi6_touch_lcd_35 espressif__esp_jpeg espressif__esp-sr espressif__quirc spiffs
+    REQUIRES driver esp_driver_jpeg esp_driver_ppa esp_event esp_netif esp_wifi nvs_flash esp_timer esp_codec_dev tirtc_sdk esp_lcd lwip esp_hw_support esp_http_client app_update esp_app_format json mbedtls mqtt esp_video esp_h264 esp32_p4_wifi6_touch_lcd_35 espressif__esp_jpeg espressif__esp-sr espressif__quirc spiffs
     WHOLE_ARCHIVE
 )
 
 set_source_files_properties("services/qr_scanner.c" PROPERTIES COMPILE_OPTIONS "-O3")
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE LV_LVGL_H_INCLUDE_SIMPLE)
+# Task-local payloads belong in PSRAM workspaces, not in large stack frames.
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wstack-usage=8192)
 idf_component_get_property(QUIRC_LIB espressif__quirc COMPONENT_LIB)
 target_compile_options(${QUIRC_LIB} PRIVATE -O3)
 

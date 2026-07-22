@@ -21,10 +21,10 @@
 #define APP_AI_CHAT_MESSAGE_MAX  100
 #define APP_RTC_CONFIG_TEXT_MAX  128
 #define APP_RTC_CONFIG_TOKEN_SUBJECT_MAX 64
-#define APP_CALL_CONTACT_MAX     3
+#define APP_CALL_CONTACT_MAX     5
+#define APP_CALL_CONTACT_DEVICE_ID_LENGTH 12
 #define APP_CALL_CONTACT_DEVICE_ID_MAX 64
-#define APP_CALL_CONTACT_PAIR_KEY_MAX 128
-#define APP_CALL_CONTACT_TIME_MAX 24
+#define APP_CALL_CONTACT_REMARK_MAX 64
 #define APP_WECHAT_CONTACT_MAX   3
 #define APP_WECHAT_OPEN_ID_MAX   96
 
@@ -57,7 +57,6 @@ typedef void (*app_scan_preview_cb_t)(const uint16_t *rgb565_pixels,
 				      void *ctx);
 typedef void (*app_contact_scan_result_cb_t)(esp_err_t result,
 					     const char *device_id,
-					     const char *pair_key,
 					     const char *raw_payload,
 					     void *ctx);
 typedef void (*app_tirtc_config_scan_result_cb_t)(esp_err_t result,
@@ -199,18 +198,46 @@ typedef struct {
 	app_ai_chat_message_t messages[APP_AI_CHAT_MESSAGE_MAX];
 	char status[APP_TEST_STATUS_MAX];
 	int last_error;
+	uint8_t avatar;
 } app_ai_chat_snapshot_t;
 
 typedef struct {
 	char device_id[APP_CALL_CONTACT_DEVICE_ID_MAX];
-	char pair_key[APP_CALL_CONTACT_PAIR_KEY_MAX];
-	char last_time[APP_CALL_CONTACT_TIME_MAX];
+	char remark[APP_CALL_CONTACT_REMARK_MAX];
+	bool online;
 } app_call_contact_t;
 
 typedef struct {
+	bool ready;
+	bool refreshing;
 	uint8_t count;
+	esp_err_t last_error;
 	app_call_contact_t contacts[APP_CALL_CONTACT_MAX];
 } app_call_contacts_snapshot_t;
+
+typedef enum {
+	APP_CALL_TYPE_AUDIO = 0,
+	APP_CALL_TYPE_VIDEO,
+} app_call_type_t;
+
+typedef enum {
+	APP_CALL_STATE_IDLE = 0,
+	APP_CALL_STATE_OUTGOING,
+	APP_CALL_STATE_INCOMING,
+	APP_CALL_STATE_CONNECTING,
+	APP_CALL_STATE_IN_CALL,
+	APP_CALL_STATE_ERROR,
+} app_call_state_t;
+
+typedef struct {
+	app_call_state_t state;
+	app_call_type_t type;
+	bool pending_incoming;
+	char peer_device_id[APP_CALL_CONTACT_DEVICE_ID_MAX];
+	char room_id[96];
+	char message[96];
+	esp_err_t last_error;
+} app_call_snapshot_t;
 
 typedef struct {
 	char open_id[APP_WECHAT_OPEN_ID_MAX];
@@ -265,6 +292,7 @@ typedef struct {
 	app_ota_snapshot_t ota;
 	app_control_snapshot_t controls;
 	app_ai_chat_snapshot_t ai_chat;
+	app_call_snapshot_t call;
 	app_call_contacts_snapshot_t call_contacts;
 	app_wechat_snapshot_t wechat;
 } app_snapshot_t;
@@ -289,9 +317,11 @@ esp_err_t app_start_device_binding(void);
 esp_err_t app_reset_device_binding(void);
 esp_err_t app_set_rtc_server_env(app_rtc_server_env_t env);
 
-esp_err_t app_call_contact(const char *device_id, const char *pair_key);
-esp_err_t app_add_call_contact(const char *device_id, const char *pair_key);
-esp_err_t app_remove_call_contact(const char *device_id);
+esp_err_t app_call_contact(const char *device_id, app_call_type_t call_type);
+esp_err_t app_add_call_contact(const char *device_id);
+esp_err_t app_respond_call_contact(const char *device_id, bool accept);
+esp_err_t app_update_call_contact_remark(const char *device_id, const char *remark);
+esp_err_t app_refresh_call_contacts(void);
 void app_get_call_contacts(app_call_contacts_snapshot_t *snapshot);
 esp_err_t app_scan_contact(void);
 esp_err_t app_start_contact_scan(app_scan_preview_cb_t preview_cb,
@@ -303,6 +333,7 @@ esp_err_t app_start_tirtc_config_scan(app_scan_preview_cb_t preview_cb,
 				      void *ctx);
 esp_err_t app_stop_tirtc_config_scan(void);
 esp_err_t app_hangup_call(void);
+esp_err_t app_hangup_call_async(void);
 esp_err_t app_accept_call(void);
 esp_err_t app_reject_call(void);
 
@@ -328,6 +359,7 @@ esp_err_t app_request_start_ai_chat(void);
 esp_err_t app_close_ai_chat(void);
 esp_err_t app_clear_ai_chat_messages(void);
 esp_err_t app_handle_ai_chat_button(bool pressed);
+esp_err_t app_set_ai_chat_avatar(uint8_t avatar);
 
 esp_err_t app_set_speaker_volume(uint8_t percent);
 esp_err_t app_set_capture_gain(uint8_t percent);

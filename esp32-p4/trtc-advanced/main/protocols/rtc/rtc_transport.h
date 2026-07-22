@@ -34,6 +34,11 @@ void rtc_transport_set_control_ops(const rtc_transport_control_ops_t *ops, void 
 esp_err_t rtc_transport_register_observer(const rtc_transport_observer_t *observer, void *ctx);
 esp_err_t rtc_transport_start_if_ready(void);
 esp_err_t rtc_transport_connect_peer(const char *remote_device_id, const char *remote_device_secret_key);
+esp_err_t rtc_transport_connect_peer_with_token(const char *remote_device_id, const char *connect_token);
+esp_err_t rtc_transport_send_command(uint32_t cmdw, const void *data, size_t data_len);
+void rtc_transport_set_next_connection_auto_media(bool enabled);
+void rtc_transport_set_next_connection_defer_media(bool enabled);
+esp_err_t rtc_transport_activate_deferred_media(bool enable_video, bool enable_audio);
 esp_err_t rtc_transport_restart(void);
 esp_err_t rtc_transport_stop(void);
 esp_err_t rtc_transport_disconnect(void);

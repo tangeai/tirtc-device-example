@@ -41,6 +41,7 @@ esp_err_t thing_mqtt_client_start(const thing_mqtt_client_config_t *config);
 void thing_mqtt_client_stop(void);
 bool thing_mqtt_client_is_started(void);
 bool thing_mqtt_client_is_connected(void);
+esp_err_t thing_mqtt_client_wait_last_command_ack(uint32_t timeout_ms);
 esp_err_t thing_mqtt_client_publish_up(const char *payload, int qos);
 esp_err_t thing_mqtt_client_add_listener(thing_mqtt_message_cb_t on_message,
                                          void *ctx,

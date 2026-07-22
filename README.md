@@ -7,7 +7,7 @@
 | 平台 | 示例目录 | 示例版本 | TiRTC SDK |
 | --- | --- | --- | --- |
 | ESP32-S3 | `esp32-s3/trtc-advanced` | `0.7.5` | `2.2.0` |
-| ESP32-P4 | `esp32-p4/trtc-advanced` | `1.0.2` | `2.2.0` |
+| ESP32-P4 | `esp32-p4/trtc-advanced` | `1.1.0` | `2.2.0` |
 
 ## 目录约定
 

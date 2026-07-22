@@ -1,0 +1,41 @@
+#pragma once
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "esp_heap_caps.h"
+
+/*
+ * P4 memory ownership:
+ * - internal RAM is reserved for realtime control, cache-off code and DMA;
+ * - large or long-lived payloads and background stacks are PSRAM-only;
+ * - a failed PSRAM allocation must be handled by the owner instead of silently
+ *   consuming the internal DMA reserve.
+ */
+#define APP_MEMORY_CAPS_CONTROL          (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+#define APP_MEMORY_CAPS_DMA              (MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT)
+#define APP_MEMORY_CAPS_PSRAM            (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+#define APP_TASK_STACK_CAPS_REALTIME     APP_MEMORY_CAPS_CONTROL
+#define APP_TASK_STACK_CAPS_INTERNAL     APP_MEMORY_CAPS_CONTROL
+#define APP_TASK_STACK_CAPS_CONTROL      APP_MEMORY_CAPS_CONTROL
+#define APP_TASK_STACK_CAPS_BACKGROUND   APP_MEMORY_CAPS_PSRAM
+#define APP_QUEUE_CAPS_CONTROL           APP_MEMORY_CAPS_CONTROL
+#define APP_QUEUE_CAPS_BACKGROUND        APP_MEMORY_CAPS_PSRAM
+#define APP_SYNC_CAPS_CONTROL            APP_MEMORY_CAPS_CONTROL
+
+typedef struct {
+    size_t internal_free;
+    size_t internal_largest;
+    size_t internal_min_free;
+    size_t dma_free;
+    size_t dma_largest;
+    size_t dma_min_free;
+    size_t psram_free;
+    size_t psram_largest;
+    size_t psram_min_free;
+    uint32_t psram_alloc_failures;
+} app_memory_snapshot_t;
+
+void *app_memory_alloc_psram(size_t size);
+void *app_memory_calloc_psram(size_t count, size_t size);
+void app_memory_get_snapshot(app_memory_snapshot_t *snapshot);

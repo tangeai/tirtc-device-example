@@ -27,8 +27,8 @@
 
 发布后应包含：
 
-- 多文件烧录包：`release_assets/web-flash/v1.0.2/`
-- 完整镜像烧录包：`release_assets/web-install/v1.0.2/`
+- 多文件烧录包：`release_assets/web-flash/v1.1.0/`
+- 完整镜像烧录包：`release_assets/web-install/v1.1.0/`
 - `SHA256SUMS.txt`
 - 中文烧录说明
 - 当前源码 commit

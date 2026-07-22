@@ -18,3 +18,18 @@ esp_err_t display_driver_init(display_driver_handles_t *handles);
 bool display_driver_is_initialized(void);
 uint16_t display_driver_width(void);
 uint16_t display_driver_height(void);
+
+/**
+ * Push one RGB565 region from DMA-capable PSRAM to the LCD and wait for
+ * completion.
+ *
+ * This is intended for frame-sized media updates from the LVGL task. Normal
+ * controls and pages continue to use LVGL. The source must live in aligned,
+ * DMA-capable PSRAM and already use the LCD byte order.
+ */
+esp_err_t display_driver_blit_rgb565(uint16_t x,
+                                    uint16_t y,
+                                    uint16_t width,
+                                    uint16_t height,
+                                    const uint16_t *pixels,
+                                    uint32_t *elapsed_us);

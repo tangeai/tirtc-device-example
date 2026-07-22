@@ -268,6 +268,7 @@ esp_err_t bsp_flashlight_set(bool on);
 typedef struct {
     lvgl_port_cfg_t lvgl_port_cfg;
     size_t buffer_size;
+    size_t trans_size;
     bool double_buffer;
     struct {
         bool buff_dma;
@@ -322,6 +323,13 @@ bool bsp_display_lock(uint32_t timeout_ms);
 void bsp_display_unlock(void);
 
 esp_lcd_panel_handle_t bsp_display_get_panel_handle(void);
+
+/**
+ * @brief Get the panel IO used by the active LCD
+ *
+ * The handle is owned by the BSP and remains valid until bsp_display_del().
+ */
+esp_lcd_panel_io_handle_t bsp_display_get_io_handle(void);
 
 /**
  * @brief Rotate screen

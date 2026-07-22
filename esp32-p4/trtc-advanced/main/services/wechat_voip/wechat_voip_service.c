@@ -3,8 +3,10 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 
+#include "app_task_affinity.h"
 #include "network.h"
 #include "tirtc_session.h"
 #include "wechat_voip_config.h"
@@ -85,7 +87,7 @@ static void wechat_voip_service_task(void *ctx)
     s_service_task = NULL;
     s_service_stop_requested = false;
     ESP_LOGI(TAG, "微信 VoIP 业务守护已停止");
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);
 }
 
 esp_err_t wechat_voip_service_start(void)
@@ -113,12 +115,13 @@ esp_err_t wechat_voip_service_start(void)
 
     /* The service start path may load contact data from NVS. Keep this task on
      * an internal-RAM stack so flash/NVS operations never run from PSRAM stack. */
-    BaseType_t task_ret = xTaskCreate(wechat_voip_service_task,
-                                      "wx_voip_svc",
-                                      WECHAT_VOIP_SERVICE_TASK_STACK,
-                                      NULL,
-                                      WECHAT_VOIP_SERVICE_TASK_PRIORITY,
-                                      &s_service_task);
+    BaseType_t task_ret = xTaskCreateWithCaps(wechat_voip_service_task,
+                                              "wx_voip_svc",
+                                              WECHAT_VOIP_SERVICE_TASK_STACK,
+                                              NULL,
+                                              WECHAT_VOIP_SERVICE_TASK_PRIORITY,
+                                              &s_service_task,
+                                              APP_TASK_STACK_CAPS_INTERNAL);
     ESP_RETURN_ON_FALSE(task_ret == pdPASS, ESP_ERR_NO_MEM, TAG, "create wechat voip service task failed");
     ESP_LOGI(TAG, "微信 VoIP 业务守护已启动");
     return ESP_OK;

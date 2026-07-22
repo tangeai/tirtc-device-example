@@ -45,6 +45,31 @@ esp_err_t rtc_transport_connect_peer(const char *remote_device_id, const char *r
     return tirtc_session_connect_peer(remote_device_id, remote_device_secret_key);
 }
 
+esp_err_t rtc_transport_connect_peer_with_token(const char *remote_device_id, const char *connect_token)
+{
+    return tirtc_session_connect_peer_with_token(remote_device_id, connect_token);
+}
+
+esp_err_t rtc_transport_send_command(uint32_t cmdw, const void *data, size_t data_len)
+{
+    return tirtc_session_send_active_command(cmdw, data, data_len);
+}
+
+void rtc_transport_set_next_connection_auto_media(bool enabled)
+{
+    tirtc_session_set_next_connection_auto_media(enabled);
+}
+
+void rtc_transport_set_next_connection_defer_media(bool enabled)
+{
+    tirtc_session_set_next_connection_defer_media(enabled);
+}
+
+esp_err_t rtc_transport_activate_deferred_media(bool enable_video, bool enable_audio)
+{
+    return tirtc_session_activate_deferred_media(enable_video, enable_audio);
+}
+
 esp_err_t rtc_transport_restart(void)
 {
     return tirtc_session_restart();

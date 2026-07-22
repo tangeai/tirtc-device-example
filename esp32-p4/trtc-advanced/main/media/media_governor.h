@@ -29,14 +29,20 @@ typedef struct {
     uint32_t bitrate_bps;
     media_governor_weak_network_mode_t weak_network_mode;
     uint8_t weak_network_level;
+    uint8_t h264_min_qp;
+    uint8_t h264_max_qp;
 } media_governor_video_config_t;
 
 typedef struct {
+    uint16_t capture_width;
+    uint16_t capture_height;
     uint8_t capture_fps;
     uint8_t rtc_video_fps;
     uint16_t rtc_width;
     uint16_t rtc_height;
     uint32_t h264_bitrate_bps;
+    uint8_t h264_min_qp;
+    uint8_t h264_max_qp;
     size_t h264_output_buffer_bytes;
     size_t h264_max_delta_payload_bytes;
     size_t dma_free_min_bytes;
@@ -52,6 +58,9 @@ esp_err_t media_governor_init(void);
 void media_governor_set_profile(media_governor_profile_t profile);
 media_governor_profile_t media_governor_get_profile(void);
 esp_err_t media_governor_set_rtc_video_config(const media_governor_video_config_t *config);
+void media_governor_build_device_call_video_config(media_governor_video_config_t *config);
+void media_governor_build_camera_policy(const media_governor_video_config_t *config,
+                                        media_governor_camera_policy_t *policy);
 esp_err_t media_governor_apply_weak_network_level(media_governor_weak_network_mode_t mode, uint8_t level);
 /* Auto adaptation is for future weak-network callbacks and is disabled by default. */
 bool media_governor_auto_adaptation_enabled(void);

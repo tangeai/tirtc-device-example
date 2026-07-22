@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "esp_err.h"
+
 typedef struct {
     bool active;
     uint32_t ref_peak;
@@ -11,8 +13,11 @@ typedef struct {
     uint32_t out_peak;
     uint8_t suppress_percent;
     uint16_t delay_samples;
+    uint32_t process_us;
 } audio_echo_cancel_metrics_t;
 
+esp_err_t audio_echo_cancel_prepare(void);
+esp_err_t audio_echo_cancel_set_active(bool active);
 void audio_echo_cancel_feed_playback(const int16_t *samples,
                                      size_t sample_count,
                                      uint8_t channels);

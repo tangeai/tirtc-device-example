@@ -1,6 +1,7 @@
 #include "audio_device.h"
 
 #include "audio.h"
+#include "audio_echo_cancel.h"
 
 esp_err_t audio_device_prepare(void)
 {
@@ -15,6 +16,16 @@ void audio_device_release(void)
 void audio_device_get_stats(audio_stats_t *stats)
 {
     audio_get_stats(stats);
+}
+
+esp_err_t audio_device_prepare_echo_cancel(void)
+{
+    return audio_echo_cancel_prepare();
+}
+
+esp_err_t audio_device_set_echo_cancel_active(bool active)
+{
+    return audio_echo_cancel_set_active(active);
 }
 
 const audio_format_t *microphone_get_format(void)

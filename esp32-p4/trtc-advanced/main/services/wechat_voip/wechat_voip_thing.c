@@ -18,7 +18,9 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "app_memory_policy.h"
 #include "thing_mqtt_client.h"
+#include "thing_service_registry.h"
 #include "tirtc_session.h"
 #include "wechat_voip_api.h"
 #include "wechat_voip_config.h"
@@ -39,7 +41,7 @@ enum {
     ACTIVE_CALL_REQUEST_GUARD_MS = 12000,
 };
 
-#define WECHAT_VOIP_THING_ALLOC_CAPS (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+#define WECHAT_VOIP_THING_ALLOC_CAPS APP_MEMORY_CAPS_PSRAM
 
 typedef enum {
     ACTIVE_CALL_IDLE = 0,
@@ -97,7 +99,7 @@ static void copy_str(char *dst, size_t dst_size, const char *src)
 static esp_err_t ensure_runtime(void)
 {
     if (s_voip.lock == NULL) {
-        s_voip.lock = xSemaphoreCreateMutexWithCaps(WECHAT_VOIP_THING_ALLOC_CAPS);
+        s_voip.lock = xSemaphoreCreateMutexWithCaps(APP_SYNC_CAPS_CONTROL);
         if (s_voip.lock == NULL) {
             return ESP_ERR_NO_MEM;
         }
@@ -136,6 +138,19 @@ static const char *json_string_any4(cJSON *root,
         }
     }
     return NULL;
+}
+
+static bool msg_type_is(const char *type,
+                        const char *name1,
+                        const char *name2,
+                        const char *name3)
+{
+    if (type == NULL || type[0] == '\0') {
+        return false;
+    }
+    return (name1 != NULL && strcmp(type, name1) == 0) ||
+           (name2 != NULL && strcmp(type, name2) == 0) ||
+           (name3 != NULL && strcmp(type, name3) == 0);
 }
 
 static void extract_query_param(const char *url, const char *key, char *out, size_t out_size)
@@ -241,7 +256,7 @@ static esp_err_t report_profile(void)
     if (token[0] == '\0') {
         return ESP_ERR_INVALID_STATE;
     }
-    return wechat_voip_api_report_profile(WECHAT_VOIP_API_BASE, token);
+    return wechat_voip_api_report_profile(thing_service_registry_voip_api_base(), token);
 }
 
 static esp_err_t refresh_callers(void)
@@ -252,7 +267,7 @@ static esp_err_t refresh_callers(void)
         return ESP_ERR_INVALID_STATE;
     }
     int count = 0;
-    return wechat_voip_api_fetch_callers(WECHAT_VOIP_API_BASE,
+    return wechat_voip_api_fetch_callers(thing_service_registry_voip_api_base(),
                                          token,
                                          caller_refresh_cb,
                                          NULL,
@@ -406,7 +421,7 @@ static esp_err_t do_active_call(uint32_t seq)
         return ESP_ERR_INVALID_STATE;
     }
 
-    return wechat_voip_api_request_call(WECHAT_VOIP_API_BASE,
+    return wechat_voip_api_request_call(thing_service_registry_voip_api_base(),
                                         token,
                                         device_id,
                                         &target,
@@ -457,7 +472,7 @@ static esp_err_t post_user_auth(const char *open_id)
     if (device_id[0] == '\0') {
         return ESP_ERR_INVALID_STATE;
     }
-    return wechat_voip_api_report_auth(WECHAT_VOIP_API_BASE, device_id, open_id);
+    return wechat_voip_api_report_auth(thing_service_registry_voip_api_base(), device_id, open_id);
 }
 
 static esp_err_t post_delete_auth(const wechat_voip_auth_user_t *removed)
@@ -467,7 +482,7 @@ static esp_err_t post_delete_auth(const wechat_voip_auth_user_t *removed)
     if (device_id[0] == '\0') {
         return ESP_ERR_INVALID_STATE;
     }
-    return wechat_voip_api_delete_auth(WECHAT_VOIP_API_BASE, device_id, removed);
+    return wechat_voip_api_delete_auth(thing_service_registry_voip_api_base(), device_id, removed);
 }
 
 static void handle_call_incoming(cJSON *payload)
@@ -497,7 +512,7 @@ static void handle_call_incoming(cJSON *payload)
         app_id = app_from_peer;
     }
 
-    ESP_LOGI(TAG, "%s", auto_answer ? "active call join received, waiting for WeChat answer" : "incoming WeChat call");
+    ESP_LOGI(TAG, "%s", auto_answer ? "active call join received, submit WHIP immediately" : "incoming WeChat call");
     esp_err_t ret = wechat_voip_session_handle_join_room(payload, auto_answer);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "call_incoming rejected locally: %s", esp_err_to_name(ret));
@@ -506,16 +521,26 @@ static void handle_call_incoming(cJSON *payload)
     remember_auth_user(openid, model_id, app_id, "call_incoming");
 }
 
-static void handle_call_cancel(cJSON *payload)
+static void handle_call_cancel(cJSON *payload, cJSON *root)
 {
     const char *room_id = json_string_any(payload, "wx_room_id", "wxa_room_id");
     if (room_id == NULL || room_id[0] == '\0') {
         room_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(payload, "room_id"));
     }
+    if (room_id == NULL || room_id[0] == '\0') {
+        room_id = json_string_any(root, "wx_room_id", "wxa_room_id");
+    }
+    if (room_id == NULL || room_id[0] == '\0') {
+        room_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "room_id"));
+    }
+
     bool matched = wechat_voip_session_cancel_by_room(room_id);
-    if (!matched) {
+    if (matched) {
+        ESP_LOGI(TAG, "wechat cancel matched active room: room=%s",
+                 room_id != NULL && room_id[0] != '\0' ? room_id : "(empty)");
+    } else {
         wechat_voip_thing_cancel_pending_call();
-        ESP_LOGI(TAG, "call_cancel did not match active room: room=%s",
+        ESP_LOGI(TAG, "wechat cancel did not match active room: room=%s",
                  room_id != NULL && room_id[0] != '\0' ? room_id : "(empty)");
     }
 }
@@ -531,20 +556,31 @@ static void handle_envelope(const char *json)
     const char *type = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "type"));
     const char *channel = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "channel"));
     cJSON *payload = cJSON_GetObjectItemCaseSensitive(root, "payload");
-    if (channel != NULL && channel[0] != '\0' && strcmp(channel, "wx") != 0) {
-        cJSON_Delete(root);
-        return;
-    }
+    bool is_voip_join = msg_type_is(type, "call_incoming", "wx_join_voip_room", "wxa_join_voip_room");
+    bool is_voip_cancel = msg_type_is(type, "call_cancel", "wx_user_cancel", "wxa_user_cancel");
+    bool is_callers_update = type != NULL && strcmp(type, "callers_update") == 0;
 
-    if (type != NULL && strcmp(type, "call_incoming") == 0) {
+    if (is_voip_join) {
         handle_call_incoming(payload);
-    } else if (type != NULL && strcmp(type, "callers_update") == 0) {
+    } else if (is_callers_update) {
         ESP_LOGI(TAG, "callers update received");
         (void)refresh_callers();
-    } else if (type != NULL && strcmp(type, "call_cancel") == 0) {
-        handle_call_cancel(payload);
+    } else if (is_voip_cancel) {
+        ESP_LOGI(TAG,
+                 "wechat cancel message received: type=%s channel=%s",
+                 type != NULL ? type : "(null)",
+                 channel != NULL && channel[0] != '\0' ? channel : "(none)");
+        handle_call_cancel(payload, root);
+    } else if (channel != NULL && channel[0] != '\0' && strcmp(channel, "wx") != 0) {
+        ESP_LOGD(TAG,
+                 "ignore non-wechat business message: type=%s channel=%s",
+                 type != NULL ? type : "(null)",
+                 channel);
     } else {
-        ESP_LOGW(TAG, "unhandled business message type=%s", type != NULL ? type : "(null)");
+        ESP_LOGW(TAG,
+                 "unhandled business message type=%s channel=%s",
+                 type != NULL ? type : "(null)",
+                 channel != NULL && channel[0] != '\0' ? channel : "(none)");
     }
     cJSON_Delete(root);
 }
@@ -605,10 +641,7 @@ static void mqtt_message_cb(const char *topic, const char *payload, size_t paylo
         return;
     }
 
-    char *copy = heap_caps_malloc(payload_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (copy == NULL) {
-        copy = malloc(payload_len + 1);
-    }
+    char *copy = app_memory_alloc_psram(payload_len + 1);
     if (copy == NULL) {
         ESP_LOGW(TAG, "drop message: no memory len=%u", (unsigned)payload_len);
         return;

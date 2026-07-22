@@ -8,7 +8,7 @@
 #include "sdkconfig.h"
 
 #ifndef CONFIG_APP_DEVICE_ONLINE_PAUSE_DURING_RTC
-#define CONFIG_APP_DEVICE_ONLINE_PAUSE_DURING_RTC 1
+#define CONFIG_APP_DEVICE_ONLINE_PAUSE_DURING_RTC 0
 #endif
 
 static const uint64_t APP_RTC_RATE_WINDOW_US = 1000000ULL;
@@ -24,6 +24,10 @@ typedef struct {
 } app_rtc_rate_state_t;
 
 static app_control_state_t s_control_state = {
+	.video_enabled = true,
+	.audio_enabled = true,
+};
+static app_control_state_t s_call_media_defaults = {
 	.video_enabled = true,
 	.audio_enabled = true,
 };
@@ -75,6 +79,25 @@ void app_state_set_audio_enabled(bool enabled)
 	taskEXIT_CRITICAL(&s_control_lock);
 }
 
+void app_state_prepare_call_media(bool video, bool audio)
+{
+	taskENTER_CRITICAL(&s_control_lock);
+	s_call_media_defaults.video_enabled = video;
+	s_call_media_defaults.audio_enabled = audio;
+	s_control_state = s_call_media_defaults;
+	taskEXIT_CRITICAL(&s_control_lock);
+}
+
+void app_state_reset_call_media_policy(void)
+{
+	taskENTER_CRITICAL(&s_control_lock);
+	s_call_media_defaults.video_enabled = true;
+	s_call_media_defaults.audio_enabled = true;
+	s_control_state.video_enabled = false;
+	s_control_state.audio_enabled = false;
+	taskEXIT_CRITICAL(&s_control_lock);
+}
+
 bool app_state_sync_call_media_defaults(bool call_active, app_control_state_t *control)
 {
 	bool changed = false;
@@ -82,8 +105,12 @@ bool app_state_sync_call_media_defaults(bool call_active, app_control_state_t *c
 	taskENTER_CRITICAL(&s_control_lock);
 	if (s_last_call_active != call_active) {
 		s_last_call_active = call_active;
-		s_control_state.video_enabled = call_active;
-		s_control_state.audio_enabled = call_active;
+		if (call_active) {
+			s_control_state = s_call_media_defaults;
+		} else {
+			s_control_state.video_enabled = false;
+			s_control_state.audio_enabled = false;
+		}
 		changed = true;
 	}
 	if (control != NULL) {

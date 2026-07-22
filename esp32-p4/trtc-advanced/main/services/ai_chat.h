@@ -40,6 +40,8 @@ typedef enum {
     AI_CHAT_STATE_ERROR,
 } ai_chat_state_t;
 
+typedef void (*ai_chat_media_active_cb_t)(bool active, void *ctx);
+
 typedef struct {
     bool enabled;
     char device_id[AI_CHAT_DEVICE_ID_MAX];
@@ -48,6 +50,8 @@ typedef struct {
     char device_key[AI_CHAT_SECRET_MAX];
     char device_mac[AI_CHAT_DEVICE_MAC_MAX];
     char token_api_base[AI_CHAT_API_BASE_MAX];
+    ai_chat_media_active_cb_t media_active_cb;
+    void *media_active_ctx;
 } ai_chat_config_t;
 
 typedef struct {
@@ -82,5 +86,6 @@ esp_err_t ai_chat_close(void);
 esp_err_t ai_chat_clear_messages(void);
 esp_err_t ai_chat_handle_control_button(bool pressed);
 bool ai_chat_owns_control_button(void);
+bool ai_chat_can_start(void);
 void ai_chat_get_snapshot(ai_chat_snapshot_t *snapshot);
 const char *ai_chat_state_name(ai_chat_state_t state);

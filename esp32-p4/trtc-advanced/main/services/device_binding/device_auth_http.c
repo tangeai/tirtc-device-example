@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "cJSON.h"
+#include "app_memory_policy.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -155,12 +156,7 @@ esp_err_t device_auth_http_get_mqtt_token(const char *api_base,
         {"X-Signature", signature},
         {"X-Mac", mac != NULL ? mac : ""},
     };
-    char *response = heap_caps_calloc(1,
-                                      DEVICE_AUTH_RESPONSE_MAX_LEN,
-                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (response == NULL) {
-        response = calloc(1, DEVICE_AUTH_RESPONSE_MAX_LEN);
-    }
+    char *response = app_memory_calloc_psram(1, DEVICE_AUTH_RESPONSE_MAX_LEN);
     if (response == NULL) {
         return ESP_ERR_NO_MEM;
     }

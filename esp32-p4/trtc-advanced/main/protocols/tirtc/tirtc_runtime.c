@@ -58,6 +58,15 @@ static void tirtc_session_handle_conn_accepted(const tirtc_session_event_t *even
         return;
     }
 
+    if (tirtc_session_connection_media_deferred(event->payload.conn.conn)) {
+        tirtc_session_complete_call_response_without_media(true);
+        tirtc_session_note_event("connected wait cmd");
+        ESP_LOGI(TAG,
+                 "rtc connection accepted: hconn=%p media deferred until device-call command",
+                 event->payload.conn.conn);
+        return;
+    }
+
     tirtc_session_complete_call_response(true);
     (void)tirtc_session_set_local_video_send_enabled(true);
     (void)tirtc_session_set_local_audio_send_enabled(true);

@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "app_memory_policy.h"
 #include "device_online.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
@@ -23,11 +24,7 @@ static const char *TAG = "ai_chat_token";
 
 static void *ai_chat_token_calloc_psram(size_t count, size_t size)
 {
-    void *ptr = heap_caps_calloc(count, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (ptr == NULL) {
-        ptr = calloc(count, size);
-    }
-    return ptr;
+    return app_memory_calloc_psram(count, size);
 }
 
 static bool ai_chat_token_is_blank(const char *value)

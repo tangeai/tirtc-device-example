@@ -16,6 +16,7 @@
 #include "freertos/task.h"
 #include "quirc.h"
 
+#include "app_memory_policy.h"
 #include "camera_driver.h"
 
 #define QR_SCANNER_MAX_FRAMES          12
@@ -30,11 +31,7 @@ static const char *TAG = "qr_scanner";
 
 static void *qr_scanner_calloc(size_t count, size_t size)
 {
-	void *ptr = heap_caps_calloc(count, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-	if (ptr == NULL) {
-		ptr = calloc(count, size);
-	}
-	return ptr;
+	return app_memory_calloc_psram(count, size);
 }
 
 static SemaphoreHandle_t s_scan_lock;
@@ -152,6 +149,25 @@ static bool qr_scanner_is_plain_open_id(const char *text)
 	return true;
 }
 
+static bool qr_scanner_is_plain_device_id(const char *text)
+{
+	size_t len = 0;
+
+	if (text == NULL) {
+		return false;
+	}
+	len = strlen(text);
+	if (len != 12U) {
+		return false;
+	}
+	for (size_t index = 0; index < len; ++index) {
+		if (!qr_scanner_is_open_id_char(text[index])) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static bool qr_scanner_extract_value(const char *payload,
 				     const char *key,
 				     char *value,
@@ -238,6 +254,11 @@ static esp_err_t qr_scanner_parse_contact_payload_bytes(const uint8_t *payload,
 		ret = ESP_OK;
 		goto done;
 	}
+	if (qr_scanner_is_plain_device_id(text)) {
+		strlcpy(contact->device_id, text, sizeof(contact->device_id));
+		ret = ESP_OK;
+		goto done;
+	}
 
 	has_type = qr_scanner_extract_value(text, "type", type, sizeof(type));
 	if (has_type &&
@@ -306,9 +327,13 @@ static esp_err_t qr_scanner_parse_contact_payload_bytes(const uint8_t *payload,
 							sizeof(contact->pair_key));
 	}
 
-	if (!has_device_id || !has_pair_key) {
+	bool credentials_payload = !has_type ||
+		strcmp(type, "tirtc_config") == 0 ||
+		strcmp(type, "device_credentials") == 0;
+	if (!has_device_id || (credentials_payload && !has_pair_key)) {
 		ESP_LOGW(TAG,
-			 "qr payload missing contact fields: has_device_id=%u has_device_secret_key=%u",
+			 "qr payload missing fields: type=%s has_device_id=%u has_device_secret_key=%u",
+			 has_type ? type : "legacy_credentials",
 			 has_device_id ? 1U : 0U,
 			 has_pair_key ? 1U : 0U);
 		goto done;
@@ -620,7 +645,7 @@ static esp_err_t qr_scanner_decode_frame(struct quirc *decoder,
 static esp_err_t qr_scanner_lock(void)
 {
 	if (s_scan_lock == NULL) {
-		s_scan_lock = xSemaphoreCreateBinary();
+		s_scan_lock = xSemaphoreCreateBinaryWithCaps(APP_SYNC_CAPS_CONTROL);
 		if (s_scan_lock == NULL) {
 			return ESP_ERR_NO_MEM;
 		}

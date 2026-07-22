@@ -26,10 +26,12 @@
 #include "sdkconfig.h"
 #include "tiRTC.h"
 
+#include "app_log_policy.h"
 #include "app_task_affinity.h"
 #include "camera_driver.h"
 #include "media_dma_reserve.h"
 #include "media_governor.h"
+#include "video_yuv420_scaler.h"
 
 static const char *TAG = "camera_pipeline";
 
@@ -38,20 +40,23 @@ static const char *TAG = "camera_pipeline";
 #endif
 
 #define CAMERA_PIPELINE_TASK_STACK       (9U * 1024U)
-#define CAMERA_PIPELINE_TASK_PRIORITY    10U
+#define CAMERA_PIPELINE_TASK_PRIORITY    13U
 #define CAMERA_PIPELINE_RETRY_DELAY_MS   200U
 #define CAMERA_PIPELINE_START_DELAY_MS   40U
 #define CAMERA_PIPELINE_LOG_INTERVAL_MS  10000U
 #define CAMERA_PIPELINE_H264_OPEN_RETRY_MS 2000U
 #define CAMERA_PIPELINE_H264_BUFFER_CNT  1U
 #ifndef CONFIG_APP_RTC_H264_BITRATE
-#define CONFIG_APP_RTC_H264_BITRATE 6000000
+#define CONFIG_APP_RTC_H264_BITRATE 4000000
 #endif
 #ifndef CONFIG_APP_RTC_H264_FPS
 #define CONFIG_APP_RTC_H264_FPS 20
 #endif
 #ifndef CONFIG_APP_RTC_H264_DIRECT_HW_ENCODER
 #define CONFIG_APP_RTC_H264_DIRECT_HW_ENCODER 0
+#endif
+#ifndef CONFIG_APP_RTC_H264_RESOURCE_FALLBACK_ENABLE
+#define CONFIG_APP_RTC_H264_RESOURCE_FALLBACK_ENABLE 0
 #endif
 #ifndef CONFIG_APP_RTC_H264_GOP
 #define CONFIG_APP_RTC_H264_GOP CONFIG_APP_RTC_H264_FPS
@@ -63,7 +68,7 @@ static const char *TAG = "camera_pipeline";
 #define CONFIG_APP_RTC_H264_MAX_QP 45
 #endif
 #ifndef CONFIG_APP_RTC_H264_OUTPUT_BUFFER_BYTES
-#define CONFIG_APP_RTC_H264_OUTPUT_BUFFER_BYTES (3U * 1024U * 1024U)
+#define CONFIG_APP_RTC_H264_OUTPUT_BUFFER_BYTES (1024U * 1024U)
 #endif
 #ifndef CONFIG_APP_RTC_H264_MAX_DELTA_PAYLOAD_BYTES
 #define CONFIG_APP_RTC_H264_MAX_DELTA_PAYLOAD_BYTES (128U * 1024U)
@@ -81,12 +86,13 @@ static const char *TAG = "camera_pipeline";
 #define CONFIG_APP_CAMERA_FRAME_TRACE_INTERVAL_MS 10000
 #endif
 #ifndef CONFIG_APP_RTC_H264_KEY_FRAME_REQUEST_MIN_INTERVAL_MS
-#define CONFIG_APP_RTC_H264_KEY_FRAME_REQUEST_MIN_INTERVAL_MS 100
+#define CONFIG_APP_RTC_H264_KEY_FRAME_REQUEST_MIN_INTERVAL_MS 2000
 #endif
 #define CAMERA_PIPELINE_H264_BITRATE     CONFIG_APP_RTC_H264_BITRATE
 #define CAMERA_PIPELINE_H264_MIN_QP      CONFIG_APP_RTC_H264_MIN_QP
 #define CAMERA_PIPELINE_H264_MAX_QP      CONFIG_APP_RTC_H264_MAX_QP
-#define CAMERA_PIPELINE_H264_STRICT_TARGET 1
+#define CAMERA_PIPELINE_H264_RESOURCE_FALLBACK_ENABLE \
+    CONFIG_APP_RTC_H264_RESOURCE_FALLBACK_ENABLE
 #define CAMERA_PIPELINE_H264_DIM_ALIGN   16U
 #define CAMERA_PIPELINE_H264_MIN_WIDTH   320U
 #define CAMERA_PIPELINE_H264_MIN_HEIGHT  240U
@@ -101,6 +107,9 @@ static const char *TAG = "camera_pipeline";
 #define CAMERA_PIPELINE_FRAME_TRACE_SLOW_STAGE_US       75000U
 #define CAMERA_PIPELINE_FRAME_TRACE_SLOW_LOOP_US        100000U
 #define CAMERA_PIPELINE_FRAME_TRACE_LARGE_PAYLOAD_BYTES (224U * 1024U)
+#define CAMERA_PIPELINE_LUMA_PROBE_GRID                  8U
+#define CAMERA_PIPELINE_LUMA_PROBE_SAMPLES \
+    (CAMERA_PIPELINE_LUMA_PROBE_GRID * CAMERA_PIPELINE_LUMA_PROBE_GRID)
 #define CAMERA_PIPELINE_KEY_FRAME_REQUEST_MIN_INTERVAL_US \
     ((uint64_t)CONFIG_APP_RTC_H264_KEY_FRAME_REQUEST_MIN_INTERVAL_MS * 1000ULL)
 #if CONFIG_CACHE_L2_CACHE_LINE_SIZE > CONFIG_CACHE_L1_CACHE_LINE_SIZE
@@ -127,6 +136,8 @@ typedef struct {
     uint32_t bitrate_bps;
     uint8_t fps;
     uint8_t gop;
+    uint8_t min_qp;
+    uint8_t max_qp;
     uint8_t direct_active_gop;
     uint8_t v4l2_active_gop;
     bool direct_encoder;
@@ -139,6 +150,24 @@ typedef struct {
     int64_t hw_us;
     int64_t sync_out_us;
 } camera_pipeline_h264_timing_t;
+
+typedef struct {
+    uint8_t samples[CAMERA_PIPELINE_LUMA_PROBE_SAMPLES];
+    uint8_t min_luma;
+    uint8_t max_luma;
+    uint32_t hash;
+} camera_pipeline_luma_probe_t;
+
+typedef struct {
+    camera_pipeline_luma_probe_t previous;
+    uint64_t delta_total;
+    uint32_t transition_count;
+    uint32_t changed_count;
+    uint32_t sample_count;
+    uint8_t window_min_luma;
+    uint8_t window_max_luma;
+    bool previous_valid;
+} camera_pipeline_luma_stats_t;
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_initialized;
@@ -153,6 +182,7 @@ static TickType_t s_last_frame_trace_log_tick;
 static bool s_h264_output_sync_noncacheable_logged;
 static bool s_h264_input_sync_noncacheable_logged;
 static bool s_h264_reserve_in_progress;
+static bool s_scaler_reserve_in_progress;
 static bool s_key_frame_request_pending;
 static uint64_t s_last_key_frame_request_us;
 static uint64_t s_last_key_frame_us;
@@ -160,9 +190,12 @@ static uint64_t s_last_key_frame_request_drop_log_us;
 static camera_pipeline_h264_encoder_t s_reserved_h264 = {
     .fd = -1,
 };
+static video_yuv420_scaler_handle_t s_reserved_call_scaler;
 static camera_pipeline_metrics_t s_metrics = {
     .configured_bitrate_bps = CAMERA_PIPELINE_H264_BITRATE,
 };
+
+static void camera_pipeline_reconcile_h264_reservation(const char *reason);
 
 static uint32_t camera_pipeline_interval_ms(uint8_t fps)
 {
@@ -176,6 +209,126 @@ static uint32_t camera_pipeline_interval_ms(uint8_t fps)
 static uint64_t camera_pipeline_abs_delta_us(uint64_t a, uint64_t b)
 {
     return a >= b ? a - b : b - a;
+}
+
+/* ESP32-P4 H264 consumes the packed O_UYY_E_VYY YUV420 layout.  Sampling a
+ * small luma grid lets runtime logs distinguish a frozen camera/PPA frame from
+ * an encoder or transport problem without scanning the full image. */
+static bool camera_pipeline_probe_ouev_luma(const uint8_t *data,
+                                            size_t len,
+                                            uint16_t width,
+                                            uint16_t height,
+                                            camera_pipeline_luma_probe_t *probe)
+{
+    if (data == NULL || probe == NULL || width < 2U || height < 2U ||
+        (width & 1U) != 0U) {
+        return false;
+    }
+
+    size_t row_stride = ((size_t)width * 3U) / 2U;
+    size_t expected_len = row_stride * height;
+    if (len < expected_len) {
+        return false;
+    }
+
+    uint8_t min_luma = UINT8_MAX;
+    uint8_t max_luma = 0U;
+    uint32_t hash = 2166136261U;
+    size_t sample_index = 0U;
+    for (uint32_t row = 0U; row < CAMERA_PIPELINE_LUMA_PROBE_GRID; ++row) {
+        uint32_t y = ((row * 2U + 1U) * height) /
+                     (CAMERA_PIPELINE_LUMA_PROBE_GRID * 2U);
+        if (y >= height) {
+            y = height - 1U;
+        }
+        for (uint32_t column = 0U; column < CAMERA_PIPELINE_LUMA_PROBE_GRID; ++column) {
+            uint32_t x = ((column * 2U + 1U) * width) /
+                         (CAMERA_PIPELINE_LUMA_PROBE_GRID * 2U);
+            if (x >= width) {
+                x = width - 1U;
+            }
+
+            size_t offset = (size_t)y * row_stride +
+                            ((size_t)x / 2U) * 3U + 1U + (x & 1U);
+            uint8_t luma = data[offset];
+            probe->samples[sample_index++] = luma;
+            if (luma < min_luma) {
+                min_luma = luma;
+            }
+            if (luma > max_luma) {
+                max_luma = luma;
+            }
+            hash = (hash ^ luma) * 16777619U;
+        }
+    }
+
+    probe->min_luma = min_luma;
+    probe->max_luma = max_luma;
+    probe->hash = hash;
+    return true;
+}
+
+static void camera_pipeline_luma_stats_update(camera_pipeline_luma_stats_t *stats,
+                                              const camera_pipeline_luma_probe_t *probe)
+{
+    if (stats == NULL || probe == NULL) {
+        return;
+    }
+
+    if (stats->sample_count == 0U) {
+        stats->window_min_luma = probe->min_luma;
+        stats->window_max_luma = probe->max_luma;
+    } else {
+        if (probe->min_luma < stats->window_min_luma) {
+            stats->window_min_luma = probe->min_luma;
+        }
+        if (probe->max_luma > stats->window_max_luma) {
+            stats->window_max_luma = probe->max_luma;
+        }
+    }
+    stats->sample_count++;
+
+    if (stats->previous_valid) {
+        uint32_t delta = 0U;
+        for (size_t index = 0U; index < CAMERA_PIPELINE_LUMA_PROBE_SAMPLES; ++index) {
+            uint8_t current = probe->samples[index];
+            uint8_t previous = stats->previous.samples[index];
+            delta += current >= previous ? current - previous : previous - current;
+        }
+        stats->delta_total += delta;
+        stats->transition_count++;
+        if (probe->hash != stats->previous.hash) {
+            stats->changed_count++;
+        }
+    }
+
+    stats->previous = *probe;
+    stats->previous_valid = true;
+}
+
+#if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
+static uint32_t camera_pipeline_luma_delta_x10(const camera_pipeline_luma_stats_t *stats)
+{
+    if (stats == NULL || stats->transition_count == 0U) {
+        return 0U;
+    }
+    return (uint32_t)((stats->delta_total * 10ULL) /
+                      ((uint64_t)stats->transition_count *
+                       CAMERA_PIPELINE_LUMA_PROBE_SAMPLES));
+}
+#endif
+
+static void camera_pipeline_luma_stats_reset_window(camera_pipeline_luma_stats_t *stats)
+{
+    if (stats == NULL) {
+        return;
+    }
+    stats->delta_total = 0U;
+    stats->transition_count = 0U;
+    stats->changed_count = 0U;
+    stats->sample_count = 0U;
+    stats->window_min_luma = 0U;
+    stats->window_max_luma = 0U;
 }
 
 static bool camera_pipeline_time_due(TickType_t now, TickType_t *last_tick, uint32_t interval_ms)
@@ -587,8 +740,8 @@ static bool camera_pipeline_h264_force_next_idr(camera_pipeline_h264_encoder_t *
     }
 
     if (reason != NULL && strcmp(reason, "stream-start") == 0) {
-        ESP_LOGI(TAG,
-                 "H264 key-frame requested: reason=%s mode=%s gop_switch=%u->%u",
+        APP_LOG_DETAIL(TAG,
+                       "H264 key-frame requested: reason=%s mode=%s gop_switch=%u->%u",
                  reason,
                  enc->direct_encoder ? "direct_hw" : "v4l2_m2m",
                  (unsigned)old_gop,
@@ -822,6 +975,8 @@ static esp_err_t camera_pipeline_h264_open(camera_pipeline_h264_encoder_t *enc,
                                            uint16_t height,
                                            uint8_t fps,
                                            uint32_t bitrate_bps,
+                                           uint8_t min_qp,
+                                           uint8_t max_qp,
                                            size_t output_buffer_bytes)
 {
     ESP_RETURN_ON_FALSE(enc != NULL, ESP_ERR_INVALID_ARG, TAG, "h264 encoder is null");
@@ -831,18 +986,24 @@ static esp_err_t camera_pipeline_h264_open(camera_pipeline_h264_encoder_t *enc,
 
     uint8_t safe_fps = fps == 0U ? 12U : fps;
     uint32_t safe_bitrate_bps = bitrate_bps == 0U ? CAMERA_PIPELINE_H264_BITRATE : bitrate_bps;
+    uint8_t safe_min_qp = min_qp >= 10U && min_qp <= 51U ?
+                              min_qp : CAMERA_PIPELINE_H264_MIN_QP;
+    uint8_t safe_max_qp = max_qp >= safe_min_qp && max_qp <= 51U ?
+                              max_qp : CAMERA_PIPELINE_H264_MAX_QP;
     uint8_t safe_gop = CONFIG_APP_RTC_H264_GOP > 0 ? CONFIG_APP_RTC_H264_GOP : safe_fps;
     size_t safe_output_buffer_bytes =
         output_buffer_bytes == 0U ? CONFIG_APP_RTC_H264_OUTPUT_BUFFER_BYTES : output_buffer_bytes;
 
-    ESP_LOGI(TAG,
-             "H264 encoder open request: mode=%s size=%ux%u fps=%u gop=%u bitrate=%u ref_internal_est=%u internal_free=%u internal_largest=%u dma_largest=%u psram_free=%u psram_largest=%u",
+    APP_LOG_DETAIL(TAG,
+                   "H264 encoder open request: mode=%s size=%ux%u fps=%u gop=%u bitrate=%u qp=%u-%u ref_internal_est=%u internal_free=%u internal_largest=%u dma_largest=%u psram_free=%u psram_largest=%u",
              CONFIG_APP_RTC_H264_DIRECT_HW_ENCODER ? "direct_hw" : "v4l2_m2m",
              width,
              height,
              safe_fps,
              safe_gop,
              (unsigned)safe_bitrate_bps,
+             (unsigned)safe_min_qp,
+             (unsigned)safe_max_qp,
              (unsigned)camera_pipeline_h264_ref_internal_estimate(width),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
@@ -874,8 +1035,8 @@ static esp_err_t camera_pipeline_h264_open(camera_pipeline_h264_encoder_t *enc,
             },
             .rc = {
                 .bitrate = safe_bitrate_bps,
-                .qp_min = CAMERA_PIPELINE_H264_MIN_QP,
-                .qp_max = CAMERA_PIPELINE_H264_MAX_QP,
+                .qp_min = safe_min_qp,
+                .qp_max = safe_max_qp,
             },
         };
 
@@ -903,6 +1064,8 @@ static esp_err_t camera_pipeline_h264_open(camera_pipeline_h264_encoder_t *enc,
         enc->height = height;
         enc->fps = safe_fps;
         enc->gop = safe_gop;
+        enc->min_qp = safe_min_qp;
+        enc->max_qp = safe_max_qp;
         enc->direct_active_gop = safe_gop;
         enc->bitrate_bps = safe_bitrate_bps;
         enc->output_buffer_bytes = safe_output_buffer_bytes;
@@ -914,8 +1077,8 @@ static esp_err_t camera_pipeline_h264_open(camera_pipeline_h264_encoder_t *enc,
                  safe_fps,
                  safe_gop,
                  safe_bitrate_bps,
-                 CAMERA_PIPELINE_H264_MIN_QP,
-                 CAMERA_PIPELINE_H264_MAX_QP,
+                 safe_min_qp,
+                 safe_max_qp,
                  (unsigned)enc->capture_buffer_size);
         return ESP_OK;
     }
@@ -926,8 +1089,8 @@ static esp_err_t camera_pipeline_h264_open(camera_pipeline_h264_encoder_t *enc,
 
     struct v4l2_capability capability = {0};
     if (ioctl(fd, VIDIOC_QUERYCAP, &capability) == 0) {
-        ESP_LOGI(TAG,
-                 "H264 encoder device: driver=%s card=%s caps=0x%08" PRIx32,
+        APP_LOG_DETAIL(TAG,
+                       "H264 encoder device: driver=%s card=%s caps=0x%08" PRIx32,
                  capability.driver,
                  capability.card,
                  capability.capabilities);
@@ -943,11 +1106,11 @@ static esp_err_t camera_pipeline_h264_open(camera_pipeline_h264_encoder_t *enc,
                                            "bitrate");
     (void)camera_pipeline_h264_set_control(fd,
                                            V4L2_CID_MPEG_VIDEO_H264_MIN_QP,
-                                           CAMERA_PIPELINE_H264_MIN_QP,
+                                           safe_min_qp,
                                            "min_qp");
     (void)camera_pipeline_h264_set_control(fd,
                                            V4L2_CID_MPEG_VIDEO_H264_MAX_QP,
-                                           CAMERA_PIPELINE_H264_MAX_QP,
+                                           safe_max_qp,
                                            "max_qp");
 
     int32_t actual_gop = -1;
@@ -970,12 +1133,12 @@ static esp_err_t camera_pipeline_h264_open(camera_pipeline_h264_encoder_t *enc,
                                                         V4L2_CID_MPEG_VIDEO_H264_MAX_QP,
                                                         &actual_max_qp,
                                                         "max_qp");
-    ESP_LOGI(TAG,
-             "H264 encoder controls: requested bitrate=%u gop=%u qp=%u-%u actual bitrate=%ld gop=%ld qp=%ld-%ld valid=%d%d%d%d",
+    APP_LOG_DETAIL(TAG,
+                   "H264 encoder controls: requested bitrate=%u gop=%u qp=%u-%u actual bitrate=%ld gop=%ld qp=%ld-%ld valid=%d%d%d%d",
              (unsigned)safe_bitrate_bps,
              (unsigned)safe_gop,
-             (unsigned)CAMERA_PIPELINE_H264_MIN_QP,
-             (unsigned)CAMERA_PIPELINE_H264_MAX_QP,
+             (unsigned)safe_min_qp,
+             (unsigned)safe_max_qp,
              (long)actual_bitrate,
              (long)actual_gop,
              (long)actual_min_qp,
@@ -1080,6 +1243,8 @@ static esp_err_t camera_pipeline_h264_open(camera_pipeline_h264_encoder_t *enc,
     enc->height = height;
     enc->fps = safe_fps;
     enc->gop = safe_gop;
+    enc->min_qp = safe_min_qp;
+    enc->max_qp = safe_max_qp;
     enc->v4l2_active_gop = safe_gop;
     enc->bitrate_bps = safe_bitrate_bps;
     enc->output_buffer_bytes = safe_output_buffer_bytes;
@@ -1091,8 +1256,8 @@ static esp_err_t camera_pipeline_h264_open(camera_pipeline_h264_encoder_t *enc,
              safe_fps,
              safe_gop,
              safe_bitrate_bps,
-             CAMERA_PIPELINE_H264_MIN_QP,
-             CAMERA_PIPELINE_H264_MAX_QP,
+             safe_min_qp,
+             safe_max_qp,
              (unsigned)enc->capture_buffer_size);
     return ESP_OK;
 }
@@ -1102,6 +1267,8 @@ static esp_err_t camera_pipeline_h264_open_with_dma_escrow(camera_pipeline_h264_
                                                            uint16_t height,
                                                            uint8_t fps,
                                                            uint32_t bitrate_bps,
+                                                           uint8_t min_qp,
+                                                           uint8_t max_qp,
                                                            size_t output_buffer_bytes,
                                                            const char *stage)
 {
@@ -1110,6 +1277,8 @@ static esp_err_t camera_pipeline_h264_open_with_dma_escrow(camera_pipeline_h264_
                                               height,
                                               fps,
                                               bitrate_bps,
+                                              min_qp,
+                                              max_qp,
                                               output_buffer_bytes);
     if (ret == ESP_OK || !media_dma_reserve_is_reserved()) {
         return ret;
@@ -1130,6 +1299,8 @@ static esp_err_t camera_pipeline_h264_open_with_dma_escrow(camera_pipeline_h264_
                                     height,
                                     fps,
                                     bitrate_bps,
+                                    min_qp,
+                                    max_qp,
                                     output_buffer_bytes);
 
     esp_err_t reclaim_ret =
@@ -1149,10 +1320,16 @@ static bool camera_pipeline_h264_matches(const camera_pipeline_h264_encoder_t *e
                                          uint16_t height,
                                          uint8_t fps,
                                          uint32_t bitrate_bps,
+                                         uint8_t min_qp,
+                                         uint8_t max_qp,
                                          size_t output_buffer_bytes)
 {
     uint8_t safe_fps = fps == 0U ? 12U : fps;
     uint32_t safe_bitrate_bps = bitrate_bps == 0U ? CAMERA_PIPELINE_H264_BITRATE : bitrate_bps;
+    uint8_t safe_min_qp = min_qp >= 10U && min_qp <= 51U ?
+                              min_qp : CAMERA_PIPELINE_H264_MIN_QP;
+    uint8_t safe_max_qp = max_qp >= safe_min_qp && max_qp <= 51U ?
+                              max_qp : CAMERA_PIPELINE_H264_MAX_QP;
     uint8_t safe_gop = CONFIG_APP_RTC_H264_GOP > 0 ? CONFIG_APP_RTC_H264_GOP : safe_fps;
     size_t safe_output_buffer_bytes =
         output_buffer_bytes == 0U ? CONFIG_APP_RTC_H264_OUTPUT_BUFFER_BYTES : output_buffer_bytes;
@@ -1164,6 +1341,8 @@ static bool camera_pipeline_h264_matches(const camera_pipeline_h264_encoder_t *e
            enc->fps == safe_fps &&
            enc->gop == safe_gop &&
            enc->bitrate_bps == safe_bitrate_bps &&
+           enc->min_qp == safe_min_qp &&
+           enc->max_qp == safe_max_qp &&
            enc->output_buffer_bytes == safe_output_buffer_bytes;
 }
 
@@ -1172,6 +1351,8 @@ static bool camera_pipeline_h264_take_reserved(camera_pipeline_h264_encoder_t *e
                                                uint16_t height,
                                                uint8_t fps,
                                                uint32_t bitrate_bps,
+                                               uint8_t min_qp,
+                                               uint8_t max_qp,
                                                size_t output_buffer_bytes)
 {
     bool taken = false;
@@ -1186,6 +1367,8 @@ static bool camera_pipeline_h264_take_reserved(camera_pipeline_h264_encoder_t *e
                                      height,
                                      fps,
                                      bitrate_bps,
+                                     min_qp,
+                                     max_qp,
                                      output_buffer_bytes)) {
         *enc = s_reserved_h264;
         s_reserved_h264 = (camera_pipeline_h264_encoder_t) {
@@ -1196,14 +1379,16 @@ static bool camera_pipeline_h264_take_reserved(camera_pipeline_h264_encoder_t *e
     taskEXIT_CRITICAL(&s_lock);
 
     if (taken) {
-        ESP_LOGI(TAG,
-                 "H264 encoder reserved resource adopted: mode=%s size=%ux%u fps=%u gop=%u bitrate=%u out_buf=%u internal_largest=%u dma_largest=%u",
+        APP_LOG_DETAIL(TAG,
+                       "H264 encoder reserved resource adopted: mode=%s size=%ux%u fps=%u gop=%u bitrate=%u qp=%u-%u out_buf=%u internal_largest=%u dma_largest=%u",
                  enc->direct_encoder ? "direct_hw" : "v4l2_m2m",
                  width,
                  height,
                  fps,
                  (unsigned)enc->gop,
                  (unsigned)bitrate_bps,
+                 (unsigned)enc->min_qp,
+                 (unsigned)enc->max_qp,
                  (unsigned)output_buffer_bytes,
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
@@ -1242,8 +1427,8 @@ static bool camera_pipeline_h264_store_reserved(camera_pipeline_h264_encoder_t *
     taskEXIT_CRITICAL(&s_lock);
 
     if (stored) {
-        ESP_LOGI(TAG,
-                 "H264 encoder reserved resource stored: reason=%s mode=%s size=%ux%u fps=%u gop=%u bitrate=%u out_buf=%u internal_largest=%u dma_largest=%u",
+        APP_LOG_DETAIL(TAG,
+                       "H264 encoder reserved resource stored: reason=%s mode=%s size=%ux%u fps=%u gop=%u bitrate=%u qp=%u-%u out_buf=%u internal_largest=%u dma_largest=%u",
                  reason != NULL ? reason : "unknown",
                  s_reserved_h264.direct_encoder ? "direct_hw" : "v4l2_m2m",
                  width,
@@ -1251,11 +1436,111 @@ static bool camera_pipeline_h264_store_reserved(camera_pipeline_h264_encoder_t *
                  fps,
                  (unsigned)s_reserved_h264.gop,
                  (unsigned)bitrate_bps,
+                 (unsigned)s_reserved_h264.min_qp,
+                 (unsigned)s_reserved_h264.max_qp,
                  (unsigned)output_buffer_bytes,
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
     }
     return stored;
+}
+
+static bool camera_pipeline_build_call_scaler_config(video_yuv420_scaler_config_t *config)
+{
+    media_governor_video_config_t video_config = {0};
+    media_governor_camera_policy_t policy = {0};
+
+    if (config == NULL) {
+        return false;
+    }
+
+    media_governor_build_device_call_video_config(&video_config);
+    media_governor_build_camera_policy(&video_config, &policy);
+    *config = (video_yuv420_scaler_config_t) {
+        .input_width = camera_pipeline_even_dimension(policy.capture_width),
+        .input_height = camera_pipeline_even_dimension(policy.capture_height),
+        .output_width = camera_pipeline_even_dimension(policy.rtc_width),
+        .output_height = camera_pipeline_even_dimension(policy.rtc_height),
+    };
+
+    return config->input_width > 0U && config->input_height > 0U &&
+           config->output_width > 0U && config->output_height > 0U &&
+           config->output_width <= config->input_width &&
+           config->output_height <= config->input_height &&
+           (config->input_width != config->output_width ||
+            config->input_height != config->output_height);
+}
+
+static video_yuv420_scaler_handle_t camera_pipeline_scaler_take_reserved(
+    const video_yuv420_scaler_config_t *config)
+{
+    video_yuv420_scaler_handle_t scaler = NULL;
+
+    if (config == NULL) {
+        return NULL;
+    }
+
+    taskENTER_CRITICAL(&s_lock);
+    if (video_yuv420_scaler_matches(s_reserved_call_scaler, config)) {
+        scaler = s_reserved_call_scaler;
+        s_reserved_call_scaler = NULL;
+    }
+    taskEXIT_CRITICAL(&s_lock);
+
+    if (scaler != NULL) {
+        APP_LOG_DETAIL(TAG,
+                       "call YUV420 scaler reserved resource adopted: input=%ux%u output=%ux%u",
+                 config->input_width,
+                 config->input_height,
+                 config->output_width,
+                 config->output_height);
+    }
+    return scaler;
+}
+
+static bool camera_pipeline_scaler_store_reserved(video_yuv420_scaler_handle_t *scaler,
+                                                  const char *reason)
+{
+    video_yuv420_scaler_config_t call_config = {0};
+    bool stored = false;
+
+    if (scaler == NULL || *scaler == NULL ||
+        !camera_pipeline_build_call_scaler_config(&call_config) ||
+        !video_yuv420_scaler_matches(*scaler, &call_config)) {
+        return false;
+    }
+
+    taskENTER_CRITICAL(&s_lock);
+    if (s_reserved_call_scaler == NULL) {
+        s_reserved_call_scaler = *scaler;
+        *scaler = NULL;
+        stored = true;
+    }
+    taskEXIT_CRITICAL(&s_lock);
+
+    if (stored) {
+        APP_LOG_DETAIL(TAG,
+                       "call YUV420 scaler reserved resource stored: reason=%s input=%ux%u output=%ux%u",
+                 reason != NULL ? reason : "unknown",
+                 call_config.input_width,
+                 call_config.input_height,
+                 call_config.output_width,
+                 call_config.output_height);
+    }
+    return stored;
+}
+
+static void camera_pipeline_scaler_release(video_yuv420_scaler_handle_t *scaler,
+                                           const char *reason)
+{
+    if (scaler == NULL || *scaler == NULL) {
+        return;
+    }
+
+    if (!camera_pipeline_scaler_store_reserved(scaler, reason)) {
+        video_yuv420_scaler_destroy(*scaler);
+        *scaler = NULL;
+    }
 }
 
 static esp_err_t camera_pipeline_h264_encode(camera_pipeline_h264_encoder_t *enc,
@@ -1457,12 +1742,14 @@ static void camera_pipeline_task(void *arg)
     camera_pipeline_h264_encoder_t h264 = {
         .fd = -1,
     };
+    video_yuv420_scaler_handle_t yuv420_scaler = NULL;
     TickType_t start_tick = xTaskGetTickCount();
     TickType_t last_rtc_tick = 0;
     TickType_t last_stats_tick = start_tick;
     uint32_t upstream_count = 0;
     uint32_t drop_count = 0;
     uint32_t capture_fail_count = 0;
+    uint32_t convert_fail_count = 0;
     uint32_t encode_fail_count = 0;
     uint32_t total_payload_bytes = 0;
     uint32_t backpressure_skip_count = 0;
@@ -1471,6 +1758,7 @@ static void camera_pipeline_task(void *arg)
     uint32_t encoded_frame_count = 0;
     uint32_t key_frame_count = 0;
     uint32_t slow_capture_count = 0;
+    uint32_t slow_convert_count = 0;
     uint32_t slow_encode_count = 0;
     uint32_t slow_callback_count = 0;
     uint32_t slow_loop_count = 0;
@@ -1482,6 +1770,7 @@ static void camera_pipeline_task(void *arg)
     uint64_t last_frame_start_us = 0;
     uint64_t stream_start_us = 0;
     uint64_t capture_us_total = 0;
+    uint64_t convert_us_total = 0;
     uint64_t encode_us_total = 0;
     uint64_t h264_sync_in_us_total = 0;
     uint64_t h264_hw_us_total = 0;
@@ -1492,6 +1781,7 @@ static void camera_pipeline_task(void *arg)
     uint64_t max_media_timestamp_lag_us = 0;
     uint64_t camera_sequence_delta_total_x10 = 0;
     uint32_t capture_sample_count = 0;
+    uint32_t convert_sample_count = 0;
     uint32_t encode_sample_count = 0;
     uint32_t callback_sample_count = 0;
     uint32_t loop_sample_count = 0;
@@ -1501,13 +1791,15 @@ static void camera_pipeline_task(void *arg)
     uint32_t max_camera_sequence_delta = 0;
     uint32_t last_camera_sequence = 0;
     uint32_t trace_frame_count = 0;
+    camera_pipeline_luma_stats_t source_luma_stats = {0};
+    camera_pipeline_luma_stats_t encoder_luma_stats = {0};
     bool first_frame_logged = false;
     bool last_camera_sequence_valid = false;
     bool stream_start_key_frame_requested = false;
     bool video_subsystem_prepared = false;
     bool camera_acquired = false;
     TickType_t next_h264_open_tick = 0;
-    TickType_t last_source_mismatch_log_tick = 0;
+    TickType_t last_scaler_fail_log_tick = 0;
     uint16_t h264_fallback_width = 0;
     uint16_t h264_fallback_height = 0;
     bool key_frame_required_after_drop = false;
@@ -1529,28 +1821,36 @@ static void camera_pipeline_task(void *arg)
     uint16_t preopen_width = camera_pipeline_even_dimension(preopen_policy.rtc_width);
     uint16_t preopen_height = camera_pipeline_even_dimension(preopen_policy.rtc_height);
     if (preopen_width > 0U && preopen_height > 0U && preopen_policy.rtc_video_fps > 0U) {
+        uint16_t capture_width = camera_pipeline_even_dimension(preopen_policy.capture_width);
+        uint16_t capture_height = camera_pipeline_even_dimension(preopen_policy.capture_height);
+        if (capture_width == 0U || capture_height == 0U) {
+            capture_width = preopen_width;
+            capture_height = preopen_height;
+        }
         esp_err_t camera_target_ret =
-            camera_driver_set_stream_target(preopen_width, preopen_height, preopen_policy.capture_fps);
+            camera_driver_set_stream_target(capture_width, capture_height, preopen_policy.capture_fps);
         if (camera_target_ret != ESP_OK) {
             ESP_LOGW(TAG,
                      "camera stream target preopen failed: %ux%u@%u %s",
-                     preopen_width,
-                     preopen_height,
+                     capture_width,
+                     capture_height,
                      preopen_policy.capture_fps,
                      esp_err_to_name(camera_target_ret));
         }
-        ESP_LOGI(TAG,
-                 "H264 encoder preopen before camera buffers: size=%ux%u fps=%u bitrate=%u strict=%d",
+        APP_LOG_DETAIL(TAG,
+                       "H264 encoder preopen before camera buffers: size=%ux%u fps=%u bitrate=%u resource_fallback=%d",
                  preopen_width,
                  preopen_height,
                  preopen_policy.rtc_video_fps,
                  (unsigned)preopen_policy.h264_bitrate_bps,
-                 CAMERA_PIPELINE_H264_STRICT_TARGET);
+                 CAMERA_PIPELINE_H264_RESOURCE_FALLBACK_ENABLE);
         if (camera_pipeline_h264_take_reserved(&h264,
                                                preopen_width,
                                                preopen_height,
                                                preopen_policy.rtc_video_fps,
                                                preopen_policy.h264_bitrate_bps,
+                                               preopen_policy.h264_min_qp,
+                                               preopen_policy.h264_max_qp,
                                                preopen_policy.h264_output_buffer_bytes)) {
             ret = ESP_OK;
         } else {
@@ -1559,12 +1859,14 @@ static void camera_pipeline_task(void *arg)
                                                             preopen_height,
                                                             preopen_policy.rtc_video_fps,
                                                             preopen_policy.h264_bitrate_bps,
+                                                            preopen_policy.h264_min_qp,
+                                                            preopen_policy.h264_max_qp,
                                                             preopen_policy.h264_output_buffer_bytes,
                                                             "pipeline-preopen");
         }
         if (ret != ESP_OK) {
             encode_fail_count++;
-            if (!CAMERA_PIPELINE_H264_STRICT_TARGET &&
+            if (CAMERA_PIPELINE_H264_RESOURCE_FALLBACK_ENABLE &&
                 camera_pipeline_select_h264_internal_fit(preopen_width,
                                                          preopen_height,
                                                          &h264_fallback_width,
@@ -1583,19 +1885,22 @@ static void camera_pipeline_task(void *arg)
                                                                 h264_fallback_height,
                                                                 preopen_policy.rtc_video_fps,
                                                                 preopen_policy.h264_bitrate_bps,
+                                                                preopen_policy.h264_min_qp,
+                                                                preopen_policy.h264_max_qp,
                                                                 preopen_policy.h264_output_buffer_bytes,
                                                                 "pipeline-preopen-fallback");
             }
             if (ret != ESP_OK) {
                 next_h264_open_tick = xTaskGetTickCount() + pdMS_TO_TICKS(CAMERA_PIPELINE_H264_OPEN_RETRY_MS);
                 ESP_LOGW(TAG,
-                         "H264 encoder preopen failed at strict target %ux%u: %s, retry after %ums",
+                         "H264 encoder preopen failed at %ux%u: %s, retry after %ums",
                          preopen_width,
                          preopen_height,
                          esp_err_to_name(ret),
                          (unsigned)CAMERA_PIPELINE_H264_OPEN_RETRY_MS);
             }
         }
+
     }
 
     ret = camera_driver_acquire();
@@ -1632,16 +1937,16 @@ static void camera_pipeline_task(void *arg)
             backpressure_key_request_pending = true;
             continue;
         }
-        uint16_t policy_width = camera_pipeline_even_dimension(policy.rtc_width);
-        uint16_t policy_height = camera_pipeline_even_dimension(policy.rtc_height);
-        if (policy_width > 0U && policy_height > 0U && policy.capture_fps > 0U) {
+        uint16_t capture_width = camera_pipeline_even_dimension(policy.capture_width);
+        uint16_t capture_height = camera_pipeline_even_dimension(policy.capture_height);
+        if (capture_width > 0U && capture_height > 0U && policy.capture_fps > 0U) {
             esp_err_t camera_target_ret =
-                camera_driver_set_stream_target(policy_width, policy_height, policy.capture_fps);
+                camera_driver_set_stream_target(capture_width, capture_height, policy.capture_fps);
             if (camera_target_ret != ESP_OK && camera_target_ret != ESP_ERR_INVALID_STATE) {
                 ESP_LOGW(TAG,
                          "camera stream target update failed: %ux%u@%u %s",
-                         policy_width,
-                         policy_height,
+                         capture_width,
+                         capture_height,
                          policy.capture_fps,
                          esp_err_to_name(camera_target_ret));
             }
@@ -1688,6 +1993,15 @@ static void camera_pipeline_task(void *arg)
         size_t source_data_len = frame.data_len;
         uint32_t source_sequence = frame.sequence;
         uint32_t source_stale_frames_dropped = frame.stale_frames_dropped;
+        camera_pipeline_luma_probe_t source_luma_probe = {0};
+        if (source_format == CAMERA_DRIVER_PIXEL_FORMAT_YUV420 &&
+            camera_pipeline_probe_ouev_luma(frame.data,
+                                            source_data_len,
+                                            source_width,
+                                            source_height,
+                                            &source_luma_probe)) {
+            camera_pipeline_luma_stats_update(&source_luma_stats, &source_luma_probe);
+        }
 
         uint16_t target_width = camera_pipeline_even_dimension(policy.rtc_width);
         uint16_t target_height = camera_pipeline_even_dimension(policy.rtc_height);
@@ -1709,23 +2023,6 @@ static void camera_pipeline_task(void *arg)
             target_width = h264_fallback_width;
             target_height = h264_fallback_height;
         }
-        if (source_format == CAMERA_DRIVER_PIXEL_FORMAT_YUV420 &&
-            (source_width != target_width || source_height != target_height)) {
-            TickType_t mismatch_tick = xTaskGetTickCount();
-            if (last_source_mismatch_log_tick == 0 ||
-                mismatch_tick - last_source_mismatch_log_tick >= pdMS_TO_TICKS(5000)) {
-                last_source_mismatch_log_tick = mismatch_tick;
-                ESP_LOGW(TAG,
-                         "camera source size differs from RTC target, keep direct YUV420 source: source=%ux%u target=%ux%u",
-                         source_width,
-                         source_height,
-                         target_width,
-                         target_height);
-            }
-            target_width = camera_pipeline_even_dimension(source_width);
-            target_height = camera_pipeline_even_dimension(source_height);
-        }
-
         size_t h264_input_len = camera_pipeline_h264_input_size(target_width, target_height);
         const uint8_t *h264_input_data = NULL;
         bool frame_released = false;
@@ -1738,6 +2035,7 @@ static void camera_pipeline_task(void *arg)
             source_width == target_width &&
             source_height == target_height &&
             source_data_len >= h264_input_len) {
+            camera_pipeline_scaler_release(&yuv420_scaler, "direct-input");
             h264_input_data = frame.data;
             h264_input_path = "yuv420-direct";
             h264_direct_input = true;
@@ -1754,20 +2052,82 @@ static void camera_pipeline_task(void *arg)
                      (unsigned)source_data_len);
             vTaskDelay(pdMS_TO_TICKS(CAMERA_PIPELINE_RETRY_DELAY_MS));
             continue;
-        } else if (source_format == CAMERA_DRIVER_PIXEL_FORMAT_YUV420 && frame.data != NULL) {
+        } else if (source_format == CAMERA_DRIVER_PIXEL_FORMAT_YUV420 &&
+                   frame.data != NULL &&
+                   target_width > 0U && target_height > 0U) {
+            video_yuv420_scaler_config_t scaler_config = {
+                .input_width = source_width,
+                .input_height = source_height,
+                .output_width = target_width,
+                .output_height = target_height,
+            };
+            if (!video_yuv420_scaler_matches(yuv420_scaler, &scaler_config)) {
+                camera_pipeline_scaler_release(&yuv420_scaler, "profile-change");
+                yuv420_scaler = camera_pipeline_scaler_take_reserved(&scaler_config);
+                ret = yuv420_scaler != NULL ? ESP_OK :
+                    video_yuv420_scaler_create(&scaler_config, &yuv420_scaler);
+                if (ret != ESP_OK) {
+                    camera_driver_release(&frame);
+                    frame_released = true;
+                    drop_count++;
+                    convert_fail_count++;
+                    TickType_t fail_tick = xTaskGetTickCount();
+                    if (last_scaler_fail_log_tick == 0 ||
+                        fail_tick - last_scaler_fail_log_tick >= pdMS_TO_TICKS(5000)) {
+                        last_scaler_fail_log_tick = fail_tick;
+                        ESP_LOGW(TAG,
+                                 "YUV420 scaler create failed: source=%ux%u target=%ux%u %s",
+                                 source_width,
+                                 source_height,
+                                 target_width,
+                                 target_height,
+                                 esp_err_to_name(ret));
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(CAMERA_PIPELINE_RETRY_DELAY_MS));
+                    continue;
+                }
+            }
+
+            int64_t convert_start_us = esp_timer_get_time();
+            ret = video_yuv420_scaler_process(yuv420_scaler,
+                                              frame.data,
+                                              source_data_len,
+                                              &h264_input_data,
+                                              &h264_input_len);
+            convert_us = esp_timer_get_time() - convert_start_us;
             camera_driver_release(&frame);
             frame_released = true;
-            capture_fail_count++;
-            ESP_LOGW(TAG,
-                     "RTC video requires direct YUV420: source=%ux%u target=%ux%u bytes=%u expected=%u",
-                     source_width,
-                     source_height,
-                     target_width,
-                     target_height,
-                     (unsigned)source_data_len,
-                     (unsigned)h264_input_len);
-            vTaskDelay(pdMS_TO_TICKS(CAMERA_PIPELINE_RETRY_DELAY_MS));
-            continue;
+            if (ret != ESP_OK || h264_input_data == NULL ||
+                h264_input_len < camera_pipeline_h264_input_size(target_width, target_height)) {
+                if (ret == ESP_OK) {
+                    ret = ESP_ERR_INVALID_SIZE;
+                }
+                drop_count++;
+                convert_fail_count++;
+                TickType_t fail_tick = xTaskGetTickCount();
+                if (last_scaler_fail_log_tick == 0 ||
+                    fail_tick - last_scaler_fail_log_tick >= pdMS_TO_TICKS(5000)) {
+                    last_scaler_fail_log_tick = fail_tick;
+                    ESP_LOGW(TAG,
+                             "YUV420 scaler process failed: source=%ux%u target=%ux%u in=%u out=%u %s",
+                             source_width,
+                             source_height,
+                             target_width,
+                             target_height,
+                             (unsigned)source_data_len,
+                             (unsigned)h264_input_len,
+                             esp_err_to_name(ret));
+                }
+                vTaskDelay(pdMS_TO_TICKS(CAMERA_PIPELINE_RETRY_DELAY_MS));
+                continue;
+            }
+            convert_us_total += (uint64_t)convert_us;
+            convert_sample_count++;
+            if (convert_us > CAMERA_PIPELINE_FRAME_TRACE_SLOW_STAGE_US) {
+                slow_convert_count++;
+            }
+            h264_input_path = "yuv420-ppa-scale";
+            h264_direct_input = false;
         } else {
             camera_driver_release(&frame);
             frame_released = true;
@@ -1796,6 +2156,8 @@ static void camera_pipeline_task(void *arg)
                                           target_height,
                                           policy.rtc_video_fps,
                                           policy.h264_bitrate_bps,
+                                          policy.h264_min_qp,
+                                          policy.h264_max_qp,
                                           policy.h264_output_buffer_bytes)) {
             camera_pipeline_h264_close(&h264);
             TickType_t open_tick = xTaskGetTickCount();
@@ -1815,11 +2177,13 @@ static void camera_pipeline_task(void *arg)
                                                             target_height,
                                                             policy.rtc_video_fps,
                                                             policy.h264_bitrate_bps,
+                                                            policy.h264_min_qp,
+                                                            policy.h264_max_qp,
                                                             policy.h264_output_buffer_bytes,
                                                             "pipeline-runtime");
             if (ret != ESP_OK) {
                 encode_fail_count++;
-                if (!CAMERA_PIPELINE_H264_STRICT_TARGET &&
+                if (CAMERA_PIPELINE_H264_RESOURCE_FALLBACK_ENABLE &&
                     camera_pipeline_select_h264_internal_fit(target_width,
                                                              target_height,
                                                              &h264_fallback_width,
@@ -1873,6 +2237,14 @@ static void camera_pipeline_task(void *arg)
                                           &key_frame,
                                           &h264_timing);
         int64_t encode_us = esp_timer_get_time() - encode_start_us;
+        camera_pipeline_luma_probe_t encoder_luma_probe = {0};
+        if (camera_pipeline_probe_ouev_luma(h264_input_data,
+                                            h264_input_len,
+                                            target_width,
+                                            target_height,
+                                            &encoder_luma_probe)) {
+            camera_pipeline_luma_stats_update(&encoder_luma_stats, &encoder_luma_probe);
+        }
         if (!frame_released) {
             camera_driver_release(&frame);
             frame_released = true;
@@ -2013,6 +2385,7 @@ static void camera_pipeline_task(void *arg)
         bool trace_initial = trace_frame_count <= CAMERA_PIPELINE_FRAME_TRACE_INITIAL_COUNT;
         bool trace_large = (uint32_t)h264_len >= CAMERA_PIPELINE_FRAME_TRACE_LARGE_PAYLOAD_BYTES;
         bool trace_slow = capture_us > CAMERA_PIPELINE_FRAME_TRACE_SLOW_STAGE_US ||
+                          convert_us > CAMERA_PIPELINE_FRAME_TRACE_SLOW_STAGE_US ||
                           encode_us > CAMERA_PIPELINE_FRAME_TRACE_SLOW_STAGE_US ||
                           callback_us > CAMERA_PIPELINE_FRAME_TRACE_SLOW_STAGE_US ||
                           loop_us > CAMERA_PIPELINE_FRAME_TRACE_SLOW_LOOP_US;
@@ -2022,8 +2395,8 @@ static void camera_pipeline_task(void *arg)
                                     pdMS_TO_TICKS(CAMERA_PIPELINE_FRAME_TRACE_INTERVAL_MS);
         if (trace_initial || ((trace_large || trace_slow || ret != ESP_OK) && trace_period_due)) {
             s_last_frame_trace_log_tick = trace_tick;
-            ESP_LOGI(TAG,
-                     "camera frame trace: idx=%lu ret=%s key=%d payload=%u seq=%lu drain=%lu cap=%lldus enc=%lldus sync_in=%lldus hw=%lldus sync_out=%lldus cb=%lldus loop=%lldus target=%ux%u@%u bitrate_cfg=%u max_delta=%u",
+            APP_LOG_DETAIL(TAG,
+                           "camera frame trace: idx=%lu ret=%s key=%d payload=%u seq=%lu drain=%lu cap=%lldus scale=%lldus enc=%lldus sync_in=%lldus hw=%lldus sync_out=%lldus cb=%lldus loop=%lldus target=%ux%u@%u bitrate_cfg=%u max_delta=%u",
                      (unsigned long)trace_frame_count,
                      esp_err_to_name(ret),
                      key_frame ? 1 : 0,
@@ -2031,6 +2404,7 @@ static void camera_pipeline_task(void *arg)
                      (unsigned long)source_sequence,
                      (unsigned long)source_stale_frames_dropped,
                      (long long)capture_us,
+                     (long long)convert_us,
                      (long long)encode_us,
                      (long long)h264_timing.sync_in_us,
                      (long long)h264_timing.hw_us,
@@ -2100,7 +2474,9 @@ static void camera_pipeline_task(void *arg)
                 elapsed_ms = 1U;
             }
             uint32_t avg_payload = upstream_count > 0U ? total_payload_bytes / upstream_count : 0U;
+#if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
             uint32_t avg_capture_us = capture_sample_count > 0U ? (uint32_t)(capture_us_total / capture_sample_count) : 0U;
+            uint32_t avg_convert_us = convert_sample_count > 0U ? (uint32_t)(convert_us_total / convert_sample_count) : 0U;
             uint32_t avg_encode_us = encode_sample_count > 0U ? (uint32_t)(encode_us_total / encode_sample_count) : 0U;
             uint32_t avg_h264_sync_in_us = encode_sample_count > 0U ?
                                            (uint32_t)(h264_sync_in_us_total / encode_sample_count) :
@@ -2121,26 +2497,34 @@ static void camera_pipeline_task(void *arg)
                 camera_sequence_sample_count > 0U ?
                     (uint32_t)(camera_sequence_delta_total_x10 / camera_sequence_sample_count) :
                     0U;
+            uint32_t source_luma_delta_x10 =
+                camera_pipeline_luma_delta_x10(&source_luma_stats);
+            uint32_t encoder_luma_delta_x10 =
+                camera_pipeline_luma_delta_x10(&encoder_luma_stats);
             uint32_t avg_gap_us = encoded_frame_count > 1U ?
                                   (uint32_t)(frame_gap_us_total / (encoded_frame_count - 1U)) :
                                   0U;
             uint32_t min_payload = min_payload_bytes == UINT32_MAX ? 0U : min_payload_bytes;
+#endif
             uint32_t measured_fps_x10 = (uint32_t)(((uint64_t)upstream_count * 10000ULL) / elapsed_ms);
             uint32_t measured_bitrate_kbps = (uint32_t)(((uint64_t)total_payload_bytes * 8ULL) / elapsed_ms);
+#if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
             size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
             size_t internal_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
             size_t dma_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
             size_t dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
             size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
             size_t psram_largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
             camera_pipeline_note_interval_metrics(measured_fps_x10,
                                                   measured_bitrate_kbps,
                                                   avg_payload,
                                                   drop_count,
                                                   capture_fail_count,
                                                   encode_fail_count);
+#if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
             ESP_LOGI(TAG,
-                     "camera pipeline stats: target=%ux%u@%u cfg_bitrate=%ukbps encoded=%lu upstream=%lu fps=%lu.%lu bitrate=%lukbps drop=%lu bp_skip=%lu guard_drop=%lu keywait_drop=%lu cap_fail=%lu enc_fail=%lu key=%lu large=%lu slow_cap=%lu slow_enc=%lu slow_cb=%lu slow_loop=%lu payload[min/avg/max]=%lu/%lu/%lu avg_gap_us=%lu max_gap_us=%llu cam_drain=%lu seq_delta_avg=%lu.%lu seq_delta_max=%lu avg_cap_us=%lu avg_enc_us=%lu avg_h264[sync_in/hw/sync_out]=%lu/%lu/%lu avg_cb_us=%lu avg_loop_us=%lu avg_ts_lag_us=%lu max_ts_lag_us=%llu internal_free=%u internal_largest=%u dma_free=%u dma_largest=%u psram_free=%u psram_largest=%u h264_out_buf=%u",
+                     "camera pipeline stats: target=%ux%u@%u cfg_bitrate=%ukbps encoded=%lu upstream=%lu fps=%lu.%lu bitrate=%lukbps drop=%lu bp_skip=%lu guard_drop=%lu keywait_drop=%lu cap_fail=%lu scale_fail=%lu enc_fail=%lu key=%lu large=%lu slow_cap=%lu slow_scale=%lu slow_enc=%lu slow_cb=%lu slow_loop=%lu payload[min/avg/max]=%lu/%lu/%lu luma_src_delta=%lu.%lu luma_src_change=%lu/%lu luma_src_range=%u-%u luma_enc_delta=%lu.%lu luma_enc_change=%lu/%lu luma_enc_range=%u-%u avg_gap_us=%lu max_gap_us=%llu cam_drain=%lu seq_delta_avg=%lu.%lu seq_delta_max=%lu avg_cap_us=%lu avg_scale_us=%lu avg_enc_us=%lu avg_h264[sync_in/hw/sync_out]=%lu/%lu/%lu avg_cb_us=%lu avg_loop_us=%lu avg_ts_lag_us=%lu max_ts_lag_us=%llu internal_free=%u internal_largest=%u dma_free=%u dma_largest=%u psram_free=%u psram_largest=%u h264_out_buf=%u",
                      (unsigned)h264.width,
                      (unsigned)h264.height,
                      (unsigned)policy.rtc_video_fps,
@@ -2155,16 +2539,30 @@ static void camera_pipeline_task(void *arg)
                      (unsigned long)transport_guard_drop_count,
                      (unsigned long)key_wait_drop_count,
                      (unsigned long)capture_fail_count,
+                     (unsigned long)convert_fail_count,
                      (unsigned long)encode_fail_count,
                      (unsigned long)key_frame_count,
                      (unsigned long)large_frame_count,
                      (unsigned long)slow_capture_count,
+                     (unsigned long)slow_convert_count,
                      (unsigned long)slow_encode_count,
                      (unsigned long)slow_callback_count,
                      (unsigned long)slow_loop_count,
                      (unsigned long)min_payload,
                      (unsigned long)avg_payload,
                      (unsigned long)max_payload_bytes,
+                     (unsigned long)(source_luma_delta_x10 / 10U),
+                     (unsigned long)(source_luma_delta_x10 % 10U),
+                     (unsigned long)source_luma_stats.changed_count,
+                     (unsigned long)source_luma_stats.transition_count,
+                     (unsigned)source_luma_stats.window_min_luma,
+                     (unsigned)source_luma_stats.window_max_luma,
+                     (unsigned long)(encoder_luma_delta_x10 / 10U),
+                     (unsigned long)(encoder_luma_delta_x10 % 10U),
+                     (unsigned long)encoder_luma_stats.changed_count,
+                     (unsigned long)encoder_luma_stats.transition_count,
+                     (unsigned)encoder_luma_stats.window_min_luma,
+                     (unsigned)encoder_luma_stats.window_max_luma,
                      (unsigned long)avg_gap_us,
                      (unsigned long long)max_frame_gap_us,
                      (unsigned long)camera_stale_frame_drain_count,
@@ -2172,6 +2570,7 @@ static void camera_pipeline_task(void *arg)
                      (unsigned long)(avg_camera_sequence_delta_x10 % 10U),
                      (unsigned long)max_camera_sequence_delta,
                      (unsigned long)avg_capture_us,
+                     (unsigned long)avg_convert_us,
                      (unsigned long)avg_encode_us,
                      (unsigned long)avg_h264_sync_in_us,
                      (unsigned long)avg_h264_hw_us,
@@ -2187,10 +2586,12 @@ static void camera_pipeline_task(void *arg)
                      (unsigned)psram_free,
                      (unsigned)psram_largest,
                      (unsigned)h264.capture_buffer_size);
+#endif
             last_stats_tick = now_tick;
             upstream_count = 0;
             drop_count = 0;
             capture_fail_count = 0;
+            convert_fail_count = 0;
             encode_fail_count = 0;
             total_payload_bytes = 0;
             backpressure_skip_count = 0;
@@ -2199,6 +2600,7 @@ static void camera_pipeline_task(void *arg)
             encoded_frame_count = 0;
             key_frame_count = 0;
             slow_capture_count = 0;
+            slow_convert_count = 0;
             slow_encode_count = 0;
             slow_callback_count = 0;
             slow_loop_count = 0;
@@ -2209,6 +2611,7 @@ static void camera_pipeline_task(void *arg)
             max_frame_gap_us = 0;
             last_frame_start_us = 0;
             capture_us_total = 0;
+            convert_us_total = 0;
             encode_us_total = 0;
             h264_sync_in_us_total = 0;
             h264_hw_us_total = 0;
@@ -2222,16 +2625,20 @@ static void camera_pipeline_task(void *arg)
             camera_sequence_sample_count = 0;
             max_camera_sequence_delta = 0;
             capture_sample_count = 0;
+            convert_sample_count = 0;
             encode_sample_count = 0;
             callback_sample_count = 0;
             loop_sample_count = 0;
             media_timestamp_sample_count = 0;
+            camera_pipeline_luma_stats_reset_window(&source_luma_stats);
+            camera_pipeline_luma_stats_reset_window(&encoder_luma_stats);
         }
 
         /* The next loop iteration waits until the next RTC frame deadline. */
     }
 
 exit_task:
+    camera_pipeline_scaler_release(&yuv420_scaler, "pipeline-stop");
     if (!camera_pipeline_h264_store_reserved(&h264, "pipeline-stop")) {
         camera_pipeline_h264_close(&h264);
     }
@@ -2243,6 +2650,7 @@ exit_task:
 
     ESP_LOGI(TAG, "camera pipeline stopped");
     camera_pipeline_mark_task_stopped();
+    camera_pipeline_reconcile_h264_reservation("pipeline-stop");
     vTaskDeleteWithCaps(NULL);
 }
 
@@ -2268,17 +2676,7 @@ static esp_err_t camera_pipeline_ensure_task_started(void)
                                                           CAMERA_PIPELINE_TASK_PRIORITY,
                                                           NULL,
                                                           APP_TASK_CORE_CAMERA,
-                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (task_ret != pdPASS) {
-        task_ret = xTaskCreatePinnedToCoreWithCaps(camera_pipeline_task,
-                                                   "camera_pipe",
-                                                   CAMERA_PIPELINE_TASK_STACK,
-                                                   NULL,
-                                                   CAMERA_PIPELINE_TASK_PRIORITY,
-                                                   NULL,
-                                                   APP_TASK_CORE_CAMERA,
-                                                   MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    }
+                                                          APP_TASK_STACK_CAPS_BACKGROUND);
     if (task_ret != pdPASS) {
         taskENTER_CRITICAL(&s_lock);
         s_starting = false;
@@ -2327,10 +2725,12 @@ esp_err_t camera_pipeline_prewarm_h264(void)
                                      height,
                                      policy.rtc_video_fps,
                                      policy.h264_bitrate_bps,
+                                     policy.h264_min_qp,
+                                     policy.h264_max_qp,
                                      policy.h264_output_buffer_bytes)) {
         taskEXIT_CRITICAL(&s_lock);
-        ESP_LOGI(TAG,
-                 "H264 encoder prewarm already reserved: size=%ux%u fps=%u bitrate=%u out_buf=%u",
+        APP_LOG_DETAIL(TAG,
+                       "H264 encoder prewarm already reserved: size=%ux%u fps=%u bitrate=%u out_buf=%u",
                  width,
                  height,
                  policy.rtc_video_fps,
@@ -2345,8 +2745,8 @@ esp_err_t camera_pipeline_prewarm_h264(void)
     s_h264_reserve_in_progress = true;
     taskEXIT_CRITICAL(&s_lock);
 
-    ESP_LOGI(TAG,
-             "H264 encoder early prewarm begin: size=%ux%u fps=%u bitrate=%u out_buf=%u ref_internal_est=%u internal_free=%u internal_largest=%u dma_largest=%u psram_free=%u psram_largest=%u",
+    APP_LOG_DETAIL(TAG,
+                   "H264 encoder early prewarm begin: size=%ux%u fps=%u bitrate=%u out_buf=%u ref_internal_est=%u internal_free=%u internal_largest=%u dma_largest=%u psram_free=%u psram_largest=%u",
              width,
              height,
              policy.rtc_video_fps,
@@ -2362,7 +2762,7 @@ esp_err_t camera_pipeline_prewarm_h264(void)
     bool dma_escrow_lent = media_dma_reserve_is_reserved();
     if (dma_escrow_lent) {
         media_dma_reserve_release("h264-early-prewarm");
-        ESP_LOGI(TAG, "DMA escrow lent to H264 early prewarm");
+        APP_LOG_DETAIL(TAG, "DMA escrow lent to H264 early prewarm");
     }
 
     camera_pipeline_h264_encoder_t enc = {
@@ -2375,6 +2775,8 @@ esp_err_t camera_pipeline_prewarm_h264(void)
                                         height,
                                         policy.rtc_video_fps,
                                         policy.h264_bitrate_bps,
+                                        policy.h264_min_qp,
+                                        policy.h264_max_qp,
                                         policy.h264_output_buffer_bytes);
     }
     if (ret != ESP_OK && dma_escrow_lent) {
@@ -2403,8 +2805,8 @@ esp_err_t camera_pipeline_prewarm_h264(void)
     taskEXIT_CRITICAL(&s_lock);
 
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG,
-                 "H264 encoder early prewarm done: internal_free=%u internal_largest=%u dma_largest=%u psram_free=%u psram_largest=%u",
+        APP_LOG_DETAIL(TAG,
+                       "H264 encoder early prewarm done: internal_free=%u internal_largest=%u dma_largest=%u psram_free=%u psram_largest=%u",
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
@@ -2423,7 +2825,7 @@ esp_err_t camera_pipeline_prewarm_h264(void)
     return ret;
 }
 
-void camera_pipeline_on_rtc_video_config_changed(void)
+static void camera_pipeline_reconcile_h264_reservation(const char *reason)
 {
     camera_pipeline_h264_encoder_t stale = {
         .fd = -1,
@@ -2431,37 +2833,138 @@ void camera_pipeline_on_rtc_video_config_changed(void)
     media_governor_camera_policy_t policy = {0};
 
     media_governor_get_rtc_av_camera_policy(&policy);
+    if (policy.h264_output_buffer_bytes == 0U) {
+        policy.h264_output_buffer_bytes = CAMERA_PIPELINE_H264_FALLBACK_OUTPUT_BUFFER_BYTES;
+    }
     uint16_t width = camera_pipeline_even_dimension(policy.rtc_width);
     uint16_t height = camera_pipeline_even_dimension(policy.rtc_height);
+    bool ready = false;
+    bool idle = false;
 
     taskENTER_CRITICAL(&s_lock);
-    if (camera_pipeline_h264_is_open(&s_reserved_h264) &&
-        !camera_pipeline_h264_matches(&s_reserved_h264,
-                                      width,
-                                      height,
-                                      policy.rtc_video_fps,
-                                      policy.h264_bitrate_bps,
-                                      policy.h264_output_buffer_bytes)) {
+    ready = camera_pipeline_h264_matches(&s_reserved_h264,
+                                         width,
+                                         height,
+                                         policy.rtc_video_fps,
+                                         policy.h264_bitrate_bps,
+                                         policy.h264_min_qp,
+                                         policy.h264_max_qp,
+                                         policy.h264_output_buffer_bytes);
+    if (!ready && camera_pipeline_h264_is_open(&s_reserved_h264)) {
         stale = s_reserved_h264;
         s_reserved_h264 = (camera_pipeline_h264_encoder_t) {
             .fd = -1,
         };
     }
+    idle = !s_rtc_enabled && s_task == NULL && !s_starting && !s_h264_reserve_in_progress;
     taskEXIT_CRITICAL(&s_lock);
 
     if (camera_pipeline_h264_is_open(&stale)) {
-        ESP_LOGI(TAG,
-                 "H264 reserved resource released after video config change: old=%ux%u@%u %ukbps new=%ux%u@%u %ukbps",
-                 (unsigned)stale.width,
-                 (unsigned)stale.height,
-                 (unsigned)stale.fps,
-                 (unsigned)(stale.bitrate_bps / 1000U),
-                 (unsigned)width,
-                 (unsigned)height,
-                 (unsigned)policy.rtc_video_fps,
-                 (unsigned)(policy.h264_bitrate_bps / 1000U));
+        APP_LOG_DETAIL(TAG,
+                       "H264 reserved resource replaced: reason=%s old=%ux%u@%u %ukbps new=%ux%u@%u %ukbps",
+                       reason != NULL ? reason : "unknown",
+                       (unsigned)stale.width,
+                       (unsigned)stale.height,
+                       (unsigned)stale.fps,
+                       (unsigned)(stale.bitrate_bps / 1000U),
+                       (unsigned)width,
+                       (unsigned)height,
+                       (unsigned)policy.rtc_video_fps,
+                       (unsigned)(policy.h264_bitrate_bps / 1000U));
         camera_pipeline_h264_close(&stale);
     }
+    if (ready || !idle) {
+        return;
+    }
+
+    esp_err_t ret = camera_pipeline_prewarm_h264();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "H264 encoder reservation refreshed: reason=%s size=%ux%u@%u",
+                 reason != NULL ? reason : "unknown",
+                 (unsigned)width,
+                 (unsigned)height,
+                 (unsigned)policy.rtc_video_fps);
+    } else if (ret == ESP_ERR_INVALID_STATE) {
+        APP_LOG_DETAIL(TAG,
+                       "H264 encoder reservation refresh deferred: reason=%s",
+                       reason != NULL ? reason : "unknown");
+    }
+}
+
+esp_err_t camera_pipeline_prewarm_call_scaler(void)
+{
+    ESP_RETURN_ON_ERROR(camera_pipeline_init(), TAG, "camera pipeline init failed");
+    ESP_RETURN_ON_FALSE(camera_driver_is_configured(),
+                        ESP_ERR_NOT_SUPPORTED,
+                        TAG,
+                        "camera not configured");
+
+    video_yuv420_scaler_config_t config = {0};
+    ESP_RETURN_ON_FALSE(camera_pipeline_build_call_scaler_config(&config),
+                        ESP_ERR_NOT_SUPPORTED,
+                        TAG,
+                        "device-call profile does not require a YUV420 scaler");
+
+    video_yuv420_scaler_handle_t stale = NULL;
+    taskENTER_CRITICAL(&s_lock);
+    if (video_yuv420_scaler_matches(s_reserved_call_scaler, &config)) {
+        taskEXIT_CRITICAL(&s_lock);
+        APP_LOG_DETAIL(TAG,
+                       "call YUV420 scaler prewarm already reserved: input=%ux%u output=%ux%u",
+                 config.input_width,
+                 config.input_height,
+                 config.output_width,
+                 config.output_height);
+        return ESP_OK;
+    }
+    if (s_rtc_enabled || s_task != NULL || s_starting || s_scaler_reserve_in_progress) {
+        taskEXIT_CRITICAL(&s_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    stale = s_reserved_call_scaler;
+    s_reserved_call_scaler = NULL;
+    s_scaler_reserve_in_progress = true;
+    taskEXIT_CRITICAL(&s_lock);
+
+    video_yuv420_scaler_destroy(stale);
+    video_yuv420_scaler_handle_t scaler = NULL;
+    esp_err_t ret = video_yuv420_scaler_create(&config, &scaler);
+    if (ret == ESP_OK) {
+        ret = video_yuv420_scaler_warmup(scaler);
+    }
+    if (ret == ESP_OK && !camera_pipeline_scaler_store_reserved(&scaler, "early-prewarm")) {
+        ret = ESP_ERR_INVALID_STATE;
+    }
+    video_yuv420_scaler_destroy(scaler);
+
+    taskENTER_CRITICAL(&s_lock);
+    s_scaler_reserve_in_progress = false;
+    taskEXIT_CRITICAL(&s_lock);
+
+    if (ret == ESP_OK) {
+        APP_LOG_DETAIL(TAG,
+                       "call YUV420 scaler early prewarm done: input=%ux%u output=%ux%u psram_free=%u",
+                 config.input_width,
+                 config.input_height,
+                 config.output_width,
+                 config.output_height,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    } else {
+        ESP_LOGW(TAG,
+                 "call YUV420 scaler early prewarm failed: input=%ux%u output=%ux%u ret=%s",
+                 config.input_width,
+                 config.input_height,
+                 config.output_width,
+                 config.output_height,
+                 esp_err_to_name(ret));
+    }
+    return ret;
+}
+
+void camera_pipeline_on_rtc_video_config_changed(void)
+{
+    camera_pipeline_reconcile_h264_reservation("video-config-change");
 }
 
 void camera_pipeline_request_key_frame(void)
@@ -2498,8 +3001,8 @@ void camera_pipeline_request_key_frame(void)
     taskEXIT_CRITICAL(&s_lock);
 
     if (!accept && log_drop) {
-        ESP_LOGI(TAG,
-                 "H264 key-frame request coalesced: reason=%s age_ms=%" PRIu64 " min_ms=%u",
+        APP_LOG_DETAIL(TAG,
+                       "H264 key-frame request coalesced: reason=%s age_ms=%" PRIu64 " min_ms=%u",
                  drop_reason,
                  drop_age_us / 1000ULL,
                  (unsigned)CONFIG_APP_RTC_H264_KEY_FRAME_REQUEST_MIN_INTERVAL_MS);

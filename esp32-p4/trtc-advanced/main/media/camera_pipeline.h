@@ -33,6 +33,7 @@ typedef struct {
 
 esp_err_t camera_pipeline_init(void);
 esp_err_t camera_pipeline_prewarm_h264(void);
+esp_err_t camera_pipeline_prewarm_call_scaler(void);
 void camera_pipeline_on_rtc_video_config_changed(void);
 void camera_pipeline_request_key_frame(void);
 esp_err_t camera_pipeline_set_rtc_video_sink(camera_pipeline_video_cb_t cb, void *ctx);
