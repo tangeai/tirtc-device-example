@@ -47,7 +47,7 @@ static const char *TAG = "ai_chat";
 #define AI_CHAT_START_TASK_PRIORITY   5
 #define AI_CHAT_SESSION_TASK_STACK    (12 * 1024)
 #define AI_CHAT_SESSION_TASK_PRIORITY 5
-#define AI_CHAT_START_SESSION_SETTLE_MS 20U
+#define AI_CHAT_START_SESSION_SETTLE_MS 300U
 #define AI_CHAT_HEARTBEAT_TASK_STACK  (8 * 1024)
 #define AI_CHAT_HEARTBEAT_TASK_PRIORITY 5
 #define AI_CHAT_RTC_READY_WAIT_MS     30000U
@@ -1401,7 +1401,6 @@ static void ai_chat_media_stop(tirtc_conn_t conn)
 {
     const int64_t stop_begin_us = esp_timer_get_time();
     bool should_stop = false;
-    bool release_audio = false;
 
     taskENTER_CRITICAL(&s_media_lock);
     should_stop = conn == NULL || conn == s_media.conn;
@@ -1410,7 +1409,6 @@ static void ai_chat_media_stop(tirtc_conn_t conn)
         s_media.running = false;
         s_media.uplink_enabled = false;
         s_media.tx_started_logged = false;
-        release_audio = s_media.audio_prepared;
         s_media.audio_prepared = false;
     }
     taskEXIT_CRITICAL(&s_media_lock);
@@ -1420,13 +1418,11 @@ static void ai_chat_media_stop(tirtc_conn_t conn)
         if (s_media.queue != NULL) {
             xQueueReset(s_media.queue);
         }
-        if (release_audio) {
-            audio_device_release();
-        }
+        (void)microphone_set_enabled(false);
+        speaker_stop_playback();
         ESP_LOGI(TAG,
-                 "AI Chat media stopped: elapsed_ms=%u release_audio=%u conn=%p queue=%p",
+                 "AI Chat media stopped: elapsed_ms=%u conn=%p queue=%p",
                  (unsigned)ai_chat_elapsed_ms_since(stop_begin_us),
-                 release_audio ? 1U : 0U,
                  conn,
                  s_media.queue);
         ai_chat_log_heap("media stopped");
@@ -1440,8 +1436,8 @@ static esp_err_t ai_chat_detach_rtc_and_stop_media(tirtc_conn_t conn, const char
     /*
      * Detach the RTC connection before releasing the shared audio path. TiRTC
      * can still deliver a few remote-audio callbacks after end_session; if the
-     * connection is left active during audio_device_release(), those late frames
-     * can re-open the speaker path and keep extra internal RAM pinned.
+     * connection is left active while the application releases shared audio,
+     * those late frames can re-open the speaker path and keep RAM pinned.
      */
     if (conn != NULL) {
         tirtc_session_suppress_remote_media(conn, true);
@@ -1941,7 +1937,7 @@ static void ai_chat_on_whip_connect(int error, tirtc_conn_t conn, void *user_dat
             ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "connect failed");
         }
         xSemaphoreGive(s_lock);
-        ESP_LOGW(TAG, "AI Chat WHIP connect failed: %s (%d)", TiRtcGetErrorStr(error), error);
+        ESP_LOGW(TAG, "AI Chat WHIP connect failed: %s (%d)", tirtc_session_error_string(error), error);
         return;
     }
 
@@ -2068,7 +2064,7 @@ static void ai_chat_start_task(void *ctx)
             ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "connect submit failed");
         }
         xSemaphoreGive(s_lock);
-        ESP_LOGW(TAG, "AI Chat WHIP submit failed: %s (%d)", TiRtcGetErrorStr(rc), rc);
+        ESP_LOGW(TAG, "AI Chat WHIP submit failed: %s (%d)", tirtc_session_error_string(rc), rc);
         if (rc == TIRTC_E_SERVER_ERROR) {
             ESP_LOGW(TAG,
                      "AI Chat server rejected WHIP: role_id_len=%u",
@@ -2707,6 +2703,24 @@ bool ai_chat_owns_control_button(void)
            state == AI_CHAT_STATE_CONNECTED ||
            state == AI_CHAT_STATE_STARTING_SESSION ||
            state == AI_CHAT_STATE_IN_SESSION;
+}
+
+void ai_chat_get_status(ai_chat_status_t *status)
+{
+    if (status == NULL) {
+        return;
+    }
+
+    status->state = AI_CHAT_STATE_IDLE;
+    status->last_error = 0;
+    if (s_lock == NULL) {
+        return;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    status->state = s_ai.state;
+    status->last_error = s_ai.last_error;
+    xSemaphoreGive(s_lock);
 }
 
 void ai_chat_get_snapshot(ai_chat_snapshot_t *snapshot)

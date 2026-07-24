@@ -9,11 +9,13 @@
 #include "freertos/task.h"
 
 #include "app_internal.h"
+#include "device_call.h"
 #include "network.h"
 #include "qr_scanner.h"
 #include "rtc_transport.h"
 
 static const char *TAG = "app_call";
+static const char *CALL_FLOW_TAG = "CALL_FLOW";
 
 #define APP_CALL_SCAN_RESTORE_TASK_STACK_SIZE 4096
 #define APP_CALL_SCAN_RESTORE_TASK_PRIORITY   3
@@ -96,7 +98,6 @@ static void app_contact_scan_result_cb(esp_err_t result,
 				       void *ctx)
 {
 	const char *device_id = "";
-	const char *pair_key = "";
 	const char *raw_payload = "";
 	app_contact_scan_result_cb_t result_cb = s_contact_scan.result_cb;
 	void *result_ctx = s_contact_scan.ctx;
@@ -107,48 +108,96 @@ static void app_contact_scan_result_cb(esp_err_t result,
 		raw_payload = contact->raw_payload;
 	}
 	if (result == ESP_OK) {
-		if (contact == NULL || contact->device_id[0] == '\0' || contact->pair_key[0] == '\0') {
+		if (contact == NULL ||
+		    strlen(contact->device_id) != APP_CALL_CONTACT_DEVICE_ID_LENGTH) {
 			result = ESP_ERR_INVALID_RESPONSE;
 		} else {
 			device_id = contact->device_id;
-			pair_key = contact->pair_key;
 			ESP_LOGD(TAG, "contact QR accepted: device_id_len=%u", (unsigned)strlen(device_id));
 		}
 	}
 
 	if (result_cb != NULL) {
-		result_cb(result, device_id, pair_key, raw_payload, result_ctx);
+		result_cb(result, device_id, raw_payload, result_ctx);
 	}
 	app_defer_contact_scan_resources(true);
 	s_contact_scan = (app_contact_scan_state_t){0};
 }
 
-esp_err_t app_call_contact(const char *device_id, const char *pair_key)
+esp_err_t app_call_contact(const char *device_id)
 {
-	if (device_id == NULL || device_id[0] == '\0' || pair_key == NULL || pair_key[0] == '\0') {
-		return ESP_ERR_INVALID_ARG;
-	}
-	if (app_get_active_app() != APP_ID_CALL) {
-		return ESP_ERR_INVALID_STATE;
-	}
-	if (!network_is_connected()) {
-		return ESP_ERR_INVALID_STATE;
-	}
+    if (device_id == NULL ||
+        strlen(device_id) != APP_CALL_CONTACT_DEVICE_ID_LENGTH) {
+        ESP_LOGW(CALL_FLOW_TAG, "stage=app_call_rejected reason=invalid_peer");
+        return ESP_ERR_INVALID_ARG;
+    }
+    ESP_LOGI(CALL_FLOW_TAG,
+             "stage=app_call_begin peer=%s active_app=%d network=%d",
+             device_id,
+             (int)app_get_active_app(),
+             network_is_connected() ? 1 : 0);
+    if (app_get_active_app() != APP_ID_CALL) {
+        ESP_LOGW(CALL_FLOW_TAG,
+                 "stage=app_call_rejected peer=%s reason=wrong_app",
+                 device_id);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!network_is_connected()) {
+        ESP_LOGW(CALL_FLOW_TAG,
+                 "stage=app_call_rejected peer=%s reason=wifi_offline",
+                 device_id);
+        return ESP_ERR_INVALID_STATE;
+    }
 
-	ESP_RETURN_ON_ERROR(app_acquire_call_session_resources(), TAG, "acquire call session resources failed");
-	return rtc_transport_connect_peer(device_id, pair_key);
+    esp_err_t resource_ret = app_acquire_call_session_resources();
+    if (resource_ret != ESP_OK) {
+        ESP_LOGW(CALL_FLOW_TAG,
+                 "stage=app_call_rejected peer=%s reason=resource_acquire ret=%s",
+                 device_id,
+                 esp_err_to_name(resource_ret));
+        ESP_LOGE(TAG, "acquire call session resources failed: %s", esp_err_to_name(resource_ret));
+        return resource_ret;
+    }
+    ESP_LOGI(CALL_FLOW_TAG,
+             "stage=app_call_resources_ready peer=%s",
+             device_id);
+    esp_err_t ret = device_call_request(device_id);
+    if (ret != ESP_OK) {
+        app_release_call_session_resources();
+    }
+    ESP_LOGI(CALL_FLOW_TAG,
+             "stage=app_call_submitted peer=%s ret=%s",
+             device_id,
+             esp_err_to_name(ret));
+    return ret;
 }
 
 esp_err_t app_scan_contact(void)
 {
 	qr_scanner_contact_t contact = {0};
+	esp_err_t scan_ret = ESP_OK;
+	esp_err_t resume_ret = ESP_OK;
 
 	if (app_get_active_app() != APP_ID_CALL) {
 		return ESP_ERR_INVALID_STATE;
 	}
 
-	ESP_RETURN_ON_ERROR(qr_scanner_scan_contact(&contact), TAG, "scan contact failed");
-	if (contact.device_id[0] == '\0' || contact.pair_key[0] == '\0') {
+	ESP_RETURN_ON_ERROR(app_suspend_call_scan_resources(), TAG, "acquire contact scan camera failed");
+	scan_ret = qr_scanner_scan_contact(&contact);
+	resume_ret = app_resume_call_scan_resources();
+	if (resume_ret != ESP_OK) {
+		ESP_LOGW(TAG,
+			 "restore call resources after scan failed: %s",
+			 esp_err_to_name(resume_ret));
+	}
+	if (scan_ret != ESP_OK) {
+		ESP_LOGW(TAG, "scan contact failed: %s", esp_err_to_name(scan_ret));
+		return scan_ret;
+	}
+	if (resume_ret != ESP_OK) {
+		return resume_ret;
+	}
+	if (strlen(contact.device_id) != APP_CALL_CONTACT_DEVICE_ID_LENGTH) {
 		return ESP_ERR_INVALID_RESPONSE;
 	}
 
@@ -216,16 +265,28 @@ void app_cancel_contact_scan_for_lifecycle(void)
 
 esp_err_t app_hangup_call(void)
 {
+	esp_err_t service_ret = ESP_OK;
 	esp_err_t hangup_ret = ESP_OK;
 	esp_err_t disconnect_ret = ESP_OK;
 
-	if (app_get_active_app() != APP_ID_CALL) {
-		return ESP_ERR_INVALID_STATE;
-	}
+    if (app_get_active_app() != APP_ID_CALL) {
+        ESP_LOGW(CALL_FLOW_TAG,
+                 "stage=app_hangup_rejected reason=wrong_app active_app=%d",
+                 (int)app_get_active_app());
+        return ESP_ERR_INVALID_STATE;
+    }
 
-	hangup_ret = rtc_transport_hangup();
-	if (hangup_ret != ESP_OK) {
-		ESP_LOGW(TAG, "call hangup command failed: %s", esp_err_to_name(hangup_ret));
+    ESP_LOGI(CALL_FLOW_TAG, "stage=app_hangup_begin");
+
+	service_ret = device_call_hangup();
+	if (service_ret != ESP_OK && service_ret != ESP_ERR_INVALID_STATE) {
+		ESP_LOGW(TAG, "device call hangup service failed: %s", esp_err_to_name(service_ret));
+	}
+	if (service_ret != ESP_OK) {
+		hangup_ret = rtc_transport_hangup();
+		if (hangup_ret != ESP_OK) {
+			ESP_LOGW(TAG, "call hangup command failed: %s", esp_err_to_name(hangup_ret));
+		}
 	}
 	rtc_transport_flush_remote_media();
 
@@ -238,29 +299,83 @@ esp_err_t app_hangup_call(void)
 	rtc_transport_flush_remote_media();
 
 	(void)app_state_sync_call_media_defaults(false, NULL);
-	app_release_call_session_resources();
-	return (hangup_ret == ESP_OK || disconnect_ret == ESP_OK) ? ESP_OK : hangup_ret;
+    app_release_call_session_resources();
+    if (service_ret == ESP_OK || hangup_ret == ESP_OK || disconnect_ret == ESP_OK) {
+        ESP_LOGI(CALL_FLOW_TAG,
+                 "stage=app_hangup_done service=%s command=%s disconnect=%s ret=ESP_OK",
+                 esp_err_to_name(service_ret),
+                 esp_err_to_name(hangup_ret),
+                 esp_err_to_name(disconnect_ret));
+        return ESP_OK;
+    }
+    ESP_LOGW(CALL_FLOW_TAG,
+             "stage=app_hangup_done service=%s command=%s disconnect=%s ret=failed",
+             esp_err_to_name(service_ret),
+             esp_err_to_name(hangup_ret),
+             esp_err_to_name(disconnect_ret));
+    return service_ret != ESP_ERR_INVALID_STATE ? service_ret : hangup_ret;
 }
 
 esp_err_t app_accept_call(void)
 {
-	esp_err_t ret = ESP_OK;
+    esp_err_t ret = ESP_OK;
+    bool service_pending = device_call_has_pending_incoming();
 
-	if (app_get_active_app() != APP_ID_CALL) {
-		return ESP_ERR_INVALID_STATE;
-	}
+    if (app_get_active_app() != APP_ID_CALL) {
+        ESP_LOGW(CALL_FLOW_TAG,
+                 "stage=app_accept_rejected reason=wrong_app active_app=%d",
+                 (int)app_get_active_app());
+        return ESP_ERR_INVALID_STATE;
+    }
 
-	ESP_RETURN_ON_ERROR(app_acquire_call_session_resources(), TAG, "acquire call session resources failed");
-	ret = rtc_transport_accept_incoming_call();
-	if (ret != ESP_OK) {
-		return ret;
+    ESP_LOGI(CALL_FLOW_TAG,
+             "stage=app_accept_begin source=%s",
+             service_pending ? "thing_connect" : "tirtc_command");
+
+    ret = app_acquire_call_session_resources();
+    if (ret != ESP_OK) {
+        ESP_LOGW(CALL_FLOW_TAG,
+                 "stage=app_accept_done source=%s ret=%s reason=resource_acquire",
+                 service_pending ? "thing_connect" : "tirtc_command",
+                 esp_err_to_name(ret));
+        ESP_LOGE(TAG, "acquire call session resources failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    if (service_pending) {
+        ret = device_call_accept_pending();
+	} else {
+		ret = rtc_transport_accept_incoming_call();
 	}
+    if (ret != ESP_OK) {
+        app_release_call_session_resources();
+        ESP_LOGW(CALL_FLOW_TAG,
+                 "stage=app_accept_done source=%s ret=%s",
+                 service_pending ? "thing_connect" : "tirtc_command",
+                 esp_err_to_name(ret));
+        return ret;
+    }
 
 	(void)app_state_sync_call_media_defaults(true, NULL);
-	return app_apply_media_policy();
+    ret = app_apply_media_policy();
+    ESP_LOGI(CALL_FLOW_TAG,
+             "stage=app_accept_done source=%s ret=%s",
+             service_pending ? "thing_connect" : "tirtc_command",
+             esp_err_to_name(ret));
+    return ret;
 }
 
 esp_err_t app_reject_call(void)
 {
-	return rtc_transport_reject_incoming_call();
+    bool service_pending = device_call_has_pending_incoming();
+    ESP_LOGI(CALL_FLOW_TAG,
+             "stage=app_reject_begin source=%s",
+             service_pending ? "thing_connect" : "tirtc_command");
+    esp_err_t ret = service_pending ?
+                    device_call_reject_pending() :
+                    rtc_transport_reject_incoming_call();
+    ESP_LOGI(CALL_FLOW_TAG,
+             "stage=app_reject_done source=%s ret=%s",
+             service_pending ? "thing_connect" : "tirtc_command",
+             esp_err_to_name(ret));
+    return ret;
 }

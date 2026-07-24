@@ -75,6 +75,13 @@ typedef struct {
     int last_error;
 } ai_chat_snapshot_t;
 
+/* Lightweight control-path status. The full snapshot includes message history
+ * and must not be allocated on small RTOS task stacks. */
+typedef struct {
+    ai_chat_state_t state;
+    int last_error;
+} ai_chat_status_t;
+
 esp_err_t ai_chat_init(const ai_chat_config_t *config);
 esp_err_t ai_chat_configure(const ai_chat_config_t *config);
 esp_err_t ai_chat_open(void);
@@ -82,5 +89,6 @@ esp_err_t ai_chat_close(void);
 esp_err_t ai_chat_clear_messages(void);
 esp_err_t ai_chat_handle_control_button(bool pressed);
 bool ai_chat_owns_control_button(void);
+void ai_chat_get_status(ai_chat_status_t *status);
 void ai_chat_get_snapshot(ai_chat_snapshot_t *snapshot);
 const char *ai_chat_state_name(ai_chat_state_t state);

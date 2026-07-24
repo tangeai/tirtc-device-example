@@ -1,0 +1,21 @@
+# ESP-IDF and local build outputs
+**/build/
+**/build-*/
+**/managed_components/
+**/sdkconfig
+**/sdkconfig.old
+
+# Firmware release outputs belong to GitHub Releases
+**/release_assets/
+**/artifacts/
+**/releases/
+*.bin
+*.zip
+
+# Local/editor files
+.vscode/
+*.log
+*.tmp
+*.bak
+__pycache__/
+*.pyc

@@ -20,8 +20,8 @@
 #define TIRTC_SESSION_MESSAGE_STREAM_ID    11
 #define TIRTC_SESSION_LOCAL_VIDEO_STREAM_ID 11
 #define TIRTC_SESSION_REMOTE_JPEG_STREAM_ID 11
-#define TIRTC_SESSION_LOCAL_AUDIO_STREAM_ID 10
-#define TIRTC_SESSION_REMOTE_AUDIO_STREAM_ID 10
+#define TIRTC_SESSION_LOCAL_AUDIO_STREAM_ID TIRTC_SESSION_DEVICE_AUDIO_STREAM_ID
+#define TIRTC_SESSION_REMOTE_AUDIO_STREAM_ID TIRTC_SESSION_H5_TALKBACK_STREAM_ID
 #define TIRTC_SESSION_CMD_RESP_BIT          0x8000U
 
 #define TIRTC_SESSION_CMD_CALL           0x1101
@@ -36,6 +36,8 @@
 #define TIRTC_SESSION_CMD_STATE_LEGACY   0x1113
 #define TIRTC_SESSION_CMD_TIME_QUERY     0x1F11
 #define TIRTC_SESSION_CMD_CLOCK_SYNC     0x4001
+#define TIRTC_SESSION_CMD_DEVICE_CALL_CONNECTED 0x2000
+#define TIRTC_SESSION_CMD_DEVICE_CALL_HANGUP    0x2001
 
 typedef struct {
     uint8_t accepted;
@@ -144,6 +146,7 @@ void tirtc_session_apply_local_media_policy(void);
 void tirtc_session_mark_access_hijacking_detected(void);
 bool tirtc_session_try_accept_connection(tirtc_conn_t conn);
 bool tirtc_session_connection_auto_media_enabled(tirtc_conn_t conn);
+bool tirtc_session_connection_media_deferred(tirtc_conn_t conn);
 void tirtc_session_start_time_stream_messages(void);
 void tirtc_session_stop_time_stream_messages(void);
 void tirtc_session_update_local_video_subscription(tirtc_conn_t conn, uint8_t stream_id, bool subscribed);
@@ -154,6 +157,7 @@ void tirtc_session_request_remote_media(void);
 void tirtc_session_get_pending_call(tirtc_conn_t *conn, uint32_t *pending_cmdw);
 void tirtc_session_mark_incoming_call(uint32_t pending_cmdw);
 void tirtc_session_complete_call_response(bool accepted);
+void tirtc_session_complete_call_response_without_media(bool accepted);
 void tirtc_session_set_local_rgb(uint8_t red, uint8_t green, uint8_t blue);
 void tirtc_session_set_peer_rgb(uint8_t red, uint8_t green, uint8_t blue);
 void tirtc_session_set_peer_video_requested(bool enabled);

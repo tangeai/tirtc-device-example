@@ -33,12 +33,15 @@
 
 | 资产 | 大小 | SHA-256 |
 | --- | ---: | --- |
-| `release_assets/web-flash/v1.1.0/tirtc_esp32p4_wifi_link_demo.bin` | 6644064 bytes | `1CC65283663B16857343B2CD45F9EAA6C84726193542063EAAAF78C9F7822F85` |
-| `release_assets/web-flash/tirtc-esp32p4-device-monitor-webflash-v1.1.0.zip` | 4234967 bytes | `FB5C88E4ACCE28053C719D7B915332B0074B4853F50711588E3F59C95AFD5892` |
-| `release_assets/web-install/v1.1.0/tirtc-esp32p4-device-monitor-full-v1.1.0.bin` | 16777216 bytes | `9D0354B9E5E859DD67D23BD44D294AB8D8C7A409F8ED88E9ECDCF6BBB58B62EE` |
-| `release_assets/web-install/tirtc-esp32p4-device-monitor-webinstall-v1.1.0.zip` | 4244092 bytes | `3B6F76CCE1B419969B49A51CCE34726AC0580355B52B5CE3B19B57409541BF07` |
+| `tirtc-esp32p4-device-monitor-ota-v1.1.0.bin` | 6644064 bytes | `1CC65283663B16857343B2CD45F9EAA6C84726193542063EAAAF78C9F7822F85` |
+| `tirtc-esp32p4-device-monitor-webflash-v1.1.0.zip` | 4234967 bytes | `FB5C88E4ACCE28053C719D7B915332B0074B4853F50711588E3F59C95AFD5892` |
+| `tirtc-esp32p4-device-monitor-full-v1.1.0.bin` | 16777216 bytes | `9D0354B9E5E859DD67D23BD44D294AB8D8C7A409F8ED88E9ECDCF6BBB58B62EE` |
+| `tirtc-esp32p4-device-monitor-webinstall-v1.1.0.zip` | 4244092 bytes | `3B6F76CCE1B419969B49A51CCE34726AC0580355B52B5CE3B19B57409541BF07` |
 
-多地址烧录 offset 来自本次构建的 `build/flasher_args.json`。完整镜像固定为 16 MiB，从 `0x0` 烧录。
+以上文件发布在
+[ESP32-P4 v1.1.0 Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-trtc-advanced-v1.1.0)，
+不保存在 Git 源码历史中。多地址烧录 offset 来自本次构建的
+`build/flasher_args.json`。完整镜像固定为 16 MiB，从 `0x0` 烧录。
 
 ## 构建与验证
 

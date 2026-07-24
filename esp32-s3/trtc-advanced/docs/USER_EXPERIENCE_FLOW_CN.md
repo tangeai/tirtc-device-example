@@ -67,11 +67,14 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     participant Device as 设备
+    participant Discovery as 服务发现
     participant Bind as thing-connect 绑定服务
     participant User as 用户页面/小程序
     participant MQTT as MQTT Broker
 
-    Device->>Bind: 上报 mac/chip_uid
+    Device->>Discovery: 获取业务、MQTT 和 TiRTC 入口
+    Discovery-->>Device: 返回当前服务地址
+    Device->>Bind: 上报 mac
     Bind-->>Device: 返回 6 位验证码 + 临时 MQTT 身份
     Device->>MQTT: 使用 tmp_client 连接并等待授权
     User->>Bind: 输入 6 位验证码并确认绑定
@@ -104,7 +107,7 @@ sequenceDiagram
 
 ### Web 侧
 
-1. 浏览器打开 Web 端体验入口：[https://demo-tirtc.tange365.com/](https://demo-tirtc.tange365.com/)
+1. 浏览器打开 ThingConnect H5：[https://mqtt-demo.tange-ai.com/](https://mqtt-demo.tange-ai.com/)
 2. 进入 IPC 或设备监控入口。
 3. 选择目标设备，或者按页面提示扫码/输入设备 ID。
 4. 点击连接。
@@ -141,6 +144,8 @@ sequenceDiagram
 8. 任意一方挂断后回到微信页。
 
 微信链路的核心点是：用户看起来是在微信里接听或挂断，但设备侧收到 `call_incoming` 后要尽快建连 WHIP；后续接听、取消和挂断由微信侧事件、MQTT 通知和 TiRTC 命令共同驱动。
+
+微信授权的创建和删除属于小程序用户侧：`report-auth/delete-auth` 必须携带用户 JWT。设备只维护授权列表镜像，使用设备 MQTT token 拉取 `device/contacts`、处理 `channel=wx` 的 `callers_update`，以及调用 `device/call`。设备页扫码或输入 OpenID 不会创建授权，只能核对该联系人是否已经由小程序授权。
 
 ## 9. AI 对讲
 

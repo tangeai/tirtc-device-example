@@ -13,7 +13,10 @@
 #define TIRTC_SESSION_SECRET_KEY_MAX_LEN      128
 #define TIRTC_SESSION_DEVICE_ID_MAX_LEN       128
 #define TIRTC_SESSION_CLIENT_ID_MAX_LEN       64
+#define TIRTC_SESSION_CONNECT_TOKEN_MAX_LEN   1536
 #define TIRTC_SESSION_SERVICE_CODE_CLIENT_ID_CONFLICT 40305
+#define TIRTC_SESSION_DEVICE_AUDIO_STREAM_ID  10U
+#define TIRTC_SESSION_H5_TALKBACK_STREAM_ID   14U
 #define TIRTC_TOKEN_ACCESS_ID_MAX_LEN 128
 #define TIRTC_TOKEN_SUBJECT_MAX_LEN   64
 
@@ -158,7 +161,9 @@ typedef struct {
 } tirtc_session_peer_state_t;
 
 esp_err_t tirtc_session_init(const tirtc_session_config_t *config);
+const char *tirtc_session_error_string(int error);
 esp_err_t tirtc_session_configure(const tirtc_session_config_t *config);
+void tirtc_session_set_identity_ready(bool ready);
 esp_err_t tirtc_session_prepare_sdk(void);
 esp_err_t tirtc_session_set_media_bridge(const tirtc_session_media_ops_t *ops, void *ctx);
 void tirtc_session_set_hooks(const tirtc_session_hooks_t *hooks, void *ctx);
@@ -180,6 +185,8 @@ int tirtc_session_service_request(const char *path,
                                   void *user_data);
 esp_err_t tirtc_session_connect_peer(const char *remote_device_id,
                                      const char *remote_device_secret_key);
+esp_err_t tirtc_session_connect_peer_with_token(const char *remote_device_id,
+                                                const char *connect_token);
 esp_err_t tirtc_session_restart(void);
 esp_err_t tirtc_session_stop(void);
 esp_err_t tirtc_session_disconnect(void);
@@ -190,12 +197,17 @@ esp_err_t tirtc_session_hangup(void);
 void tirtc_session_on_network_state_changed(const tirtc_session_network_state_t *state);
 esp_err_t tirtc_session_set_local_video_send_enabled(bool enabled);
 esp_err_t tirtc_session_set_local_audio_send_enabled(bool enabled);
+esp_err_t tirtc_session_set_remote_audio_stream_id(uint8_t stream_id);
 void tirtc_session_set_next_connection_auto_media(bool enabled);
+void tirtc_session_set_next_connection_defer_media(bool enabled);
 esp_err_t tirtc_session_track_external_connection(tirtc_conn_t conn, bool auto_media);
 esp_err_t tirtc_session_send_command_raw(tirtc_conn_t conn,
                                          uint32_t cmdw,
                                          const void *data,
                                          size_t data_len);
+esp_err_t tirtc_session_send_active_command(uint32_t cmdw,
+                                            const void *data,
+                                            size_t data_len);
 esp_err_t tirtc_session_send_rgb(uint8_t red, uint8_t green, uint8_t blue);
 esp_err_t tirtc_session_query_peer_state(void);
 bool tirtc_session_get_last_peer_state(tirtc_session_peer_state_t *state);

@@ -20,10 +20,10 @@
 #define DISPLAY_TIRTC_CONFIG_TOKEN_SUBJECT_MAX 64
 #define DISPLAY_BINDING_CODE_MAX_LEN 8
 #define DISPLAY_BINDING_MESSAGE_MAX_LEN 96
-#define DISPLAY_CALL_CONTACT_MAX   3
+#define DISPLAY_CALL_CONTACT_MAX   4
+#define DISPLAY_CALL_CONTACT_DEVICE_ID_LENGTH 12
 #define DISPLAY_CALL_CONTACT_DEVICE_ID_MAX 64
-#define DISPLAY_CALL_CONTACT_PAIR_KEY_MAX 128
-#define DISPLAY_CALL_CONTACT_TIME_MAX 24
+#define DISPLAY_CALL_CONTACT_REMARK_MAX 64
 #define DISPLAY_WECHAT_CONTACT_MAX  3
 #define DISPLAY_WECHAT_OPEN_ID_MAX  96
 
@@ -61,6 +61,15 @@ typedef enum {
 } display_wechat_call_state_t;
 
 typedef enum {
+    DISPLAY_CALL_STATE_IDLE = 0,
+    DISPLAY_CALL_STATE_OUTGOING,
+    DISPLAY_CALL_STATE_INCOMING,
+    DISPLAY_CALL_STATE_CONNECTING,
+    DISPLAY_CALL_STATE_IN_CALL,
+    DISPLAY_CALL_STATE_ERROR,
+} display_call_state_t;
+
+typedef enum {
     DISPLAY_DEVICE_BINDING_STATE_DISABLED = 0,
     DISPLAY_DEVICE_BINDING_STATE_IDLE,
     DISPLAY_DEVICE_BINDING_STATE_REPORTING,
@@ -91,8 +100,8 @@ typedef struct {
 
 typedef struct {
     char device_id[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX];
-    char pair_key[DISPLAY_CALL_CONTACT_PAIR_KEY_MAX];
-    char last_time[DISPLAY_CALL_CONTACT_TIME_MAX];
+    char remark[DISPLAY_CALL_CONTACT_REMARK_MAX];
+    bool online;
 } display_call_contact_t;
 
 typedef struct {
@@ -158,6 +167,7 @@ typedef struct {
     bool binding_running;
     char binding_code[DISPLAY_BINDING_CODE_MAX_LEN];
     char binding_message[DISPLAY_BINDING_MESSAGE_MAX_LEN];
+    display_call_state_t call_state;
     uint8_t call_contact_count;
     display_call_contact_t call_contacts[DISPLAY_CALL_CONTACT_MAX];
     uint8_t wechat_contact_count;
@@ -196,17 +206,13 @@ typedef esp_err_t (*display_toggle_action_cb_t)(bool enabled, void *ctx);
 typedef esp_err_t (*display_percent_cb_t)(uint8_t percent, void *ctx);
 typedef esp_err_t (*display_ai_avatar_cb_t)(uint8_t avatar, void *ctx);
 typedef esp_err_t (*display_call_action_cb_t)(void *ctx);
-typedef esp_err_t (*display_call_contact_cb_t)(const char *device_id,
-                                               const char *pair_key,
-                                               void *ctx);
-typedef esp_err_t (*display_call_contact_remove_cb_t)(const char *device_id, void *ctx);
+typedef esp_err_t (*display_call_contact_cb_t)(const char *device_id, void *ctx);
 typedef void (*display_scan_preview_cb_t)(const uint16_t *rgb565_pixels,
                                           uint16_t width,
                                           uint16_t height,
                                           void *ctx);
 typedef void (*display_contact_scan_result_cb_t)(esp_err_t result,
                                                  const char *device_id,
-                                                 const char *pair_key,
                                                  const char *raw_payload,
                                                  void *ctx);
 typedef esp_err_t (*display_contact_scan_start_cb_t)(display_scan_preview_cb_t preview_cb,
@@ -257,7 +263,7 @@ typedef struct {
     display_percent_cb_t on_set_capture_gain;
     display_call_contact_cb_t on_call_contact;
     display_call_contact_cb_t on_add_call_contact;
-    display_call_contact_remove_cb_t on_remove_call_contact;
+    display_simple_action_cb_t on_refresh_call_contacts;
     display_simple_action_cb_t on_scan_contact;
     display_contact_scan_start_cb_t on_start_contact_scan;
     display_simple_action_cb_t on_stop_contact_scan;

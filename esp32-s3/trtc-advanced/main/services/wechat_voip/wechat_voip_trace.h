@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "esp_log.h"
 #include "wechat_voip_config.h"

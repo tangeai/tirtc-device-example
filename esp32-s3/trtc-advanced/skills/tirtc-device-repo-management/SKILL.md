@@ -15,13 +15,13 @@ description: 管理 TiRTC 设备示例本地仓、公开仓 tirtc-device-example
 C:\Users\61852\Desktop\Device_OTA_S3_Release\esp32s3_tirtc_device_monitor_demo
 ```
 
-未来公开仓：
+统一公开仓：
 
 ```text
 https://github.com/tangeai/tirtc-device-example
 ```
 
-当前 ESP32-S3 设备监控示例未来归属：
+当前 ESP32-S3 设备监控示例归属：
 
 ```text
 esp32-s3/trtc-advanced/
@@ -53,10 +53,10 @@ git remote -v
 
 本地仓当前仍按 ESP-IDF 工程原路径工作，优先保证能编译、能打包、能烧录验证。
 
-公开仓结构是目标形态，不等于现在立刻移动源码。真正迁移前必须先确认：
+公开仓结构是发布形态。同步源码前必须先确认：
 
 - 当前路径完整构建通过
-- 版本号、文档、release_assets 已收口
+- 版本号、文档和 GitHub Release 说明已收口
 - 敏感信息已经排除
 - 新目录下相对路径、脚本、文档链接、CMake 路径能重新跑通
 
@@ -73,7 +73,7 @@ git remote -v
 - `main/services`：AI Chat、微信 VoIP、OTA、绑定、媒体服务
 - `main/ui`：LVGL UI、页面事件和显示资产
 - `components/tirtc_sdk`：SDK 版本、库文件和接口约束
-- `release_assets`：发布产物和烧录包
+- GitHub Releases：完整镜像、OTA app、维护包、校验文件和发布说明
 - `docs`：使用、烧录、发布、架构说明
 
 输出时说明每层的职责、上游依赖、下游调用、能否独立替换、退出/释放边界和发布风险。
@@ -83,11 +83,12 @@ git remote -v
 发布前必须检查：
 
 - 工程版本号是否和目标版本一致
-- docs 和 release_assets 是否只指向当前发布版本
+- docs 和 GitHub Release 链接是否只指向当前发布版本
 - 暂存区是否包含旧调试代码或过期资产
 - `docs/debug` 是否应该进入正式仓
 - 远端地址是否符合本次发布目标
 - 是否存在不该公开的设备 ID、密钥、token、个人联系人或私有服务器凭证
+- `git ls-files "*.bin" "*.zip"` 是否为空
 
 只在完成这些检查后，才继续编译、打包、提交或推送。
 

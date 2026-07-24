@@ -11,12 +11,16 @@
 
 ## 发布资产
 
-| 目录 | 用途 |
+| Release 附件 | 用途 |
 | --- | --- |
-| `release_assets/web-flash/v1.1.0/` | 按 offset 烧录的维护资产 |
-| `release_assets/web-install/v1.1.0/` | 从 `0x0` 烧录的 16 MiB 完整镜像 |
+| `tirtc-esp32p4-device-monitor-full-v1.1.0.bin` | 普通体验者从 `0x0` 烧录 |
+| `tirtc-esp32p4-device-monitor-webflash-v1.1.0.zip` | 维护者按 offset 烧录 |
+| `tirtc-esp32p4-device-monitor-webinstall-v1.1.0.zip` | 完整镜像和中文烧录说明 |
+| `SHA256SUMS.txt`、`release-manifest.json` | 完整性和来源核验 |
 
-各目录包含中文烧录说明和 SHA-256 校验文件。压缩包校验值记录在根目录 `RELEASE.md`。
+附件位于
+[ESP32-P4 v1.1.0 Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-trtc-advanced-v1.1.0)，
+不提交到 Git 历史。详细校验值记录在根目录 `RELEASE.md`。
 
 ## 验证边界
 

@@ -49,9 +49,11 @@ esp32-s3/trtc-basic-call/
 
 ## 发布资产规则
 
-- 当前版本只保留当前版本的 bin/zip/checksum。
-- ESP Launchpad 推荐使用 `web-install` 下的 0x0 完整合一 bin。
-- 手动多地址包只作为维护者排障备用。
+- `.bin/.zip` 不进入 Git 历史，也不放在统一仓工作树中。
+- 打包暂存目录放在仓库外，远端上传并复核完成后才能清理。
+- 普通体验者从 GitHub Release 下载 `full` 完整镜像，并在 ESP Launchpad 从 `0x0` 烧录。
+- OTA app、完整镜像、维护包、`SHA256SUMS.txt` 和 `release-manifest.json` 作为 Release 附件。
+- 手动多地址包只作为维护者排障备用，不作为小白首次体验入口。
 - 不再推荐自建网页烧录页。
 
 ## 敏感信息规则

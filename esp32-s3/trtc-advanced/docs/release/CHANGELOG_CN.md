@@ -1,23 +1,37 @@
 # 修改日志
 
-## 0.7.5 - 2026-07-09
+## 0.7.5 - 2026-07-24
 
-`0.7.5` 是当前准备发布的 ESP32-S3 设备监控示例版本。本文件只保留当前发布版本说明，避免体验者误拿非当前发布包。
+### 功能
 
-### 变更
+- 对齐 ThingConnect 当前服务发现、设备绑定、正式 MQTT 和设备在线流程。
+- 增加设备间互呼、云端联系人和异常房间恢复。
+- 对齐 H5 实时、AI 对讲、微信 VoIP 和设备互呼四类会话。
+- 微信联系人接口切换为 `GET /v1/voip/device/contacts`。
+- 更新主界面翻页、设备二维码、联系人和呼叫交互。
 
-- 固件真实版本字段更新为 `0.7.5`。
-- 全屏设备二维码改为按需创建，降低开机显示初始化阶段的 LVGL/内存压力。
-- 优化屏幕键盘按键尺寸和点击区域，改善数字 `1` 及边缘键不容易点中的体验。
-- 集成 TiRTC SDK `2.2.0` 本地包，保留 1 kHz FreeRTOS tick 配置。
-- 继续保留 AI 对讲、微信 VoIP、IPC 查看三条链路的资源隔离与日志收敛方向。
+### 架构
 
-### 验证
+- 应用层统一仲裁前台媒体会话，协议回调不直接递归释放硬件。
+- 设备 MQTT 长连接按业务 `channel` 分发消息，绑定 MQTT 和正式 MQTT 生命周期分离。
+- NVS 写入、身份代次和旧异步结果增加边界检查。
+- UI、application、services、protocols 和 drivers 的资源所有权进一步收口。
+
+### 文档与发布
+
+- 文档结构和四类功能说明对齐
+  [tirtc-server-example](https://github.com/tangeai/tirtc-server-example)。
+- 首次体验改为“Release 下载 -> 0x0 烧录 -> Wi-Fi -> 6 位码 -> H5 出图出声”。
+- 固件 `.bin/.zip` 不再进入 Git，正式资产改由 GitHub Releases 保存。
+- 重新生成 0x0 完整镜像、OTA app、维护者包、SHA256 和 manifest。
+
+### 构建
 
 | 项目 | 结果 |
 | --- | --- |
-| 源码版本号 | 已更新到 `0.7.5` |
-| OTA app 包 | 已重新构建，size `7251104` bytes，SHA-256 `993CE232062086A0DEF80E26DAFDABDEDCDF4DF4FB4A68112F6E15F00483A756` |
-| ESP Launchpad 合一包 | 已生成，full image SHA-256 `B3B280C9282A91DF94BE244C70426717363378065FBA01E639B4875E0F8B167A` |
-| OTA 从上一版本升级 | 按 OTA 页面状态和串口日志复测 |
-| 正式源码发布 | 已收口到统一示例仓 |
+| `idf.py build` | 通过 |
+| app 大小 | `7291120` bytes |
+| app SHA-256 | `E813347914D70D284D82E3AB798E54A6292530CE97A20C30FE4EBA58FE32BFFC` |
+| 完整镜像大小 | `16777216` bytes |
+| 完整镜像 SHA-256 | `81AA9FE1E1CC0E8A6F428A1D675BE78DA56558F09BD5C45CAD819C46ADA95B46` |
+| 真机回归 | 待执行 |

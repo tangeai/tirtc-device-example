@@ -31,6 +31,7 @@ typedef struct {
 typedef struct {
     SemaphoreHandle_t lock;
     bool contacts_loaded;
+    uint32_t identity_generation;
     char device_id[TIRTC_SESSION_DEVICE_ID_MAX_LEN];
     wechat_voip_auth_user_t cached_auth;
     wechat_voip_auth_user_t contacts[WECHAT_VOIP_CONTACT_MAX];
@@ -38,9 +39,9 @@ typedef struct {
 } wechat_voip_contacts_runtime_t;
 
 /*
- * 1032B in the current map. Contact cache is ordinary app state; NVS reads
- * copy through platform_nvs_async's internal-RAM request buffer before touching
- * this cache, so the cache itself can live in PSRAM.
+ * Contact cache is ordinary app state; NVS reads copy through
+ * platform_nvs_async's internal-RAM request buffer before touching this cache,
+ * so the cache itself can live in PSRAM.
  */
 static EXT_RAM_BSS_ATTR wechat_voip_contacts_runtime_t s_contacts;
 
@@ -116,33 +117,6 @@ static bool remember_locked(const wechat_voip_auth_user_t *user)
     return changed;
 }
 
-static bool remove_locked(const char *openid, wechat_voip_auth_user_t *removed)
-{
-    uint8_t count = s_contacts.contact_count > WECHAT_VOIP_CONTACT_MAX ?
-                    WECHAT_VOIP_CONTACT_MAX :
-                    s_contacts.contact_count;
-    for (uint8_t index = 0; index < count; ++index) {
-        if (!str_same(s_contacts.contacts[index].openid, openid)) {
-            continue;
-        }
-        if (removed != NULL) {
-            *removed = s_contacts.contacts[index];
-        }
-        if (index + 1 < count) {
-            memmove(&s_contacts.contacts[index],
-                    &s_contacts.contacts[index + 1],
-                    sizeof(s_contacts.contacts[0]) * (count - index - 1));
-        }
-        memset(&s_contacts.contacts[count - 1], 0, sizeof(s_contacts.contacts[count - 1]));
-        s_contacts.contact_count = count - 1;
-        if (str_same(s_contacts.cached_auth.openid, openid)) {
-            memset(&s_contacts.cached_auth, 0, sizeof(s_contacts.cached_auth));
-        }
-        return true;
-    }
-    return false;
-}
-
 static esp_err_t save_contacts_now(void)
 {
     wx_contact_store_t store = {
@@ -204,36 +178,66 @@ esp_err_t wechat_voip_contacts_init(void)
     return ESP_OK;
 }
 
-void wechat_voip_contacts_reset_for_device(const char *device_id)
+void wechat_voip_contacts_reset_for_device(const char *device_id, uint32_t identity_generation)
 {
     if (wechat_voip_contacts_init() != ESP_OK) {
         return;
     }
 
     xSemaphoreTake(s_contacts.lock, portMAX_DELAY);
-    if (!str_same(s_contacts.device_id, device_id)) {
+    if (!str_same(s_contacts.device_id, device_id) ||
+        s_contacts.identity_generation != identity_generation) {
         memset(s_contacts.contacts, 0, sizeof(s_contacts.contacts));
         memset(&s_contacts.cached_auth, 0, sizeof(s_contacts.cached_auth));
         s_contacts.contact_count = 0;
         s_contacts.contacts_loaded = false;
+        s_contacts.identity_generation = identity_generation;
         copy_str(s_contacts.device_id, sizeof(s_contacts.device_id), device_id);
     }
     xSemaphoreGive(s_contacts.lock);
 }
 
-void wechat_voip_contacts_load(const char *device_id)
+void wechat_voip_contacts_clear_identity_cache(uint32_t identity_generation)
+{
+    if (wechat_voip_contacts_init() != ESP_OK) {
+        return;
+    }
+
+    xSemaphoreTake(s_contacts.lock, portMAX_DELAY);
+    memset(s_contacts.contacts, 0, sizeof(s_contacts.contacts));
+    memset(&s_contacts.cached_auth, 0, sizeof(s_contacts.cached_auth));
+    s_contacts.contact_count = 0;
+    s_contacts.contacts_loaded = false;
+    s_contacts.identity_generation = identity_generation;
+    s_contacts.device_id[0] = '\0';
+    xSemaphoreGive(s_contacts.lock);
+
+    /* Identity teardown runs on the application control path. Confirm the
+     * queued erase before a same-device-id rebind is allowed to reload NVS. */
+    esp_err_t ret = platform_nvs_async_erase_key_and_wait(CONTACT_NVS_NAMESPACE,
+                                                          CONTACT_NVS_KEY);
+    if (ret != ESP_OK && ret != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "contact identity cache erase queue failed: %s", esp_err_to_name(ret));
+    }
+}
+
+void wechat_voip_contacts_load(const char *device_id, uint32_t identity_generation)
 {
     if (device_id == NULL || device_id[0] == '\0' || wechat_voip_contacts_init() != ESP_OK) {
         return;
     }
 
     xSemaphoreTake(s_contacts.lock, portMAX_DELAY);
+    if (!str_same(s_contacts.device_id, device_id) ||
+        s_contacts.identity_generation != identity_generation) {
+        xSemaphoreGive(s_contacts.lock);
+        return;
+    }
     if (s_contacts.contacts_loaded) {
         xSemaphoreGive(s_contacts.lock);
         return;
     }
     s_contacts.contacts_loaded = true;
-    copy_str(s_contacts.device_id, sizeof(s_contacts.device_id), device_id);
     xSemaphoreGive(s_contacts.lock);
 
     wx_contact_store_t store = {0};
@@ -254,6 +258,13 @@ void wechat_voip_contacts_load(const char *device_id)
     }
 
     xSemaphoreTake(s_contacts.lock, portMAX_DELAY);
+    if (!s_contacts.contacts_loaded ||
+        !str_same(s_contacts.device_id, device_id) ||
+        s_contacts.identity_generation != identity_generation) {
+        xSemaphoreGive(s_contacts.lock);
+        ESP_LOGI(TAG, "drop contacts loaded for stale device identity");
+        return;
+    }
     for (int index = (int)store.count - 1; index >= 0; --index) {
         if (contact_valid(&store.contacts[index])) {
             (void)remember_locked(&store.contacts[index]);
@@ -266,20 +277,33 @@ void wechat_voip_contacts_load(const char *device_id)
     ESP_LOGD(TAG, "contacts loaded: count=%u", (unsigned)store.count);
 }
 
-bool wechat_voip_contacts_remember(const wechat_voip_auth_user_t *user, const char *source)
+esp_err_t wechat_voip_contacts_remember_for_device(const char *device_id,
+                                                    uint32_t identity_generation,
+                                                    const wechat_voip_auth_user_t *user,
+                                                    const char *source)
 {
-    if (user == NULL || user->openid[0] == '\0' || wechat_voip_contacts_init() != ESP_OK) {
-        return false;
+    if (device_id == NULL || device_id[0] == '\0' || user == NULL || user->openid[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t ret = wechat_voip_contacts_init();
+    if (ret != ESP_OK) {
+        return ret;
     }
     if (user->model_id[0] == '\0') {
         ESP_LOGD(TAG, "skip contact without model_id: source=%s openid_len=%u",
                  source != NULL ? source : "unknown",
                  (unsigned)strlen(user->openid));
-        return false;
+        return ESP_ERR_INVALID_ARG;
     }
 
     bool changed = false;
     xSemaphoreTake(s_contacts.lock, portMAX_DELAY);
+    if (!str_same(s_contacts.device_id, device_id) ||
+        s_contacts.identity_generation != identity_generation) {
+        xSemaphoreGive(s_contacts.lock);
+        ESP_LOGI(TAG, "drop contact from stale device identity");
+        return ESP_ERR_INVALID_STATE;
+    }
     wechat_voip_auth_user_t before = s_contacts.cached_auth;
     s_contacts.cached_auth = *user;
     changed = !auth_user_same(&before, &s_contacts.cached_auth);
@@ -293,22 +317,85 @@ bool wechat_voip_contacts_remember(const wechat_voip_auth_user_t *user, const ch
                  (unsigned)strlen(user->openid),
                  (unsigned)strlen(user->model_id));
     }
-    return changed;
+    return ESP_OK;
 }
 
-bool wechat_voip_contacts_remove(const char *openid, wechat_voip_auth_user_t *removed)
+esp_err_t wechat_voip_contacts_replace_for_device(const char *device_id,
+                                                   uint32_t identity_generation,
+                                                   const wechat_voip_auth_user_t *users,
+                                                   size_t count,
+                                                   const char *source)
 {
-    if (openid == NULL || openid[0] == '\0' || wechat_voip_contacts_init() != ESP_OK) {
-        return false;
+    if (device_id == NULL || device_id[0] == '\0' || (users == NULL && count > 0U)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t ret = wechat_voip_contacts_init();
+    if (ret != ESP_OK) {
+        return ret;
     }
 
-    xSemaphoreTake(s_contacts.lock, portMAX_DELAY);
-    bool found = remove_locked(openid, removed);
-    xSemaphoreGive(s_contacts.lock);
-    if (found) {
-        request_save("remove contact");
+    wechat_voip_auth_user_t next[WECHAT_VOIP_CONTACT_MAX] = {0};
+    uint8_t next_count = 0;
+    for (size_t index = 0; index < count && next_count < WECHAT_VOIP_CONTACT_MAX; ++index) {
+        if (!contact_valid(&users[index])) {
+            continue;
+        }
+
+        bool duplicate = false;
+        for (uint8_t existing = 0; existing < next_count; ++existing) {
+            if (str_same(next[existing].openid, users[index].openid)) {
+                next[existing] = users[index];
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            next[next_count++] = users[index];
+        }
     }
-    return found;
+
+    bool changed = false;
+    xSemaphoreTake(s_contacts.lock, portMAX_DELAY);
+    if (!str_same(s_contacts.device_id, device_id) ||
+        s_contacts.identity_generation != identity_generation) {
+        xSemaphoreGive(s_contacts.lock);
+        ESP_LOGI(TAG, "drop contacts from stale device identity");
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint8_t old_count = s_contacts.contact_count > WECHAT_VOIP_CONTACT_MAX ?
+                        WECHAT_VOIP_CONTACT_MAX :
+                        s_contacts.contact_count;
+    changed = old_count != next_count;
+    for (uint8_t index = 0; !changed && index < next_count; ++index) {
+        changed = !auth_user_same(&s_contacts.contacts[index], &next[index]);
+    }
+
+    memset(s_contacts.contacts, 0, sizeof(s_contacts.contacts));
+    memcpy(s_contacts.contacts, next, sizeof(next));
+    s_contacts.contact_count = next_count;
+
+    wechat_voip_auth_user_t previous_cached = s_contacts.cached_auth;
+    memset(&s_contacts.cached_auth, 0, sizeof(s_contacts.cached_auth));
+    for (uint8_t index = 0; index < next_count; ++index) {
+        if (str_same(next[index].openid, previous_cached.openid)) {
+            s_contacts.cached_auth = next[index];
+            break;
+        }
+    }
+    if (s_contacts.cached_auth.openid[0] == '\0' && next_count > 0U) {
+        s_contacts.cached_auth = next[0];
+    }
+    changed = !auth_user_same(&previous_cached, &s_contacts.cached_auth) || changed;
+    xSemaphoreGive(s_contacts.lock);
+
+    if (changed) {
+        request_save(source);
+        ESP_LOGI(TAG,
+                 "authorized contacts replaced: count=%u source=%s",
+                 (unsigned)next_count,
+                 source != NULL ? source : "refresh");
+    }
+    return ESP_OK;
 }
 
 void wechat_voip_contacts_find(const char *openid, wechat_voip_auth_user_t *target)

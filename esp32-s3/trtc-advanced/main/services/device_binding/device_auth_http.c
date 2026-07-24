@@ -172,8 +172,7 @@ esp_err_t device_auth_http_get_mqtt_token(const char *api_base,
         .body = "",
         .headers = headers,
         .header_count = sizeof(headers) / sizeof(headers[0]),
-        .retry_count = 2,
-        .retry_delay_ms = 700,
+        .retry_count = 0,
         .trace_name = "mqtt-token",
     };
 

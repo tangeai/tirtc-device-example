@@ -20,6 +20,7 @@
 **/build/
 build/
 build_*/
+build-*/
 *.o
 *.a
 !components/tirtc_sdk/lib/esp32s3/libTiRTC.a
@@ -30,6 +31,10 @@ build_*/
 *.bin
 !assets/font/spiffs/
 !assets/font/spiffs/*.bin
+release_assets/
+artifacts/
+releases/
+*.zip
 *.elf
 *.map
 flasher_args.json # Generated in build directory

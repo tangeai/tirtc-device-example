@@ -169,6 +169,8 @@ CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE is not set
 
 - `git diff --check` 通过。
 - `idf.py reconfigure build` 通过。
-- `release_assets/web-flash/v1.1.0/SHA256SUMS.txt` 存在。
-- 若生成完整镜像，`release_assets/web-install/v1.1.0/SHA256SUMS.txt` 存在。
+- `git ls-files "*.bin" "*.zip"` 不包含固件构建产物。
+- GitHub Release 中存在完整镜像、维护包、`SHA256SUMS.txt` 和
+  `release-manifest.json`。
+- 从 Release 重新下载附件后，SHA-256 与发布清单一致。
 - 文档不包含真实密钥、token、个人账号或临时调试叙事。

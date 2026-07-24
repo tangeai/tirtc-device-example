@@ -16,6 +16,9 @@ esp_err_t platform_storage_init(void)
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG,
+                 "nvs recovery requires full erase: %s; persisted wifi and binding settings will be cleared",
+                 esp_err_to_name(ret));
         ESP_RETURN_ON_ERROR(nvs_flash_erase(), TAG, "erase nvs failed");
         ret = nvs_flash_init();
     }

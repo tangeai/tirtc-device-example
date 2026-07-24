@@ -19,7 +19,10 @@
 
 #include "display.h"
 #include "display_driver.h"
+#include "app.h"
+#include "device_call.h"
 #include "network.h"
+#include "rtc_transport.h"
 
 static const char *TAG = "screen_debug";
 
@@ -33,6 +36,7 @@ static const char *TAG = "screen_debug";
 #define SCREEN_DEBUG_REQUEST_MAX 512
 #define SCREEN_DEBUG_TARGET_MAX 192
 #define SCREEN_DEBUG_VALUE_MAX 32
+#define SCREEN_DEBUG_STRING_VALUE_MAX 160
 #define SCREEN_DEBUG_JSON_STRING_MAX 96
 #define SCREEN_DEBUG_RECV_TIMEOUT_SEC 2
 
@@ -348,6 +352,86 @@ static esp_err_t screen_debug_get_int_arg(const char *query, const char *name, i
     return ESP_ERR_NOT_FOUND;
 }
 
+static int screen_debug_hex_value(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+static esp_err_t screen_debug_url_decode(const char *src, size_t src_len, char *dst, size_t dst_size)
+{
+    if (src == NULL || dst == NULL || dst_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t out = 0;
+    for (size_t index = 0; index < src_len; ++index) {
+        if (out + 1 >= dst_size) {
+            return ESP_ERR_INVALID_SIZE;
+        }
+
+        char ch = src[index];
+        if (ch == '+') {
+            dst[out++] = ' ';
+            continue;
+        }
+        if (ch == '%' && index + 2 < src_len) {
+            int high = screen_debug_hex_value(src[index + 1]);
+            int low = screen_debug_hex_value(src[index + 2]);
+            if (high < 0 || low < 0) {
+                return ESP_ERR_INVALID_ARG;
+            }
+            dst[out++] = (char)((high << 4) | low);
+            index += 2;
+            continue;
+        }
+        dst[out++] = ch;
+    }
+
+    dst[out] = '\0';
+    return ESP_OK;
+}
+
+static esp_err_t screen_debug_get_string_arg(const char *query, const char *name, char *value, size_t value_size)
+{
+    if (query == NULL || name == NULL || value == NULL || value_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const size_t name_len = strlen(name);
+    const char *cursor = query;
+    while (*cursor != '\0') {
+        const char *item_end = strchr(cursor, '&');
+        if (item_end == NULL) {
+            item_end = cursor + strlen(cursor);
+        }
+
+        const char *equals = memchr(cursor, '=', (size_t)(item_end - cursor));
+        if (equals != NULL &&
+            (size_t)(equals - cursor) == name_len &&
+            strncmp(cursor, name, name_len) == 0) {
+            size_t raw_len = (size_t)(item_end - equals - 1);
+            if (raw_len == 0 || raw_len >= SCREEN_DEBUG_STRING_VALUE_MAX) {
+                return ESP_ERR_INVALID_SIZE;
+            }
+
+            return screen_debug_url_decode(equals + 1, raw_len, value, value_size);
+        }
+
+        cursor = *item_end == '&' ? item_end + 1 : item_end;
+    }
+
+    return ESP_ERR_NOT_FOUND;
+}
+
 static esp_err_t screen_debug_handle_index(int fd)
 {
     return screen_debug_send_body(fd,
@@ -462,6 +546,154 @@ static esp_err_t screen_debug_handle_scroll(int fd, const char *query)
     return screen_debug_send_json(fd, 200, "OK", "{\"ok\":true}");
 }
 
+static esp_err_t screen_debug_send_result(int fd, esp_err_t result)
+{
+    char body[96];
+    char err_name[SCREEN_DEBUG_JSON_STRING_MAX];
+
+    screen_debug_json_escape(esp_err_to_name(result), err_name, sizeof(err_name));
+    int len = snprintf(body,
+                       sizeof(body),
+                       "{\"ok\":%s,\"err\":%d,\"name\":\"%s\"}",
+                       result == ESP_OK ? "true" : "false",
+                       (int)result,
+                       err_name);
+    if (len <= 0 || len >= (int)sizeof(body)) {
+        return screen_debug_send_error(fd, 500, "Internal Server Error", "result too large");
+    }
+
+    return screen_debug_send_body(fd,
+                                  result == ESP_OK ? 200 : 503,
+                                  result == ESP_OK ? "OK" : "Service Unavailable",
+                                  "application/json",
+                                  body,
+                                  (size_t)len);
+}
+
+static esp_err_t screen_debug_handle_call_peer(int fd, const char *query)
+{
+    char device_id[APP_CALL_CONTACT_DEVICE_ID_MAX] = {0};
+
+    if (screen_debug_get_string_arg(query, "device_id", device_id, sizeof(device_id)) != ESP_OK) {
+        return screen_debug_send_error(fd, 400, "Bad Request", "missing device_id");
+    }
+    esp_err_t ret = app_enter_app(APP_ID_CALL);
+    if (ret == ESP_OK) {
+        ret = app_call_contact(device_id);
+    }
+
+    return screen_debug_send_result(fd, ret);
+}
+
+static const char *screen_debug_device_call_state_name(device_call_state_t state)
+{
+    switch (state) {
+    case DEVICE_CALL_STATE_IDLE:
+        return "idle";
+    case DEVICE_CALL_STATE_OUTGOING:
+        return "outgoing";
+    case DEVICE_CALL_STATE_INCOMING:
+        return "incoming";
+    case DEVICE_CALL_STATE_CONNECTING:
+        return "connecting";
+    case DEVICE_CALL_STATE_IN_CALL:
+        return "in_call";
+    case DEVICE_CALL_STATE_ERROR:
+        return "error";
+    default:
+        return "unknown";
+    }
+}
+
+static esp_err_t screen_debug_handle_call_status(int fd)
+{
+    device_call_snapshot_t call = {0};
+    rtc_transport_stats_t rtc = {0};
+    char room_id[SCREEN_DEBUG_JSON_STRING_MAX] = {0};
+    char peer_id[SCREEN_DEBUG_JSON_STRING_MAX] = {0};
+    char call_type[SCREEN_DEBUG_JSON_STRING_MAX] = {0};
+    char message[SCREEN_DEBUG_JSON_STRING_MAX] = {0};
+    char last_event[SCREEN_DEBUG_JSON_STRING_MAX] = {0};
+    char last_error[SCREEN_DEBUG_JSON_STRING_MAX] = {0};
+    char body[768];
+
+    device_call_get_snapshot(&call);
+    rtc_transport_get_stats(&rtc);
+    screen_debug_json_escape(call.room_id, room_id, sizeof(room_id));
+    screen_debug_json_escape(call.peer_device_id, peer_id, sizeof(peer_id));
+    screen_debug_json_escape(call.call_type, call_type, sizeof(call_type));
+    screen_debug_json_escape(call.message, message, sizeof(message));
+    screen_debug_json_escape(rtc.last_event, last_event, sizeof(last_event));
+    screen_debug_json_escape(esp_err_to_name(call.last_error), last_error, sizeof(last_error));
+
+    int len = snprintf(body,
+                       sizeof(body),
+                       "{\"ok\":true,"
+                       "\"call\":{\"state\":%u,\"state_name\":\"%s\",\"incoming\":%s,"
+                       "\"room_id\":\"%s\",\"peer_device_id\":\"%s\",\"call_type\":\"%s\","
+                       "\"last_error\":%d,\"last_error_name\":\"%s\",\"message\":\"%s\"},"
+                       "\"rtc\":{\"state\":%u,\"enabled\":%s,\"sdk_started\":%s,"
+                       "\"active_connection\":%s,\"call_active\":%s,\"incoming_call_pending\":%s,"
+                       "\"local_audio_send_enabled\":%s,\"tx_audio_frames\":%lu,"
+                       "\"rx_audio_frames\":%lu,\"last_event\":\"%s\"}}",
+                       (unsigned)call.state,
+                       screen_debug_device_call_state_name(call.state),
+                       call.pending_incoming ? "true" : "false",
+                       room_id,
+                       peer_id,
+                       call_type,
+                       (int)call.last_error,
+                       last_error,
+                       message,
+                       (unsigned)rtc.state,
+                       rtc.enabled ? "true" : "false",
+                       rtc.sdk_started ? "true" : "false",
+                       rtc.active_connection ? "true" : "false",
+                       rtc.call_active ? "true" : "false",
+                       rtc.incoming_call_pending ? "true" : "false",
+                       rtc.local_audio_send_enabled ? "true" : "false",
+                       (unsigned long)rtc.tx_audio_frames,
+                       (unsigned long)rtc.rx_audio_frames,
+                       last_event);
+    if (len <= 0 || len >= (int)sizeof(body)) {
+        return screen_debug_send_error(fd, 500, "Internal Server Error", "call status too large");
+    }
+
+    return screen_debug_send_body(fd, 200, "OK", "application/json", body, (size_t)len);
+}
+
+static esp_err_t screen_debug_handle_hangup(int fd)
+{
+    return screen_debug_send_result(fd, app_hangup_call());
+}
+
+static esp_err_t screen_debug_handle_accept(int fd)
+{
+    esp_err_t ret = app_enter_app(APP_ID_CALL);
+    if (ret == ESP_OK) {
+        ret = app_accept_call();
+    }
+    return screen_debug_send_result(fd, ret);
+}
+
+static esp_err_t screen_debug_handle_enter_call(int fd)
+{
+    return screen_debug_send_result(fd, app_enter_app(APP_ID_CALL));
+}
+
+static esp_err_t screen_debug_handle_rtc_credentials(int fd, const char *query)
+{
+    char device_id[APP_RTC_CONFIG_TEXT_MAX] = {0};
+    char device_secret[APP_RTC_CONFIG_TEXT_MAX] = {0};
+
+    if (screen_debug_get_string_arg(query, "device_id", device_id, sizeof(device_id)) != ESP_OK ||
+        screen_debug_get_string_arg(query, "device_secret", device_secret, sizeof(device_secret)) != ESP_OK) {
+        return screen_debug_send_error(fd, 400, "Bad Request", "missing device_id or device_secret");
+    }
+
+    return screen_debug_send_result(fd, app_request_update_rtc_device_credentials(device_id, device_secret));
+}
+
 static void screen_debug_handle_client(int fd)
 {
     char request[SCREEN_DEBUG_REQUEST_MAX];
@@ -501,6 +733,18 @@ static void screen_debug_handle_client(int fd)
         ret = screen_debug_handle_tap(fd, query);
     } else if (strcmp(path, "/api/scroll") == 0) {
         ret = screen_debug_handle_scroll(fd, query);
+    } else if (strcmp(path, "/api/debug/call") == 0) {
+        ret = screen_debug_handle_call_peer(fd, query);
+    } else if (strcmp(path, "/api/debug/call_status") == 0) {
+        ret = screen_debug_handle_call_status(fd);
+    } else if (strcmp(path, "/api/debug/hangup") == 0) {
+        ret = screen_debug_handle_hangup(fd);
+    } else if (strcmp(path, "/api/debug/accept") == 0) {
+        ret = screen_debug_handle_accept(fd);
+    } else if (strcmp(path, "/api/debug/enter_call") == 0) {
+        ret = screen_debug_handle_enter_call(fd);
+    } else if (strcmp(path, "/api/debug/rtc_credentials") == 0) {
+        ret = screen_debug_handle_rtc_credentials(fd, query);
     } else {
         ret = screen_debug_send_error(fd, 404, "Not Found", "not found");
     }
@@ -578,7 +822,7 @@ static void screen_debug_task(void *arg)
     screen_debug_log_started();
 
     while (!screen_debug_should_stop()) {
-        struct sockaddr_in6 source_addr;
+        struct sockaddr source_addr;
         socklen_t addr_len = sizeof(source_addr);
         int client_fd = accept(listen_fd, (struct sockaddr *)&source_addr, &addr_len);
         if (client_fd < 0) {

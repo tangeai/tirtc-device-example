@@ -1,54 +1,69 @@
-# 0.7.5 发布说明
+# ESP32-S3 trtc-advanced v0.7.5
 
 ## 版本定位
 
-`0.7.5` 是当前发布到统一示例仓的 ESP32-S3 设备监控示例版本。这个版本已经完成本地构建、发布资产整理和源码仓收口。
+`0.7.5` 把 ESP32-S3 设备端示例对齐到 ThingConnect 当前设备协议，并补齐 H5 实时查看、
+AI 对讲、微信 IoT VoIP 和设备间互呼共用一套硬件与 TiRTC 资源时的生命周期边界。
 
-对外沟通、烧录包、OTA manifest、发布说明和 Git tag 都统一使用 `0.7.5`。不要再引用中间测试包或未发布版本。
+设备协议、接口字段和错误码以
+[tangeai/tirtc-server-example](https://github.com/tangeai/tirtc-server-example)
+为准；本仓库提供对应的 ESP-IDF 设备实现。
 
-## 核心改进
+## 主要变化
 
-- 固件版本号收口到 `0.7.5`。
-- 全屏设备二维码从开机同步创建改为点击时按需创建，降低启动阶段 LVGL 对象和内存压力。
-- 优化屏幕键盘触摸体验：Wi-Fi、联系人、微信联系人和 TiRTC 配置编辑键盘整体扩大可点击区域，改善左上角数字 `1` 等边缘按键不好点的问题。
-- 集成 TiRTC SDK `2.2.0` 本地包。
-- 保留 1 kHz FreeRTOS tick 配置，适配 TiRTC 音视频实时链路。
-- 继续收敛 AI 对讲、微信 VoIP、IPC 查看三条链路的资源边界和关键日志。
+- 增加 ThingConnect 服务发现和统一服务注册表，设备、MQTT、TiRTC、AI、VoIP 和 call
+  服务地址由同一入口解析，编译期地址只作为失败兜底。
+- 收口首次绑定、保留身份重绑、云端解绑、HTTP 410/业务码 6006 和正式 MQTT 恢复流程。
+- 正式 MQTT 支持分片消息重组、ACK、心跳、自动重连和按 `channel` 分发，避免微信 VoIP
+  与设备互呼消费同一条来电消息。
+- 微信联系人切换到正式接口 `GET /v1/voip/device/contacts`，保留服务端旧地址兼容能力，
+  设备端不调用需要用户 JWT 的 `/v1/voip/user/*` 接口。
+- 增加完整设备互呼业务：云端联系人、申请/接受/备注、主被叫房间、接听、拒接、取消、
+  挂断、`0x2000/0x2001` 命令和异常房间恢复。
+- 增加 H5、AI、微信 VoIP、设备互呼的统一会话仲裁。UI 和协议回调只投递事件，资源切换、
+  RTC 断开、音频和摄像头释放由应用层串行处理。
+- 优化主界面点击翻页、设备二维码、联系人页、呼叫页和屏幕调试服务。
+- 补充与服务端同结构的首次体验、功能矩阵、协议链接、烧录、OTA 和问题排查文档。
+- 固件 `.bin/.zip` 迁出 Git 历史，正式下载改用 GitHub Releases。
 
-## OTA 发布资产
+## 构建契约
 
-OTA 服务端只发布 app 固件，不包含 NVS、storage、bootloader 或分区表。
-
-| 项目 | 状态 |
+| 项目 | 值 |
 | --- | --- |
-| OTA 版本 | `0.7.5` |
-| OTA app | 已重新构建，服务端部署以当前 OTA manifest 为准 |
-| OTA app size | `7251104` bytes |
-| OTA app SHA-256 | `993CE232062086A0DEF80E26DAFDABDEDCDF4DF4FB4A68112F6E15F00483A756` |
-| web-flash zip | `release_assets/web-flash/esp32s3-tirtc-device-monitor-webflash-v0.7.5.zip` |
-| web-flash zip SHA-256 | `571493E2275C9F2051178C6FDF7223F9EB7746432C1734AD5A87DCF87DA9F473` |
-| 完整合一烧录包 | `release_assets/web-install/v0.7.5/esp32s3-tirtc-device-monitor-full-v0.7.5.bin` |
-| 完整合一烧录包 size | `16777216` bytes |
-| 完整合一烧录包 SHA-256 | `B3B280C9282A91DF94BE244C70426717363378065FBA01E639B4875E0F8B167A` |
-| ESP Launchpad zip | `release_assets/web-install/esp32s3-tirtc-device-monitor-webinstall-v0.7.5.zip` |
-| ESP Launchpad zip SHA-256 | `E42B7D733E7EF7F3669573956F58D13B40830ABF2A1B003EEAE493C1559550CE` |
-| 从上一已发布版本升级 | 发布验收项，复测时按 OTA 页面状态和串口日志确认 |
+| ESP-IDF | `5.5.4` |
+| TiRTC SDK | `2.2.0` |
+| TiRTC BuildInfo commit | `1df9e045a9dc` |
+| TiRTC 静态库 SHA-256 | `0686E5D7F5BFEA18B7B3EE6AE1701061B3AFCFB0EF2030642EBEBAB88AF0413D` |
+| FreeRTOS tick | `1000 Hz` |
+| Flash | `16 MB` |
+| PSRAM | `8 MB` |
+
+## Release 资产
+
+下载页：
+[esp32-s3-trtc-advanced-v0.7.5](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-trtc-advanced-v0.7.5)
+
+| 资产 | 大小 | SHA-256 |
+| --- | ---: | --- |
+| `esp32s3-tirtc-device-monitor-ota-v0.7.5.bin` | `7291120` | `E813347914D70D284D82E3AB798E54A6292530CE97A20C30FE4EBA58FE32BFFC` |
+| `esp32s3-tirtc-device-monitor-full-v0.7.5.bin` | `16777216` | `81AA9FE1E1CC0E8A6F428A1D675BE78DA56558F09BD5C45CAD819C46ADA95B46` |
+| `esp32s3-tirtc-device-monitor-webinstall-v0.7.5.zip` | `5487666` | `83473E73399F5080FAEDEA605A745A73B3F8F52D759EC1FC0EF5511323DE7F79` |
+| `esp32s3-tirtc-device-monitor-webflash-v0.7.5.zip` | `5477614` | `8C6769BDA7BB0EC3BF950F7C4F73B3901C4DA2C6892DD5C7F26D993C52076534` |
+
+普通体验者使用 `full` 完整镜像，ESP Launchpad 地址填写 `0x0`。`ota` 文件只供 OTA
+服务端使用。
 
 ## 验证记录
 
-| 项目 | 结果 |
+| 检查项 | 结果 |
 | --- | --- |
-| `idf.py reconfigure build` | 通过 |
+| `idf.py build` | 通过 |
+| app 分区 | `0x6f40f0 / 0x770000`，剩余 `0x7bf10`，约 7% |
 | `build/project_description.json` | `project_version=0.7.5` |
-| OTA manifest | 部署后校验 `version/size/sha256` |
-| 上一已发布版本 -> 0.7.5 OTA | 复测时确认 `Checking -> Downloading -> Verifying -> Ready -> Reboot` |
-| ESP Launchpad 0x0 合一烧录 | 已生成完整合一资产，使用官方 ESP Launchpad DIY 模式烧录 |
-| AI 对讲 | 已纳入 0.7.5 体验链路 |
-| 微信 VoIP | 已纳入 0.7.5 体验链路 |
-| IPC 查看 | 已纳入 0.7.5 体验链路 |
+| Release 资产 SHA-256 | 已生成并写入 `SHA256SUMS.txt` |
+| 敏感信息扫描 | 发布前执行 |
+| ESP Launchpad 实机烧录 | 待真机验证 |
+| 上一版本到 0.7.5 OTA | 待真机验证 |
+| H5 / AI / 微信 VoIP / 设备互呼 | 本轮源码改动待真机回归 |
 
-## 发布边界
-
-- 对外说明统一使用 `0.7.5`，不再引用中间测试版本或旧烧录包。
-- 网页烧录统一推荐 Espressif 官方 ESP Launchpad，使用 `0x0` 完整合一镜像。
-- OTA 服务端只发布 app 固件；如果改动 bootloader、分区表或资源分区，需要重新发布完整烧录包。
+构建通过不等于真机闭环。未执行的项目保持“待验证”，不写成“已验证”。

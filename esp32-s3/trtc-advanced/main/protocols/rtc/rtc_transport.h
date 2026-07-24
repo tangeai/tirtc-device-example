@@ -24,9 +24,18 @@ typedef tirtc_session_observer_t rtc_transport_observer_t;
 #define RTC_TRANSPORT_STATE_MEDIA_BOOTSTRAPPING TIRTC_SESSION_STATE_MEDIA_BOOTSTRAPPING
 #define RTC_TRANSPORT_STATE_DISCONNECTING TIRTC_SESSION_STATE_DISCONNECTING
 #define RTC_TRANSPORT_STATE_ERROR     TIRTC_SESSION_STATE_ERROR
+#define RTC_TRANSPORT_DEVICE_AUDIO_STREAM_ID TIRTC_SESSION_DEVICE_AUDIO_STREAM_ID
+#define RTC_TRANSPORT_H5_TALKBACK_STREAM_ID  TIRTC_SESSION_H5_TALKBACK_STREAM_ID
+#define RTC_TRANSPORT_CONNECT_TOKEN_MAX_LEN   TIRTC_SESSION_CONNECT_TOKEN_MAX_LEN
+#define RTC_TRANSPORT_COMMAND_RESPONSE_BIT          0x8000U
+#define RTC_TRANSPORT_COMMAND_DEVICE_CALL_CONNECTED 0x2000U
+#define RTC_TRANSPORT_COMMAND_DEVICE_CALL_HANGUP    0x2001U
+#define RTC_TRANSPORT_SERVICE_CLIENT_ID_CONFLICT \
+	TIRTC_SESSION_SERVICE_CODE_CLIENT_ID_CONFLICT
 
 esp_err_t rtc_transport_init(const rtc_transport_config_t *config);
 esp_err_t rtc_transport_configure(const rtc_transport_config_t *config);
+void rtc_transport_set_identity_ready(bool ready);
 esp_err_t rtc_transport_prepare_sdk(void);
 esp_err_t rtc_transport_set_media_bridge(const rtc_transport_media_ops_t *ops, void *ctx);
 void rtc_transport_set_hooks(const rtc_transport_hooks_t *hooks, void *ctx);
@@ -34,6 +43,10 @@ void rtc_transport_set_control_ops(const rtc_transport_control_ops_t *ops, void 
 esp_err_t rtc_transport_register_observer(const rtc_transport_observer_t *observer, void *ctx);
 esp_err_t rtc_transport_start_if_ready(void);
 esp_err_t rtc_transport_connect_peer(const char *remote_device_id, const char *remote_device_secret_key);
+esp_err_t rtc_transport_connect_peer_with_token(const char *remote_device_id, const char *connect_token);
+esp_err_t rtc_transport_send_command(uint32_t cmdw, const void *data, size_t data_len);
+void rtc_transport_set_next_connection_auto_media(bool enabled);
+void rtc_transport_set_next_connection_defer_media(bool enabled);
 esp_err_t rtc_transport_restart(void);
 esp_err_t rtc_transport_stop(void);
 esp_err_t rtc_transport_disconnect(void);
@@ -44,6 +57,7 @@ esp_err_t rtc_transport_hangup(void);
 void rtc_transport_on_network_state_changed(const rtc_transport_network_state_t *state);
 esp_err_t rtc_transport_set_local_video_send_enabled(bool enabled);
 esp_err_t rtc_transport_set_local_audio_send_enabled(bool enabled);
+esp_err_t rtc_transport_set_remote_audio_stream_id(uint8_t stream_id);
 esp_err_t rtc_transport_use_builtin_media(void);
 esp_err_t rtc_transport_query_peer_state(void);
 bool rtc_transport_get_last_peer_state(rtc_transport_peer_state_t *state);

@@ -65,6 +65,11 @@ bool camera_driver_is_configured(void)
 	return camera_driver_has_required_pins(hardware_board_get_camera_config());
 }
 
+bool camera_driver_is_initialized(void)
+{
+	return s_camera_initialized;
+}
+
 esp_err_t camera_driver_init(void)
 {
 	const hardware_camera_config_t *board_camera = hardware_board_get_camera_config();

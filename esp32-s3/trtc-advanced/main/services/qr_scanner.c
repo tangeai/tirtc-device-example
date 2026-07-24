@@ -144,6 +144,28 @@ static bool qr_scanner_is_plain_open_id(const char *text)
 	return true;
 }
 
+static bool qr_scanner_is_plain_device_id(const char *text)
+{
+	size_t len = 0;
+
+	if (text == NULL) {
+		return false;
+	}
+
+	len = strlen(text);
+	if (len == 0 || len >= QR_SCANNER_DEVICE_ID_MAX) {
+		return false;
+	}
+
+	for (size_t index = 0; index < len; ++index) {
+		char ch = text[index];
+		if (!qr_scanner_is_open_id_char(ch) && ch != '.') {
+			return false;
+		}
+	}
+	return true;
+}
+
 static bool qr_scanner_extract_value(const char *payload,
 				     const char *key,
 				     char *value,
@@ -225,8 +247,11 @@ static esp_err_t qr_scanner_parse_contact_payload_bytes(const uint8_t *payload,
 	memset(contact, 0, sizeof(*contact));
 	strlcpy(contact->raw_payload, text, sizeof(contact->raw_payload));
 
-	if (qr_scanner_is_plain_open_id(text)) {
-		strlcpy(contact->open_id, text, sizeof(contact->open_id));
+	if (qr_scanner_is_plain_device_id(text)) {
+		strlcpy(contact->device_id, text, sizeof(contact->device_id));
+		if (qr_scanner_is_plain_open_id(text)) {
+			strlcpy(contact->open_id, text, sizeof(contact->open_id));
+		}
 		ret = ESP_OK;
 		goto done;
 	}
@@ -298,9 +323,9 @@ static esp_err_t qr_scanner_parse_contact_payload_bytes(const uint8_t *payload,
 							sizeof(contact->pair_key));
 	}
 
-	if (!has_device_id || !has_pair_key) {
+	if (!has_device_id) {
 		ESP_LOGW(TAG,
-			 "qr payload missing contact fields: has_device_id=%u has_device_secret_key=%u",
+			 "qr payload missing device id: has_device_id=%u has_optional_secret=%u",
 			 has_device_id ? 1U : 0U,
 			 has_pair_key ? 1U : 0U);
 		goto done;
@@ -702,10 +727,6 @@ static void qr_scanner_live_task(void *arg)
 		goto done;
 	}
 
-	ret = camera_driver_init();
-	if (ret != ESP_OK) {
-		goto done;
-	}
 	ESP_LOGI(TAG, "contact qr scan started");
 
 	while (!qr_scanner_should_stop()) {
@@ -749,7 +770,6 @@ done:
 	if (decoder != NULL) {
 		quirc_destroy(decoder);
 	}
-	(void)camera_driver_deinit();
 	ESP_LOGI(TAG,
 		 "contact qr scan stopped: cancelled=%u frames=%" PRIu32 " result=%s",
 		 cancelled ? 1U : 0U,
@@ -780,6 +800,10 @@ esp_err_t qr_scanner_start_contact(qr_scanner_preview_cb_t preview_cb,
 	if (!camera_driver_is_configured()) {
 		ESP_LOGW(TAG, "camera is not configured; check HARDWARE_BOARD_CAMERA_* in hardware_board_config.h");
 		return ESP_ERR_NOT_SUPPORTED;
+	}
+	if (!camera_driver_is_initialized()) {
+		ESP_LOGE(TAG, "camera resource must be acquired before starting an asynchronous scan");
+		return ESP_ERR_INVALID_STATE;
 	}
 	ESP_RETURN_ON_ERROR(qr_scanner_lock(), TAG, "qr scanner is busy");
 
@@ -841,16 +865,15 @@ esp_err_t qr_scanner_scan_contact(qr_scanner_contact_t *contact)
 		ESP_LOGW(TAG, "camera is not configured; check HARDWARE_BOARD_CAMERA_* in hardware_board_config.h");
 		return ESP_ERR_NOT_SUPPORTED;
 	}
+	if (!camera_driver_is_initialized()) {
+		ESP_LOGE(TAG, "camera resource must be acquired before starting a synchronous scan");
+		return ESP_ERR_INVALID_STATE;
+	}
 	ESP_RETURN_ON_ERROR(qr_scanner_lock(), TAG, "qr scanner is busy");
 
 	decoder = quirc_new();
 	if (decoder == NULL) {
 		ret = ESP_ERR_NO_MEM;
-		goto done;
-	}
-
-	ret = camera_driver_init();
-	if (ret != ESP_OK) {
 		goto done;
 	}
 
@@ -872,7 +895,6 @@ done:
 	if (decoder != NULL) {
 		quirc_destroy(decoder);
 	}
-	(void)camera_driver_deinit();
 	xSemaphoreGive(s_scan_lock);
 
 	if (ret == ESP_OK) {

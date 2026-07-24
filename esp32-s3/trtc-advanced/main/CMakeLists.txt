@@ -36,6 +36,7 @@ idf_component_register(
         "ui/font/lv_font_cn_18.c"
         "ui/ai_chat_assets.c"
         "ui/ai_chat_avatar_assets.c"
+        "ui/call_assets.c"
         "ui/home_assets.c"
         "ui/text_assets.c"
         "hardware/hardware_board.c"
@@ -73,7 +74,9 @@ idf_component_register(
         "services/device_binding/device_binding.c"
         "services/device_binding/device_binding_http.c"
         "services/device_binding/device_identity.c"
+        "services/device_call/device_call.c"
         "services/device_online/device_online.c"
+        "services/thing_connect/thing_service_registry.c"
         "services/media_sink.c"
         "services/ota.c"
         "services/qr_scanner.c"
@@ -104,7 +107,9 @@ idf_component_register(
                  "protocols/mqtt"
                  "services"
                  "services/device_binding"
+                 "services/device_call"
                  "services/device_online"
+                 "services/thing_connect"
                  "services/wechat_voip"
                  ${APP_DEBUG_SCREEN_SERVER_INCLUDE_DIRS}
     REQUIRES esp_event esp_netif esp_wifi nvs_flash esp_timer esp_codec_dev tirtc_sdk esp_lcd lwip esp_hw_support esp_http_client app_update esp_app_format json mbedtls mqtt espressif__esp_jpeg espressif__esp-sr spiffs

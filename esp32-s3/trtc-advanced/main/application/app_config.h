@@ -84,12 +84,16 @@
 #define APP_CONFIG_DEVICE_BINDING_ENABLE 1
 #endif
 
+#ifndef APP_CONFIG_THING_SERVICE_DISCOVERY_URL
+#define APP_CONFIG_THING_SERVICE_DISCOVERY_URL "https://ep-open.tange-ai.com/services"
+#endif
+
 #ifndef APP_CONFIG_DEVICE_BINDING_API_BASE
-#define APP_CONFIG_DEVICE_BINDING_API_BASE "http://mqtt-demo.tange-ai.com"
+#define APP_CONFIG_DEVICE_BINDING_API_BASE "https://mqtt-demo.tange-ai.com"
 #endif
 
 #ifndef APP_CONFIG_DEVICE_BINDING_MQTT_URI
-#define APP_CONFIG_DEVICE_BINDING_MQTT_URI "mqtts://mqtt-demo.tange-ai.com:8883/mqtt"
+#define APP_CONFIG_DEVICE_BINDING_MQTT_URI "mqtts://mqtt-demo.tange-ai.com:8883"
 #endif
 
 #ifndef APP_CONFIG_DEVICE_BINDING_WAIT_TIMEOUT_MS

@@ -10,6 +10,7 @@
 #include "audio_device.h"
 #include "device.h"
 #include "device_binding.h"
+#include "device_call.h"
 #include "device_online.h"
 #include "network.h"
 #include "ota.h"
@@ -18,6 +19,25 @@
 #include "wechat_voip_service.h"
 
 static const uint16_t APP_WIFI_CONNECT_FAIL_RETRY_THRESHOLD = 8;
+
+static app_call_state_t app_snapshot_call_state_from_service(device_call_state_t state)
+{
+	switch (state) {
+	case DEVICE_CALL_STATE_OUTGOING:
+		return APP_CALL_STATE_OUTGOING;
+	case DEVICE_CALL_STATE_INCOMING:
+		return APP_CALL_STATE_INCOMING;
+	case DEVICE_CALL_STATE_CONNECTING:
+		return APP_CALL_STATE_CONNECTING;
+	case DEVICE_CALL_STATE_IN_CALL:
+		return APP_CALL_STATE_IN_CALL;
+	case DEVICE_CALL_STATE_ERROR:
+		return APP_CALL_STATE_ERROR;
+	case DEVICE_CALL_STATE_IDLE:
+	default:
+		return APP_CALL_STATE_IDLE;
+	}
+}
 
 static ai_chat_snapshot_t *app_snapshot_ai_chat_buffer(void)
 {
@@ -103,9 +123,13 @@ static void app_snapshot_fill_rtc(app_snapshot_t *snapshot, app_control_state_t 
 	}
 
 	audio_device_get_stats(&audio);
+	device_call_snapshot_t call = {0};
+	device_call_get_snapshot(&call);
+	snapshot->call.state = app_snapshot_call_state_from_service(call.state);
+	snapshot->call.pending_incoming = call.pending_incoming;
 	snapshot->rtc.connected = rtc.active_connection;
 	snapshot->rtc.call_active = rtc.call_active;
-	snapshot->rtc.incoming_call_pending = rtc.incoming_call_pending;
+	snapshot->rtc.incoming_call_pending = rtc.incoming_call_pending || call.pending_incoming;
 	snapshot->rtc.local_audio_send_enabled = rtc.local_audio_send_enabled;
 	snapshot->rtc.state = (uint8_t)rtc.state;
 	snapshot->rtc.tx_video_frames = rtc.tx_video_frames;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -30,10 +31,18 @@ typedef struct {
 } wechat_voip_auth_user_t;
 
 esp_err_t wechat_voip_contacts_init(void);
-void wechat_voip_contacts_reset_for_device(const char *device_id);
-void wechat_voip_contacts_load(const char *device_id);
-bool wechat_voip_contacts_remember(const wechat_voip_auth_user_t *user, const char *source);
-bool wechat_voip_contacts_remove(const char *openid, wechat_voip_auth_user_t *removed);
+void wechat_voip_contacts_reset_for_device(const char *device_id, uint32_t identity_generation);
+void wechat_voip_contacts_clear_identity_cache(uint32_t identity_generation);
+void wechat_voip_contacts_load(const char *device_id, uint32_t identity_generation);
+esp_err_t wechat_voip_contacts_remember_for_device(const char *device_id,
+                                                    uint32_t identity_generation,
+                                                    const wechat_voip_auth_user_t *user,
+                                                    const char *source);
+esp_err_t wechat_voip_contacts_replace_for_device(const char *device_id,
+                                                   uint32_t identity_generation,
+                                                   const wechat_voip_auth_user_t *users,
+                                                   size_t count,
+                                                   const char *source);
 void wechat_voip_contacts_find(const char *openid, wechat_voip_auth_user_t *target);
 void wechat_voip_contacts_get_snapshot(wechat_voip_contacts_snapshot_t *snapshot);
 

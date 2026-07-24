@@ -4,26 +4,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <time.h>
 
 #include "cJSON.h"
-#include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
-#include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_random.h"
-#include "esp_timer.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "mbedtls/base64.h"
 #include "mbedtls/md.h"
+#include "thing_http_client.h"
 
 static const char *TAG = "binding_http";
 
 #define DEVICE_BINDING_HTTP_TIMEOUT_MS 10000
-#define DEVICE_BINDING_HTTP_RETRY_COUNT 2
-#define DEVICE_BINDING_HTTP_RETRY_DELAY_MS 1000U
 #define DEVICE_BINDING_HTTP_RESPONSE_MAX_LEN 4096
 #define DEVICE_BINDING_HTTP_URL_MAX_LEN 256
 #define DEVICE_BINDING_HTTP_BODY_MAX_LEN 320
@@ -33,39 +26,6 @@ static const char *TAG = "binding_http";
 #define DEVICE_BINDING_HTTP_DEFAULT_RETRY_AFTER_SEC 10U
 #define DEVICE_BINDING_HTTP_NONCE_HEX_LEN 16
 #define DEVICE_BINDING_HTTP_SIGNATURE_MAX 96
-#define DEVICE_BINDING_HTTP_DEVICE_RAND_MAX 1000000U
-#define DEVICE_BINDING_HTTP_DEVICE_RAND_LEN 6U
-
-typedef struct {
-    char *data;
-    size_t len;
-    size_t cap;
-    uint32_t retry_after_sec;
-    int64_t start_us;
-    int64_t connected_us;
-    int64_t headers_sent_us;
-    int64_t first_header_us;
-    int64_t first_data_us;
-    int64_t finish_us;
-    int64_t disconnected_us;
-    int header_events;
-    int data_events;
-    int disconnect_events;
-    esp_err_t last_event_error;
-} device_binding_http_response_t;
-
-typedef struct {
-    bool enabled;
-    const char *device_id;
-    const char *timestamp;
-    const char *nonce;
-    const char *signature;
-} device_binding_http_auth_headers_t;
-
-static bool device_binding_http_is_https(const char *url)
-{
-    return url != NULL && strncmp(url, "https://", 8) == 0;
-}
 
 static bool device_binding_http_has_value(const char *value)
 {
@@ -84,16 +44,6 @@ static void device_binding_http_make_nonce(char *nonce, size_t nonce_size)
     for (size_t index = 0; index < sizeof(raw) && (index * 2U + 2U) < nonce_size; ++index) {
         snprintf(nonce + index * 2U, 3, "%02x", raw[index]);
     }
-}
-
-static void device_binding_http_make_device_rand(char *device_rand, size_t device_rand_size)
-{
-    if (device_rand == NULL || device_rand_size <= DEVICE_BINDING_HTTP_DEVICE_RAND_LEN) {
-        return;
-    }
-
-    uint32_t value = esp_random() % DEVICE_BINDING_HTTP_DEVICE_RAND_MAX;
-    snprintf(device_rand, device_rand_size, "%06lu", (unsigned long)value);
 }
 
 static esp_err_t device_binding_http_sign(const char *device_id,
@@ -143,237 +93,6 @@ static esp_err_t device_binding_http_sign(const char *device_id,
     return ESP_OK;
 }
 
-static void device_binding_http_join_url(char *url,
-                                         size_t url_size,
-                                         const char *api_base,
-                                         const char *path)
-{
-    size_t base_len = strlen(api_base);
-
-    while (base_len > 0U && api_base[base_len - 1U] == '/') {
-        base_len--;
-    }
-    snprintf(url, url_size, "%.*s%s", (int)base_len, api_base, path);
-}
-
-static int64_t device_binding_http_elapsed_ms(const device_binding_http_response_t *response)
-{
-    if (response == NULL || response->start_us == 0) {
-        return 0;
-    }
-    return (esp_timer_get_time() - response->start_us) / 1000;
-}
-
-static const char *device_binding_http_last_stage(const device_binding_http_response_t *response)
-{
-    if (response == NULL) {
-        return "none";
-    }
-    if (response->finish_us != 0) {
-        return "finish";
-    }
-    if (response->first_data_us != 0) {
-        return "body";
-    }
-    if (response->first_header_us != 0) {
-        return "header";
-    }
-    if (response->headers_sent_us != 0) {
-        return "sent";
-    }
-    if (response->connected_us != 0) {
-        return "connected";
-    }
-    return "init";
-}
-
-static esp_err_t device_binding_http_event_handler(esp_http_client_event_t *event)
-{
-    device_binding_http_response_t *response = NULL;
-
-    if (event == NULL) {
-        return ESP_OK;
-    }
-
-    response = (device_binding_http_response_t *)event->user_data;
-    if (response == NULL) {
-        return ESP_OK;
-    }
-
-    switch (event->event_id) {
-    case HTTP_EVENT_ERROR:
-        response->last_event_error = ESP_FAIL;
-        ESP_LOGW(TAG, "binding report event error: elapsed=%lldms stage=%s",
-                 (long long)device_binding_http_elapsed_ms(response),
-                 device_binding_http_last_stage(response));
-        return ESP_OK;
-    case HTTP_EVENT_ON_CONNECTED:
-        response->connected_us = esp_timer_get_time();
-        return ESP_OK;
-    case HTTP_EVENT_HEADERS_SENT:
-        response->headers_sent_us = esp_timer_get_time();
-        return ESP_OK;
-    case HTTP_EVENT_ON_HEADER:
-        response->header_events++;
-        if (response->first_header_us == 0) {
-            response->first_header_us = esp_timer_get_time();
-        }
-        if (event->header_key != NULL && event->header_value != NULL &&
-            strcasecmp(event->header_key, "Retry-After") == 0) {
-            unsigned long retry_after = strtoul(event->header_value, NULL, 10);
-            if (retry_after > 0UL && retry_after <= 3600UL) {
-                response->retry_after_sec = (uint32_t)retry_after;
-            }
-        }
-        return ESP_OK;
-    case HTTP_EVENT_ON_DATA:
-        if (event->data == NULL || event->data_len <= 0 || response->data == NULL) {
-            return ESP_OK;
-        }
-        response->data_events++;
-        if (response->first_data_us == 0) {
-            response->first_data_us = esp_timer_get_time();
-        }
-        if (response->len + (size_t)event->data_len + 1U > response->cap) {
-            response->last_event_error = ESP_ERR_NO_MEM;
-            return ESP_ERR_NO_MEM;
-        }
-        memcpy(response->data + response->len, event->data, (size_t)event->data_len);
-        response->len += (size_t)event->data_len;
-        response->data[response->len] = '\0';
-        return ESP_OK;
-    case HTTP_EVENT_ON_FINISH:
-        response->finish_us = esp_timer_get_time();
-        return ESP_OK;
-    case HTTP_EVENT_DISCONNECTED:
-        response->disconnect_events++;
-        response->disconnected_us = esp_timer_get_time();
-        return ESP_OK;
-    default:
-        return ESP_OK;
-    }
-}
-
-static bool device_binding_http_should_retry(esp_err_t ret,
-                                             int status,
-                                             const device_binding_http_response_t *response)
-{
-    return ret != ESP_OK &&
-           response != NULL &&
-           status == 0 &&
-           response->len == 0 &&
-           response->first_header_us == 0 &&
-           response->last_event_error != ESP_ERR_NO_MEM;
-}
-
-static esp_err_t device_binding_http_post_json(const char *url,
-                                               const char *body,
-                                               const device_binding_http_auth_headers_t *auth,
-                                               char *response_buf,
-                                               size_t response_buf_size,
-                                               int *status_code,
-                                               uint32_t *retry_after_sec)
-{
-    esp_err_t ret = ESP_OK;
-    int status = 0;
-
-    if (url == NULL || body == NULL || response_buf == NULL || response_buf_size < 2U) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    response_buf[0] = '\0';
-    if (status_code != NULL) {
-        *status_code = 0;
-    }
-    if (retry_after_sec != NULL) {
-        *retry_after_sec = 0;
-    }
-
-    for (uint8_t attempt = 1; attempt <= (DEVICE_BINDING_HTTP_RETRY_COUNT + 1U); ++attempt) {
-        device_binding_http_response_t response = {
-            .data = response_buf,
-            .cap = response_buf_size,
-            .start_us = esp_timer_get_time(),
-        };
-        response_buf[0] = '\0';
-        if (status_code != NULL) {
-            *status_code = 0;
-        }
-        if (retry_after_sec != NULL) {
-            *retry_after_sec = 0;
-        }
-
-        esp_http_client_config_t http_config = {
-            .url = url,
-            .method = HTTP_METHOD_POST,
-            .event_handler = device_binding_http_event_handler,
-            .user_data = &response,
-            .timeout_ms = DEVICE_BINDING_HTTP_TIMEOUT_MS,
-            .crt_bundle_attach = device_binding_http_is_https(url) ? esp_crt_bundle_attach : NULL,
-        };
-
-        esp_http_client_handle_t client = esp_http_client_init(&http_config);
-        if (client == NULL) {
-            return ESP_ERR_NO_MEM;
-        }
-
-        esp_http_client_set_header(client, "Content-Type", "application/json");
-        esp_http_client_set_header(client, "Connection", "close");
-        if (auth != NULL && auth->enabled) {
-            esp_http_client_set_header(client, "X-Device-Id", auth->device_id);
-            esp_http_client_set_header(client, "X-Timestamp", auth->timestamp);
-            esp_http_client_set_header(client, "X-Nonce", auth->nonce);
-            esp_http_client_set_header(client, "X-Signature", auth->signature);
-        }
-        esp_http_client_set_post_field(client, body, (int)strlen(body));
-
-        ESP_LOGD(TAG,
-                 "binding report request begin: attempt=%u/%u timeout=%ums body_len=%u",
-                 (unsigned)attempt,
-                 (unsigned)(DEVICE_BINDING_HTTP_RETRY_COUNT + 1U),
-                 (unsigned)DEVICE_BINDING_HTTP_TIMEOUT_MS,
-                 (unsigned)strlen(body));
-        ret = esp_http_client_perform(client);
-        status = esp_http_client_get_status_code(client);
-        if (ret == ESP_OK && status_code != NULL) {
-            *status_code = status;
-        }
-        if (retry_after_sec != NULL) {
-            *retry_after_sec = response.retry_after_sec;
-        }
-        ESP_LOGD(TAG,
-                 "binding report request done: ret=%s status=%d elapsed=%lldms stage=%s bytes=%u retry_after=%us hdr=%d data=%d disc=%d event_err=%s",
-                 esp_err_to_name(ret),
-                 status,
-                 (long long)device_binding_http_elapsed_ms(&response),
-                 device_binding_http_last_stage(&response),
-                 (unsigned)response.len,
-                 (unsigned)response.retry_after_sec,
-                 response.header_events,
-                 response.data_events,
-                 response.disconnect_events,
-                 esp_err_to_name(response.last_event_error));
-        esp_http_client_cleanup(client);
-
-        bool no_response_failure = device_binding_http_should_retry(ret, status, &response);
-        if (attempt <= DEVICE_BINDING_HTTP_RETRY_COUNT && no_response_failure) {
-            uint32_t delay_ms = DEVICE_BINDING_HTTP_RETRY_DELAY_MS * attempt;
-            ESP_LOGW(TAG,
-                     "binding report retry: ret=%s stage=%s wait_ms=%u",
-                     esp_err_to_name(ret),
-                     device_binding_http_last_stage(&response),
-                     (unsigned)delay_ms);
-            vTaskDelay(pdMS_TO_TICKS(delay_ms));
-            continue;
-        }
-        if (no_response_failure && ret == ESP_FAIL) {
-            ret = ESP_ERR_HTTP_CONNECT;
-        }
-        break;
-    }
-    return ret;
-}
-
 static const cJSON *device_binding_pick_data_object(const cJSON *root)
 {
     const cJSON *data = NULL;
@@ -394,8 +113,6 @@ static esp_err_t device_binding_parse_report_response(const char *json,
     const cJSON *verify_code = NULL;
     const cJSON *temp_token = NULL;
     const cJSON *temp_client_id = NULL;
-    const cJSON *device_id = NULL;
-    const cJSON *device_key = NULL;
 
     if (json == NULL || result == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -415,17 +132,6 @@ static esp_err_t device_binding_parse_report_response(const char *json,
     memset(result, 0, sizeof(*result));
     code = cJSON_GetObjectItemCaseSensitive(root, "code");
     result->service_code = cJSON_IsNumber(code) ? code->valueint : 0;
-
-    device_id = cJSON_GetObjectItemCaseSensitive(data, "device_id");
-    device_key = cJSON_GetObjectItemCaseSensitive(data, "device_key");
-    if (cJSON_IsString(device_id) && device_id->valuestring[0] != '\0' &&
-        cJSON_IsString(device_key) && device_key->valuestring[0] != '\0') {
-        result->type = DEVICE_BINDING_HTTP_REPORT_BOUND;
-        strlcpy(result->device_id, device_id->valuestring, sizeof(result->device_id));
-        strlcpy(result->device_key, device_key->valuestring, sizeof(result->device_key));
-        cJSON_Delete(root);
-        return ESP_OK;
-    }
 
     verify_code = cJSON_GetObjectItemCaseSensitive(data, "code");
     temp_token = cJSON_GetObjectItemCaseSensitive(data, "temp_token");
@@ -458,7 +164,6 @@ static esp_err_t device_binding_parse_report_response(const char *json,
 
 esp_err_t device_binding_http_report(const char *api_base,
                                      const char *mac,
-                                     const char *chip_uid,
                                      const char *device_id,
                                      const char *device_key,
                                      device_binding_http_report_result_t *result)
@@ -468,34 +173,32 @@ esp_err_t device_binding_http_report(const char *api_base,
     char timestamp[24] = {0};
     char nonce[DEVICE_BINDING_HTTP_NONCE_HEX_LEN + 1] = {0};
     char signature[DEVICE_BINDING_HTTP_SIGNATURE_MAX] = {0};
-    char device_rand[DEVICE_BINDING_HTTP_DEVICE_RAND_LEN + 1] = {0};
-    device_binding_http_auth_headers_t auth = {0};
+    thing_http_header_t headers[4] = {0};
+    size_t header_count = 0U;
+    thing_http_response_info_t response_info = {0};
     char *response = NULL;
     int status_code = 0;
-    uint32_t retry_after_sec = 0;
     esp_err_t ret = ESP_OK;
     bool has_device_id = device_binding_http_has_value(device_id);
     bool has_device_key = device_binding_http_has_value(device_key);
 
     if (api_base == NULL || api_base[0] == '\0' ||
         mac == NULL || mac[0] == '\0' ||
-        chip_uid == NULL || result == NULL) {
+        result == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     if (has_device_id != has_device_key) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    device_binding_http_join_url(url, sizeof(url), api_base, "/v1/device/report");
-    if (!has_device_id) {
-        device_binding_http_make_device_rand(device_rand, sizeof(device_rand));
+    ret = thing_http_join_url(url, sizeof(url), api_base, "/v1/device/report");
+    if (ret != ESP_OK) {
+        return ret;
     }
-    snprintf(body,
-             sizeof(body),
-             "{\"mac\":\"%s\",\"chip_uid\":\"%s\",\"device_rand\":\"%s\"}",
-             mac,
-             chip_uid,
-             device_rand);
+    int body_len = snprintf(body, sizeof(body), "{\"mac\":\"%s\"}", mac);
+    if (body_len <= 0 || body_len >= (int)sizeof(body)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
     if (has_device_id) {
         snprintf(timestamp, sizeof(timestamp), "%lld", (long long)time(NULL));
         device_binding_http_make_nonce(nonce, sizeof(nonce));
@@ -509,11 +212,11 @@ esp_err_t device_binding_http_report(const char *api_base,
             ESP_LOGW(TAG, "binding report signature failed: %s", esp_err_to_name(ret));
             return ret;
         }
-        auth.enabled = true;
-        auth.device_id = device_id;
-        auth.timestamp = timestamp;
-        auth.nonce = nonce;
-        auth.signature = signature;
+        headers[0] = (thing_http_header_t){.name = "X-Device-Id", .value = device_id};
+        headers[1] = (thing_http_header_t){.name = "X-Timestamp", .value = timestamp};
+        headers[2] = (thing_http_header_t){.name = "X-Nonce", .value = nonce};
+        headers[3] = (thing_http_header_t){.name = "X-Signature", .value = signature};
+        header_count = sizeof(headers) / sizeof(headers[0]);
     }
 
     response = heap_caps_calloc(1,
@@ -527,17 +230,24 @@ esp_err_t device_binding_http_report(const char *api_base,
     }
 
     ESP_LOGD(TAG,
-             "binding report begin: signed=%d device_id_len=%u device_rand=%s",
-             auth.enabled ? 1 : 0,
-             has_device_id ? (unsigned)strlen(device_id) : 0U,
-             device_rand[0] != '\0' ? device_rand : "none");
-    ret = device_binding_http_post_json(url,
-                                        body,
-                                        &auth,
-                                        response,
-                                        DEVICE_BINDING_HTTP_RESPONSE_MAX_LEN,
-                                        &status_code,
-                                        &retry_after_sec);
+             "binding report begin: signed=%d device_id_len=%u",
+             has_device_id ? 1 : 0,
+             has_device_id ? (unsigned)strlen(device_id) : 0U);
+    const thing_http_request_t request = {
+        .url = url,
+        .method = "POST",
+        .body = body,
+        .headers = headers,
+        .header_count = header_count,
+        .timeout_ms = DEVICE_BINDING_HTTP_TIMEOUT_MS,
+        .retry_count = 0,
+        .trace_name = "binding-report",
+    };
+    ret = thing_http_request_json_ex(&request,
+                                     response,
+                                     DEVICE_BINDING_HTTP_RESPONSE_MAX_LEN,
+                                     &status_code,
+                                     &response_info);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "binding report request failed: %s", esp_err_to_name(ret));
         goto cleanup;
@@ -545,8 +255,8 @@ esp_err_t device_binding_http_report(const char *api_base,
 
     ret = device_binding_parse_report_response(response, result);
     if (ret == ESP_OK && result->type == DEVICE_BINDING_HTTP_REPORT_RETRY_AFTER) {
-        result->retry_after_sec = retry_after_sec != 0U ?
-                                  retry_after_sec :
+        result->retry_after_sec = response_info.retry_after_sec != 0U ?
+                                  response_info.retry_after_sec :
                                   DEVICE_BINDING_HTTP_DEFAULT_RETRY_AFTER_SEC;
         ESP_LOGD(TAG,
                  "binding report pending: service_code=%d retry_after=%us",

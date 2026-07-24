@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <stdbool.h>
 
@@ -18,12 +18,18 @@ typedef enum {
     WECHAT_VOIP_CALL_STATE_CLOSING,
 } wechat_voip_call_state_t;
 
+esp_err_t wechat_voip_service_set_incoming_policy(wechat_voip_incoming_allowed_cb_t callback,
+                                                  void *ctx);
 esp_err_t wechat_voip_service_start(void);
 void wechat_voip_service_stop(void);
+esp_err_t wechat_voip_service_start_ingress(void);
+void wechat_voip_service_suspend_ingress(void);
 esp_err_t wechat_voip_service_answer(void);
 esp_err_t wechat_voip_service_reject_or_hangup(void);
 esp_err_t wechat_voip_service_request_call(const char *open_id);
+/* Compatibility entry: verifies an existing mini-program authorization. */
 esp_err_t wechat_voip_service_add_contact(const char *open_id);
+/* Returns ESP_ERR_NOT_SUPPORTED; revocation belongs to the user side. */
 esp_err_t wechat_voip_service_remove_contact(const char *open_id);
 bool wechat_voip_service_has_incoming_call(void);
 wechat_voip_call_state_t wechat_voip_service_get_call_state(void);

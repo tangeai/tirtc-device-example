@@ -1,4 +1,4 @@
-#include "wechat_voip_media.h"
+﻿#include "wechat_voip_media.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -99,7 +99,6 @@ static bool wechat_voip_media_format_is_pcma_ready(const tirtc_session_audio_for
            format->bits_per_sample == 16U &&
            format->channels == 1U;
 }
-
 static bool wechat_voip_media_format_is_16k_pcm_mono(const tirtc_session_audio_format_t *format)
 {
     return format != NULL &&

@@ -31,7 +31,7 @@ typedef struct {
 typedef esp_err_t (*device_binding_load_credentials_cb_t)(device_binding_credentials_t *credentials,
                                                           void *ctx);
 
-typedef esp_err_t (*device_binding_clear_credentials_cb_t)(void *ctx);
+typedef void (*device_binding_bound_cb_t)(const char *device_id, void *ctx);
 
 typedef struct {
     bool enabled;
@@ -40,8 +40,9 @@ typedef struct {
     uint32_t wait_timeout_ms;
     device_binding_load_credentials_cb_t load_credentials;
     device_binding_save_credentials_cb_t save_credentials;
-    device_binding_clear_credentials_cb_t clear_credentials;
+    device_binding_bound_cb_t on_bound;
     void *ctx;
+    void *bound_ctx;
 } device_binding_config_t;
 
 typedef struct {
@@ -56,5 +57,6 @@ typedef struct {
 
 esp_err_t device_binding_init(const device_binding_config_t *config);
 esp_err_t device_binding_start_async(const char *reason);
-void device_binding_reset_state(const char *reason);
+esp_err_t device_binding_reset_state(const char *reason);
+esp_err_t device_binding_confirm_online(const char *device_id, const char *reason);
 void device_binding_get_snapshot(device_binding_snapshot_t *snapshot);

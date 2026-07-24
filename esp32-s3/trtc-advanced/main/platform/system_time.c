@@ -1,4 +1,4 @@
-#include "system_time.h"
+﻿#include "system_time.h"
 
 #include <stdint.h>
 #include <time.h>
@@ -40,7 +40,6 @@ bool system_time_has_valid_time(void)
     time(&now);
     return now >= (time_t)TIME_SYNC_MIN_VALID_UNIX_TIME;
 }
-
 void system_time_set_sync_cb(system_time_sync_cb_t cb, void *ctx)
 {
     taskENTER_CRITICAL(&s_time_sync_lock);

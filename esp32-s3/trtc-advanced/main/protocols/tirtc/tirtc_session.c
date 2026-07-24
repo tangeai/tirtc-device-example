@@ -185,6 +185,7 @@ static bool s_sdk_stop_notified = true;
 static uint32_t s_sdk_generation;
 static uint32_t s_pending_stop_generation;
 static bool s_network_connected;
+static bool s_identity_ready = true;
 static bool s_start_in_progress;
 static uint64_t s_next_start_allowed_us;
 static bool s_restart_runtime_requested;
@@ -216,11 +217,17 @@ static bool s_test_video_publish_forced;
 static bool s_test_audio_publish_forced;
 static bool s_next_connection_auto_media = true;
 static bool s_active_conn_auto_media = true;
+static bool s_next_connection_defer_media;
+static bool s_active_conn_defer_media;
+static bool s_call_media_deferred;
 static bool s_call_active;
 static bool s_incoming_call_pending;
 static uint32_t s_pending_call_cmdw;
 static bool s_remote_video_requested;
 static bool s_remote_audio_requested;
+static uint8_t s_next_remote_audio_stream_id = TIRTC_SESSION_REMOTE_AUDIO_STREAM_ID;
+static uint8_t s_active_remote_audio_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
+static uint8_t s_remote_audio_requested_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
 static bool s_media_bootstrap_pending;
 static bool s_remote_video_first_packet_logged;
 static bool s_remote_audio_first_packet_logged;
@@ -1184,6 +1191,7 @@ static void tirtc_session_reset_call_state_locked(void)
     s_pending_call_cmdw = 0;
     s_remote_video_requested = false;
     s_remote_audio_requested = false;
+    s_remote_audio_requested_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
     s_media_bootstrap_pending = false;
     s_remote_video_first_packet_logged = false;
     s_remote_audio_first_packet_logged = false;
@@ -1206,6 +1214,9 @@ static void tirtc_session_reset_call_state_locked(void)
     s_media_profile = TIRTC_SESSION_MEDIA_PROFILE_AV;
     s_next_connection_auto_media = true;
     s_active_conn_auto_media = true;
+    s_next_connection_defer_media = false;
+    s_active_conn_defer_media = false;
+    s_call_media_deferred = false;
     s_local_video_publish_forced = false;
     s_local_audio_publish_forced = false;
     s_test_video_publish_forced = false;
@@ -1728,6 +1739,25 @@ static void tirtc_session_cancel_deferred_start_after_full_reset(void)
     }
 }
 
+static bool tirtc_session_start_backoff_active_locked(uint64_t now_us,
+                                                       uint64_t *remaining_us,
+                                                       bool *retry_timer_pending)
+{
+    if (remaining_us != NULL) {
+        *remaining_us = 0U;
+    }
+    if (retry_timer_pending != NULL) {
+        *retry_timer_pending = s_deferred_start_after_full_reset_pending;
+    }
+    if (s_next_start_allowed_us == 0U || now_us >= s_next_start_allowed_us) {
+        return false;
+    }
+    if (remaining_us != NULL) {
+        *remaining_us = s_next_start_allowed_us - now_us;
+    }
+    return true;
+}
+
 bool tirtc_session_schedule_deferred_full_reset(void)
 {
     uint64_t due_at_us = esp_timer_get_time() + TIRTC_SESSION_DEFERRED_FULL_RESET_DELAY_US;
@@ -1756,14 +1786,13 @@ bool tirtc_session_schedule_deferred_full_reset(void)
 
 static bool tirtc_session_schedule_deferred_start_after_delay(uint64_t delay_us, const char *reason)
 {
-    uint64_t due_at_us = esp_timer_get_time() + delay_us;
-
     if (s_deferred_start_after_full_reset_timer == NULL) {
         return false;
     }
     if (delay_us == 0) {
         delay_us = 1000U;
     }
+    uint64_t due_at_us = esp_timer_get_time() + delay_us;
 
     taskENTER_CRITICAL(&s_rtc_lock);
     s_deferred_start_after_full_reset_pending = true;
@@ -1782,6 +1811,16 @@ static bool tirtc_session_schedule_deferred_start_after_delay(uint64_t delay_us,
              reason != NULL ? reason : "start",
              (unsigned long long)delay_us);
     return true;
+}
+
+static void tirtc_session_ensure_start_backoff_timer(uint64_t remaining_us, bool retry_timer_pending)
+{
+    if (remaining_us == 0U || retry_timer_pending) {
+        return;
+    }
+    if (!tirtc_session_schedule_deferred_start_after_delay(remaining_us, "rtc start backoff")) {
+        ESP_LOGW(TAG, "rtc listen start backoff timer schedule failed");
+    }
 }
 
 bool tirtc_session_schedule_deferred_start_after_full_reset(void)
@@ -1813,7 +1852,7 @@ void tirtc_session_handle_deferred_full_reset(void)
     sdk_initialized = s_sdk_initialized;
     sdk_started = s_sdk_started;
     can_reset = s_sdk_initialized || s_sdk_started || s_start_in_progress || s_sdk_prepare_in_progress;
-    should_restart = s_config.enabled && s_network_connected;
+    should_restart = s_config.enabled && s_network_connected && s_identity_ready;
     if (can_reset) {
         s_sdk_generation++;
         if (s_sdk_generation == 0U) {
@@ -1828,6 +1867,8 @@ void tirtc_session_handle_deferred_full_reset(void)
         s_session_mode = TIRTC_SESSION_MODE_LISTEN;
         s_next_connection_auto_media = true;
         s_active_conn_auto_media = true;
+        s_next_connection_defer_media = false;
+        s_active_conn_defer_media = false;
         s_started_device_id[0] = '\0';
         s_started_credential_hash[0] = '\0';
         s_started_secret_len = 0;
@@ -1910,6 +1951,7 @@ void tirtc_session_handle_deferred_full_reset(void)
     s_sdk_stop_notified = true;
     s_active_conn = NULL;
     s_active_conn_accepted_at_us = 0U;
+    s_active_remote_audio_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
     s_closing_conn = NULL;
     s_closing_conn_was_sdk_started = false;
     tirtc_session_reset_call_state_locked();
@@ -2023,6 +2065,7 @@ static void tirtc_session_retry_remote_media_request_after_delay(bool retry_vide
         }
         if (retry_audio) {
             s_remote_audio_requested = false;
+            s_remote_audio_requested_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
         }
         s_media_bootstrap_pending = true;
         should_start = true;
@@ -2362,14 +2405,16 @@ void tirtc_session_mark_incoming_call(uint32_t pending_cmdw)
     taskEXIT_CRITICAL(&s_rtc_lock);
 }
 
-void tirtc_session_complete_call_response(bool accepted)
+static void tirtc_session_complete_call_response_internal(bool accepted, bool defer_media)
 {
     bool should_bootstrap = false;
     bool was_call_active = false;
     bool builtin_media_owner = false;
+    bool was_media_deferred = false;
 
     taskENTER_CRITICAL(&s_rtc_lock);
     was_call_active = s_call_active;
+    was_media_deferred = s_call_media_deferred;
     s_call_active = accepted;
     builtin_media_owner = s_media_profile != TIRTC_SESSION_MEDIA_PROFILE_EXTERNAL_AUDIO;
     if (accepted) {
@@ -2386,17 +2431,32 @@ void tirtc_session_complete_call_response(bool accepted)
         if (builtin_media_owner) {
             s_local_video_send_enabled = true;
         }
+        s_call_media_deferred = defer_media;
+    } else {
+        s_call_media_deferred = false;
     }
     s_incoming_call_pending = false;
     s_pending_call_cmdw = 0;
     tirtc_session_sync_stats_locked();
-    should_bootstrap = accepted && !was_call_active && s_active_conn != NULL && s_sdk_started &&
+    should_bootstrap = accepted && !defer_media && (!was_call_active || was_media_deferred) &&
+                       s_active_conn != NULL && s_sdk_started &&
                        !s_start_in_progress && !s_stop_in_progress && s_closing_conn == NULL;
     taskEXIT_CRITICAL(&s_rtc_lock);
 
     if (should_bootstrap && !tirtc_session_is_test_media_active()) {
-        tirtc_session_schedule_media_bootstrap("call accepted");
+        tirtc_session_schedule_media_bootstrap(was_media_deferred ? "deferred media allowed" :
+                                                                    "call accepted");
     }
+}
+
+void tirtc_session_complete_call_response(bool accepted)
+{
+    tirtc_session_complete_call_response_internal(accepted, false);
+}
+
+void tirtc_session_complete_call_response_without_media(bool accepted)
+{
+    tirtc_session_complete_call_response_internal(accepted, true);
 }
 
 static void tirtc_session_free_event_payload(tirtc_session_event_t *event)
@@ -2563,6 +2623,7 @@ static void tirtc_session_return_to_listen_mode(void)
     taskENTER_CRITICAL(&s_rtc_lock);
     s_session_mode = TIRTC_SESSION_MODE_LISTEN;
     s_next_connection_auto_media = true;
+    s_next_connection_defer_media = false;
     tirtc_session_sync_stats_locked();
     taskEXIT_CRITICAL(&s_rtc_lock);
 }
@@ -2667,6 +2728,7 @@ bool tirtc_session_mark_sdk_stopped(uint32_t generation)
     }
     s_active_conn = NULL;
     s_active_conn_accepted_at_us = 0U;
+    s_active_remote_audio_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
     s_closing_conn = NULL;
     s_closing_conn_was_sdk_started = false;
     s_sdk_prepare_in_progress = false;
@@ -2674,7 +2736,10 @@ bool tirtc_session_mark_sdk_stopped(uint32_t generation)
     s_pending_stop_generation = 0U;
     s_start_in_progress = false;
     s_stop_in_progress = false;
-    s_next_start_allowed_us = 0U;
+    if (s_next_start_allowed_us == 0U ||
+        (uint64_t)esp_timer_get_time() >= s_next_start_allowed_us) {
+        s_next_start_allowed_us = 0U;
+    }
     s_state_error_override = false;
     s_started_device_id[0] = '\0';
     s_started_credential_hash[0] = '\0';
@@ -2699,6 +2764,8 @@ void tirtc_session_mark_sdk_network_offline(void)
     s_state_error_override = false;
     s_next_connection_auto_media = true;
     s_active_conn_auto_media = true;
+    s_next_connection_defer_media = false;
+    s_active_conn_defer_media = false;
     s_started_device_id[0] = '\0';
     s_started_credential_hash[0] = '\0';
     s_started_secret_len = 0;
@@ -2814,6 +2881,7 @@ bool tirtc_session_try_accept_connection(tirtc_conn_t conn)
     bool accepted = false;
     bool newly_accepted = false;
     bool auto_media = true;
+    bool defer_media = false;
     bool stop_in_progress = false;
     bool sdk_started = false;
     bool start_in_progress = false;
@@ -2831,14 +2899,19 @@ bool tirtc_session_try_accept_connection(tirtc_conn_t conn)
     } else if (s_active_conn == NULL) {
         s_active_conn = conn;
         s_active_conn_accepted_at_us = esp_timer_get_time();
+        s_active_remote_audio_stream_id = s_next_remote_audio_stream_id;
         s_active_conn_auto_media = s_next_connection_auto_media;
+        s_active_conn_defer_media = s_next_connection_defer_media;
         s_remote_media_suppressed_conn = NULL;
         s_next_connection_auto_media = true;
+        s_next_connection_defer_media = false;
         auto_media = s_active_conn_auto_media;
+        defer_media = s_active_conn_defer_media;
         accepted = true;
         newly_accepted = true;
     } else if (s_active_conn == conn) {
         auto_media = s_active_conn_auto_media;
+        defer_media = s_active_conn_defer_media;
         accepted = true;
     }
     if (accepted) {
@@ -2857,10 +2930,11 @@ bool tirtc_session_try_accept_connection(tirtc_conn_t conn)
                  stop_in_progress);
     } else if (newly_accepted) {
         ESP_LOGI(TAG,
-                 "track accepted connection hconn=%p accepted_at_us=%llu auto_media=%d",
+                 "track accepted connection hconn=%p accepted_at_us=%llu auto_media=%d defer_media=%d",
                  conn,
                  (unsigned long long)s_active_conn_accepted_at_us,
-                 auto_media ? 1 : 0);
+                 auto_media ? 1 : 0,
+                 defer_media ? 1 : 0);
     }
 
     return accepted;
@@ -2870,6 +2944,13 @@ void tirtc_session_set_next_connection_auto_media(bool enabled)
 {
     taskENTER_CRITICAL(&s_rtc_lock);
     s_next_connection_auto_media = enabled;
+    taskEXIT_CRITICAL(&s_rtc_lock);
+}
+
+void tirtc_session_set_next_connection_defer_media(bool enabled)
+{
+    taskENTER_CRITICAL(&s_rtc_lock);
+    s_next_connection_defer_media = enabled;
     taskEXIT_CRITICAL(&s_rtc_lock);
 }
 
@@ -2883,6 +2964,18 @@ bool tirtc_session_connection_auto_media_enabled(tirtc_conn_t conn)
     }
     taskEXIT_CRITICAL(&s_rtc_lock);
     return enabled;
+}
+
+bool tirtc_session_connection_media_deferred(tirtc_conn_t conn)
+{
+    bool deferred = false;
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    if (conn != NULL && conn == s_active_conn) {
+        deferred = s_active_conn_defer_media;
+    }
+    taskEXIT_CRITICAL(&s_rtc_lock);
+    return deferred;
 }
 
 esp_err_t tirtc_session_track_external_connection(tirtc_conn_t conn, bool auto_media)
@@ -2983,7 +3076,9 @@ static bool tirtc_session_begin_connection_shutdown(tirtc_conn_t hconn,
     if (hconn != NULL && hconn == s_active_conn) {
         s_active_conn = NULL;
         s_active_conn_accepted_at_us = 0U;
+        s_active_remote_audio_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
         s_active_conn_auto_media = true;
+        s_active_conn_defer_media = false;
         s_closing_conn = hconn;
         s_closing_conn_was_sdk_started = sdk_started;
         s_local_video_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
@@ -3591,6 +3686,35 @@ static esp_err_t tirtc_session_copy_payload(const void *data, size_t data_len, u
     return ESP_OK;
 }
 
+static void tirtc_session_normalize_service_endpoint(tirtc_session_config_t *config)
+{
+    const char *sdk_version = TiRtcGetVersion();
+
+    if (config == NULL || strncmp(config->service_endpoint, "https://", 8) != 0) {
+        return;
+    }
+    if (sdk_version == NULL ||
+        (strcmp(sdk_version, "v2.2.0") != 0 && strcmp(sdk_version, "2.2.0") != 0)) {
+        return;
+    }
+
+    char compatible_endpoint[TIRTC_SESSION_ENDPOINT_MAX_LEN] = {0};
+    int written = snprintf(compatible_endpoint,
+                           sizeof(compatible_endpoint),
+                           "http://%s",
+                           config->service_endpoint + 8);
+    if (written <= 0 || written >= (int)sizeof(compatible_endpoint)) {
+        ESP_LOGW(TAG, "rtc sdk v2.2.0 endpoint compatibility conversion failed");
+        return;
+    }
+
+    ESP_LOGW(TAG,
+             "rtc sdk %s does not support HTTPS service endpoints; use %s",
+             sdk_version,
+             compatible_endpoint);
+    strlcpy(config->service_endpoint, compatible_endpoint, sizeof(config->service_endpoint));
+}
+
 static esp_err_t tirtc_session_prepare_sdk_with_lock(void)
 {
     int option_ret = 0;
@@ -3672,6 +3796,10 @@ static esp_err_t tirtc_session_start_sdk_from_worker(void)
     char credential_material[TIRTC_SESSION_DEVICE_LICENSE_MAX_LEN] = {0};
     bool already_started = false;
     bool can_start = false;
+    bool identity_ready = false;
+    bool start_backoff_active = false;
+    bool retry_timer_pending = false;
+    uint64_t retry_remaining_us = 0U;
     int option_ret = 0;
     int start_ret = 0;
     uint32_t sys_started_cb_before = 0;
@@ -3704,12 +3832,17 @@ static esp_err_t tirtc_session_start_sdk_from_worker(void)
     }
     strlcpy(client_id, config.client_id, sizeof(client_id));
 
+    uint64_t now_us = esp_timer_get_time();
     taskENTER_CRITICAL(&s_rtc_lock);
-    already_started = s_network_connected && s_sdk_initialized && s_sdk_started &&
+    identity_ready = s_identity_ready;
+    start_backoff_active = tirtc_session_start_backoff_active_locked(now_us,
+                                                                     &retry_remaining_us,
+                                                                     &retry_timer_pending);
+    already_started = identity_ready && s_network_connected && s_sdk_initialized && s_sdk_started &&
                       !s_start_in_progress && !s_stop_in_progress;
-    can_start = s_network_connected && s_sdk_initialized && !s_sdk_started &&
-                !s_sdk_prepare_in_progress && !s_start_in_progress && !s_stop_in_progress &&
-                s_active_conn == NULL && s_closing_conn == NULL;
+    can_start = identity_ready && s_network_connected && s_sdk_initialized && !s_sdk_started &&
+                 !s_sdk_prepare_in_progress && !s_start_in_progress && !s_stop_in_progress &&
+                 s_active_conn == NULL && s_closing_conn == NULL && !start_backoff_active;
     if (can_start) {
         s_start_in_progress = true;
         tirtc_session_sync_stats_locked();
@@ -3720,6 +3853,16 @@ static esp_err_t tirtc_session_start_sdk_from_worker(void)
         return ESP_OK;
     }
     if (!can_start) {
+        if (!identity_ready) {
+            tirtc_session_note_event("identity not ready");
+            ESP_LOGD(TAG, "rtc listen start waits for verified device identity");
+        } else if (start_backoff_active) {
+            tirtc_session_note_event("start backoff");
+            tirtc_session_ensure_start_backoff_timer(retry_remaining_us, retry_timer_pending);
+            ESP_LOGD(TAG,
+                     "rtc listen start event ignored during backoff: retry_in_ms=%llu",
+                     (unsigned long long)((retry_remaining_us + 999ULL) / 1000ULL));
+        }
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -3747,12 +3890,11 @@ static esp_err_t tirtc_session_start_sdk_from_worker(void)
     }
 
     ESP_LOGI(TAG,
-             "rtc listen start stage: TiRtcStart begin endpoint=%s start_arg=device_id device_id=%s client_id=%s secret_len=%u credential_hash=%.16s",
+             "rtc listen start stage: TiRtcStart begin endpoint=%s start_arg=device_id device_id=%s client_id=%s secret_len=%u",
              config.service_endpoint,
              device_id,
              client_id,
-             (unsigned)strlen(secret_key),
-             credential_hash);
+             (unsigned)strlen(secret_key));
     option_ret = TiRtcSetOption(TIRTC_OPT_DEVICE_SECRET_KEY,
                                 secret_key,
                                 (uint32_t)strlen(secret_key) + 1U);
@@ -3810,66 +3952,35 @@ static esp_err_t tirtc_session_start_sdk_from_worker(void)
              (unsigned long)sys_started_cb_before,
              (unsigned long)sys_started_cb_after);
 
-    if (start_ret == TIRTC_SESSION_SERVICE_CODE_CLIENT_ID_CONFLICT &&
-        strcmp(client_id, device_id) != 0) {
-        char legacy_client_id[TIRTC_SESSION_CLIENT_ID_MAX_LEN] = {0};
-
-        strlcpy(legacy_client_id, device_id, sizeof(legacy_client_id));
-        ESP_LOGW(TAG,
-                 "rtc listen start client_id conflict: physical_client_id=%s device_id=%s; retry legacy client_id=device_id once",
-                 client_id,
-                 device_id);
-        option_ret = TiRtcSetOption(TIRTC_OPT_CLIENT_ID,
-                                    legacy_client_id,
-                                    (uint32_t)strlen(legacy_client_id) + 1U);
-        if (option_ret == 0) {
-            ESP_LOGI(TAG,
-                     "rtc listen start option set: legacy_client_id_len=%u",
-                     (unsigned)strlen(legacy_client_id));
-
-            taskENTER_CRITICAL(&s_rtc_lock);
-            sys_started_cb_before = s_sys_started_callback_count;
-            taskEXIT_CRITICAL(&s_rtc_lock);
-
-            tirtc_session_log_start_resources("before-TiRtcStart-legacy");
-            start_begin_us = esp_timer_get_time();
-            start_ret = TiRtcStart(device_id, &s_tirtc_callbacks);
-            start_elapsed_ms = (esp_timer_get_time() - start_begin_us) / 1000;
-            tirtc_session_log_start_resources("after-TiRtcStart-legacy");
-
-            taskENTER_CRITICAL(&s_rtc_lock);
-            sys_started_cb_after = s_sys_started_callback_count;
-            taskEXIT_CRITICAL(&s_rtc_lock);
-
-            ESP_LOGI(TAG,
-                     "rtc listen start legacy retry returned ret=%d elapsed_ms=%lld sys_started_cb=%d cb_before=%lu cb_after=%lu",
-                     start_ret,
-                     (long long)start_elapsed_ms,
-                     sys_started_cb_after != sys_started_cb_before ? 1 : 0,
-                     (unsigned long)sys_started_cb_before,
-                     (unsigned long)sys_started_cb_after);
-            if (start_ret == 0) {
-                strlcpy(client_id, legacy_client_id, sizeof(client_id));
-            }
-        } else {
-            ESP_LOGW(TAG,
-                     "TiRtcSetOption(CLIENT_ID) legacy retry failed: %s (%d)",
-                     TiRtcGetErrorStr(option_ret),
-                     option_ret);
-        }
-    }
-
-    tirtc_session_give_sdk_api_lock();
-
     if (start_ret != 0) {
+        /*
+         * 40305 means this device_id belongs to another client_id. Retry the
+         * same stable physical client_id after backoff; never replace it with
+         * device_id because one physical client_id may serve successive IDs.
+         */
         uint64_t retry_delay_us = start_ret == TIRTC_SESSION_SERVICE_CODE_CLIENT_ID_CONFLICT ?
                                   TIRTC_SESSION_CLIENT_ID_CONFLICT_RETRY_DELAY_US :
                                   TIRTC_SESSION_START_RETRY_DELAY_US;
+
+        /*
+         * Keep the next attempt aligned with the official example lifecycle:
+         * a failed TiRtcStart() must not leave the SDK in an initialized but
+         * non-started half-state.  Retry from TiRtcInit() after the backoff.
+         */
+        TiRtcUninit();
+        tirtc_session_give_sdk_api_lock();
+
         tirtc_session_clear_start_in_progress();
         tirtc_session_set_last_error(start_ret);
         tirtc_session_note_event("start failed");
         taskENTER_CRITICAL(&s_rtc_lock);
+        s_sdk_initialized = false;
+        s_sdk_started = false;
+        s_sdk_prepare_in_progress = false;
+        s_stop_in_progress = false;
+        s_sdk_stop_notified = true;
         s_next_start_allowed_us = esp_timer_get_time() + retry_delay_us;
+        tirtc_session_sync_stats_locked();
         taskEXIT_CRITICAL(&s_rtc_lock);
         ESP_LOGE(TAG,
                  "TiRtcStart failed: %s (%d) device_id=%s client_id=%s retry_in_ms=%llu",
@@ -3880,8 +3991,13 @@ static esp_err_t tirtc_session_start_sdk_from_worker(void)
                  (unsigned long long)(retry_delay_us / 1000ULL));
         tirtc_session_update_state(TIRTC_SESSION_STATE_ERROR);
         tirtc_session_notify_start_error(start_ret, device_id, client_id);
+        if (!tirtc_session_schedule_deferred_start_after_delay(retry_delay_us, "rtc start retry")) {
+            ESP_LOGW(TAG, "rtc listen start retry schedule failed");
+        }
         return ESP_FAIL;
     }
+
+    tirtc_session_give_sdk_api_lock();
 
     taskENTER_CRITICAL(&s_rtc_lock);
     strlcpy(s_started_device_id, device_id, sizeof(s_started_device_id));
@@ -4025,9 +4141,16 @@ esp_err_t tirtc_session_unsubscribe_audio(tirtc_conn_t conn, uint8_t stream_id)
 
 static esp_err_t tirtc_session_request_remote_audio(tirtc_conn_t conn)
 {
+    uint8_t stream_id = TIRTC_SESSION_REMOTE_AUDIO_STREAM_ID;
+
     if (!tirtc_session_is_connection_usable(conn)) {
         return ESP_ERR_INVALID_STATE;
     }
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    stream_id = s_active_remote_audio_stream_id != TIRTC_SESSION_INVALID_STREAM_ID ?
+                s_active_remote_audio_stream_id : s_next_remote_audio_stream_id;
+    taskEXIT_CRITICAL(&s_rtc_lock);
 
     int ret = TIRTC_E_BUSY;
     if (tirtc_session_take_sdk_api_lock(TIRTC_SESSION_SDK_API_LOCK_WAIT_TICKS)) {
@@ -4035,7 +4158,7 @@ static esp_err_t tirtc_session_request_remote_audio(tirtc_conn_t conn)
             tirtc_session_give_sdk_api_lock();
             return ESP_ERR_INVALID_STATE;
         }
-        ret = TiRtcSubscribeAudio(conn, TIRTC_SESSION_REMOTE_AUDIO_STREAM_ID);
+        ret = TiRtcSubscribeAudio(conn, stream_id);
         tirtc_session_give_sdk_api_lock();
     }
     if (ret < 0) {
@@ -4056,15 +4179,17 @@ static esp_err_t tirtc_session_request_remote_audio(tirtc_conn_t conn)
     esp_err_t cmd_ret = tirtc_session_send_media_toggle_request(TIRTC_SESSION_CMD_REQ_AUDIO, true);
     if (cmd_ret != ESP_OK) {
         ESP_LOGW(TAG, "remote audio request command failed: %s", esp_err_to_name(cmd_ret));
+        (void)tirtc_session_unsubscribe_audio(conn, stream_id);
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "remote audio requested: stream=%u", (unsigned)TIRTC_SESSION_REMOTE_AUDIO_STREAM_ID);
+    ESP_LOGI(TAG, "remote audio requested: stream=%u", (unsigned)stream_id);
 
     taskENTER_CRITICAL(&s_rtc_lock);
     if (conn == s_active_conn && s_sdk_started && !s_start_in_progress && !s_stop_in_progress &&
         s_closing_conn == NULL) {
         s_remote_audio_requested = true;
+        s_remote_audio_requested_stream_id = stream_id;
     }
     taskEXIT_CRITICAL(&s_rtc_lock);
 
@@ -4175,6 +4300,7 @@ static void tirtc_session_release_remote_media(void)
     tirtc_conn_t conn = NULL;
     bool release_video = false;
     bool release_audio = false;
+    uint8_t audio_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
 
     taskENTER_CRITICAL(&s_rtc_lock);
     if (s_active_conn != NULL && s_sdk_started && !s_start_in_progress && !s_stop_in_progress &&
@@ -4182,9 +4308,11 @@ static void tirtc_session_release_remote_media(void)
         conn = s_active_conn;
         release_video = s_remote_video_requested;
         release_audio = s_remote_audio_requested;
+        audio_stream_id = s_remote_audio_requested_stream_id;
     }
     s_remote_video_requested = false;
     s_remote_audio_requested = false;
+    s_remote_audio_requested_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
     taskEXIT_CRITICAL(&s_rtc_lock);
 
     if (conn == NULL) {
@@ -4201,12 +4329,14 @@ static void tirtc_session_release_remote_media(void)
             ESP_LOGW(TAG, "release remote video failed: %s", TiRtcGetErrorStr(ret));
         }
     }
-    if (release_audio) {
-        int ret = TiRtcUnsubscribeAudio(conn, TIRTC_SESSION_REMOTE_AUDIO_STREAM_ID);
+    if (release_audio && audio_stream_id != TIRTC_SESSION_INVALID_STREAM_ID) {
+        int ret = TiRtcUnsubscribeAudio(conn, audio_stream_id);
         if (ret < 0) {
             tirtc_session_set_last_error(ret);
             ESP_LOGW(TAG, "release remote audio failed: %s", TiRtcGetErrorStr(ret));
         }
+    } else if (release_audio) {
+        ESP_LOGW(TAG, "release remote audio skipped: requested stream is invalid");
     }
     if (release_video || release_audio) {
         tirtc_session_give_sdk_api_lock();
@@ -5137,7 +5267,10 @@ static void tirtc_session_on_message(tirtc_conn_t hconn, const TIRTCFRAMEINFO *f
 static void tirtc_session_on_command(tirtc_conn_t hconn, uint32_t cmdw, const void *data, uint32_t len)
 {
     uint16_t cmd = (uint16_t)(cmdw & ~TIRTC_SESSION_CMD_RESP_BIT);
-    bool control_cmd = cmd == TIRTC_SESSION_CMD_CALL || cmd == TIRTC_SESSION_CMD_HANGUP;
+    bool control_cmd = cmd == TIRTC_SESSION_CMD_CALL ||
+                       cmd == TIRTC_SESSION_CMD_HANGUP ||
+                       cmd == TIRTC_SESSION_CMD_DEVICE_CALL_CONNECTED ||
+                       cmd == TIRTC_SESSION_CMD_DEVICE_CALL_HANGUP;
 
     ESP_LOGI(TAG,
              "rtc command callback: hconn=%p cmd=0x%04x resp=%d len=%lu",
@@ -5463,6 +5596,8 @@ esp_err_t tirtc_session_use_builtin_media(void)
      */
     s_next_connection_auto_media = true;
     s_active_conn_auto_media = true;
+    s_next_connection_defer_media = false;
+    s_active_conn_defer_media = false;
     tirtc_session_sync_stats_locked();
     taskEXIT_CRITICAL(&s_rtc_lock);
 
@@ -5717,9 +5852,14 @@ static void tirtc_session_worker_task(void *ctx)
 
 esp_err_t tirtc_session_configure(const tirtc_session_config_t *config)
 {
+    tirtc_session_config_t normalized_config;
+
     if (config == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    normalized_config = *config;
+    tirtc_session_normalize_service_endpoint(&normalized_config);
 
     if (tirtc_connect_is_connecting()) {
         return ESP_ERR_INVALID_STATE;
@@ -5731,14 +5871,14 @@ esp_err_t tirtc_session_configure(const tirtc_session_config_t *config)
         taskEXIT_CRITICAL(&s_rtc_lock);
         return ESP_ERR_INVALID_STATE;
     }
-    if (s_sdk_initialized && strcmp(s_config.service_endpoint, config->service_endpoint) != 0) {
+    if (s_sdk_initialized && strcmp(s_config.service_endpoint, normalized_config.service_endpoint) != 0) {
         taskEXIT_CRITICAL(&s_rtc_lock);
         ESP_LOGW(TAG, "rtc endpoint changed after SDK init; reboot or explicit full reset is required");
         return ESP_ERR_INVALID_STATE;
     }
 
-    s_config = *config;
-    s_session_mode = config->default_session_mode;
+    s_config = normalized_config;
+    s_session_mode = normalized_config.default_session_mode;
     s_next_start_allowed_us = 0U;
     s_state_error_override = false;
     tirtc_session_sync_stats_locked();
@@ -5880,12 +6020,48 @@ esp_err_t tirtc_session_init(const tirtc_session_config_t *config)
     return ESP_OK;
 }
 
+const char *tirtc_session_error_string(int error)
+{
+    const char *message = TiRtcGetErrorStr(error);
+
+    return message != NULL ? message : "unknown TiRTC error";
+}
+
+void tirtc_session_set_identity_ready(bool ready)
+{
+    bool changed = false;
+    bool reset_required = false;
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    changed = s_identity_ready != ready;
+    s_identity_ready = ready;
+    if (!ready) {
+        reset_required = s_initialized &&
+                         (s_sdk_initialized || s_sdk_started || s_sdk_prepare_in_progress ||
+                          s_start_in_progress || s_stop_in_progress);
+    }
+    taskEXIT_CRITICAL(&s_rtc_lock);
+
+    if (!changed) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "rtc identity gate changed: ready=%d", ready ? 1 : 0);
+    if (!ready && reset_required && !tirtc_session_schedule_deferred_full_reset()) {
+        ESP_LOGW(TAG, "rtc identity gate could not schedule sdk reset");
+    }
+}
+
 esp_err_t tirtc_session_prepare_sdk(void)
 {
     bool network_connected = false;
+    bool identity_ready = false;
     bool prepare_in_progress = false;
     bool request_start = false;
+    bool start_backoff_active = false;
+    bool retry_timer_pending = false;
     uint64_t next_start_allowed_us = 0U;
+    uint64_t retry_remaining_us = 0U;
     uint64_t now_us = 0U;
     esp_err_t ret = ESP_OK;
 
@@ -5894,6 +6070,14 @@ esp_err_t tirtc_session_prepare_sdk(void)
     if (!s_config.enabled) {
         tirtc_session_note_event("rtc disabled");
         return ESP_OK;
+    }
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    identity_ready = s_identity_ready;
+    taskEXIT_CRITICAL(&s_rtc_lock);
+    if (!identity_ready) {
+        tirtc_session_note_event("identity not ready");
+        return ESP_ERR_INVALID_STATE;
     }
     if (!system_time_has_valid_time()) {
         tirtc_session_note_event("waiting time");
@@ -5909,13 +6093,32 @@ esp_err_t tirtc_session_prepare_sdk(void)
     now_us = esp_timer_get_time();
     taskENTER_CRITICAL(&s_rtc_lock);
     network_connected = s_network_connected;
+    identity_ready = s_identity_ready;
+    if (!identity_ready) {
+        taskEXIT_CRITICAL(&s_rtc_lock);
+        tirtc_session_note_event("identity not ready");
+        return ESP_ERR_INVALID_STATE;
+    }
+    start_backoff_active = !s_sdk_started &&
+                           tirtc_session_start_backoff_active_locked(now_us,
+                                                                    &retry_remaining_us,
+                                                                    &retry_timer_pending);
+    if (start_backoff_active) {
+        taskEXIT_CRITICAL(&s_rtc_lock);
+        tirtc_session_note_event("start backoff");
+        tirtc_session_ensure_start_backoff_timer(retry_remaining_us, retry_timer_pending);
+        ESP_LOGD(TAG,
+                 "rtc sdk prepare blocked by start backoff: retry_in_ms=%llu",
+                 (unsigned long long)((retry_remaining_us + 999ULL) / 1000ULL));
+        return ESP_ERR_INVALID_STATE;
+    }
     if (s_sdk_initialized) {
         next_start_allowed_us = s_next_start_allowed_us;
-        if (network_connected && !s_sdk_started && !s_start_in_progress && !s_stop_in_progress &&
+        if (identity_ready && network_connected && !s_sdk_started && !s_start_in_progress && !s_stop_in_progress &&
             (next_start_allowed_us == 0U || now_us >= next_start_allowed_us)) {
             request_start = true;
         }
-        bool sdk_ready = network_connected && !s_stop_in_progress &&
+        bool sdk_ready = identity_ready && network_connected && !s_stop_in_progress &&
                          (s_sdk_started || s_start_in_progress || request_start);
         taskEXIT_CRITICAL(&s_rtc_lock);
         if (network_connected && !request_start && !sdk_ready &&
@@ -6232,6 +6435,7 @@ esp_err_t tirtc_session_connect_peer(const char *remote_device_id,
 
     s_session_mode = TIRTC_SESSION_MODE_CONNECT;
     s_next_connection_auto_media = false;
+    s_next_connection_defer_media = false;
     sdk_started = s_sdk_started;
     start_in_progress = s_start_in_progress;
     tirtc_session_sync_stats_locked();
@@ -6250,6 +6454,97 @@ esp_err_t tirtc_session_connect_peer(const char *remote_device_id,
              (unsigned)strlen(remote_device_id),
              sdk_started,
              start_in_progress);
+    return ESP_OK;
+}
+
+esp_err_t tirtc_session_connect_peer_with_token(const char *remote_device_id,
+                                                const char *connect_token)
+{
+    bool connect_in_progress = false;
+    tirtc_session_config_t config = {0};
+
+    ESP_RETURN_ON_FALSE(s_initialized, ESP_ERR_INVALID_STATE, TAG, "rtc not initialized");
+    ESP_RETURN_ON_FALSE(s_event_queue != NULL, ESP_ERR_INVALID_STATE, TAG, "rtc event queue not ready");
+    ESP_RETURN_ON_FALSE(remote_device_id != NULL && remote_device_id[0] != '\0',
+                        ESP_ERR_INVALID_ARG,
+                        TAG,
+                        "remote device id is empty");
+    ESP_RETURN_ON_FALSE(connect_token != NULL && connect_token[0] != '\0',
+                        ESP_ERR_INVALID_ARG,
+                        TAG,
+                        "connect token is empty");
+    ESP_RETURN_ON_FALSE(strlen(remote_device_id) < sizeof(s_config.remote_device_id),
+                        ESP_ERR_INVALID_SIZE,
+                        TAG,
+                        "remote device id is too long");
+    ESP_RETURN_ON_FALSE(strlen(connect_token) < TIRTC_CONNECT_TOKEN_MAX_LEN,
+                        ESP_ERR_INVALID_SIZE,
+                        TAG,
+                        "connect token is too long");
+
+    connect_in_progress = tirtc_connect_is_connecting();
+    if (connect_in_progress) {
+        ESP_LOGW(TAG, "rtc token connect rejected: active connect is already running");
+        return ESP_ERR_INVALID_STATE;
+    }
+    ESP_RETURN_ON_ERROR(tirtc_session_prepare_sdk(), TAG, "prepare rtc sdk failed");
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    if (!s_network_connected || !s_sdk_initialized || !s_sdk_started ||
+        s_sdk_prepare_in_progress || s_start_in_progress || s_stop_in_progress ||
+        s_active_conn != NULL || s_closing_conn != NULL) {
+        bool network_connected = s_network_connected;
+        bool sdk_initialized = s_sdk_initialized;
+        bool sdk_started = s_sdk_started;
+        bool sdk_prepare_in_progress = s_sdk_prepare_in_progress;
+        bool start_in_progress = s_start_in_progress;
+        bool stop_in_progress = s_stop_in_progress;
+        tirtc_conn_t active_conn = s_active_conn;
+        tirtc_conn_t closing_conn = s_closing_conn;
+        taskEXIT_CRITICAL(&s_rtc_lock);
+        ESP_LOGW(TAG,
+                 "rtc token connect rejected: net=%d init=%d started=%d prep=%d start=%d stop=%d active=%p closing=%p",
+                 network_connected ? 1 : 0,
+                 sdk_initialized ? 1 : 0,
+                 sdk_started ? 1 : 0,
+                 sdk_prepare_in_progress ? 1 : 0,
+                 start_in_progress ? 1 : 0,
+                 stop_in_progress ? 1 : 0,
+                 active_conn,
+                 closing_conn);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_config.device_id[0] != '\0' && strcmp(remote_device_id, s_config.device_id) == 0) {
+        taskEXIT_CRITICAL(&s_rtc_lock);
+        tirtc_session_note_event("self call blocked");
+        ESP_LOGW(TAG, "rtc token connect rejected: remote_id is local device_id");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    strlcpy(s_config.remote_device_id, remote_device_id, sizeof(s_config.remote_device_id));
+    s_session_mode = TIRTC_SESSION_MODE_CONNECT;
+    s_next_connection_auto_media = true;
+    s_next_connection_defer_media = false;
+    config = s_config;
+    tirtc_session_sync_stats_locked();
+    taskEXIT_CRITICAL(&s_rtc_lock);
+
+    esp_err_t ret = tirtc_connect_start_with_token(config.remote_device_id,
+                                                   connect_token,
+                                                   tirtc_session_on_peer_connect_result,
+                                                   NULL);
+    if (ret != ESP_OK) {
+        tirtc_session_return_to_listen_mode();
+        tirtc_session_set_last_error(ret);
+        tirtc_session_note_event("token connect fail");
+        return ret;
+    }
+
+    tirtc_session_note_event("token connect");
+    ESP_LOGI(TAG,
+             "rtc token peer connect task started: remote_id_len=%u token_len=%u",
+             (unsigned)strlen(config.remote_device_id),
+             (unsigned)strlen(connect_token));
     return ESP_OK;
 }
 
@@ -6281,7 +6576,9 @@ esp_err_t tirtc_session_stop(void)
 {
     tirtc_conn_t conn = NULL;
 
-    ESP_RETURN_ON_FALSE(s_initialized, ESP_ERR_INVALID_STATE, TAG, "rtc not initialized");
+    if (!s_initialized) {
+        return ESP_OK;
+    }
     if (!tirtc_session_try_get_active_conn(&conn)) {
         tirtc_session_note_event("disconnect idle");
         return ESP_OK;
@@ -6294,7 +6591,13 @@ esp_err_t tirtc_session_disconnect(void)
     tirtc_conn_t conn = NULL;
     bool was_sdk_started = false;
 
-    ESP_RETURN_ON_FALSE(s_initialized, ESP_ERR_INVALID_STATE, TAG, "rtc not initialized");
+    /*
+     * Disconnect is a lifecycle release operation. Identity reset and app
+     * teardown may legitimately reach it before the lazy RTC runtime init.
+     */
+    if (!s_initialized) {
+        return ESP_OK;
+    }
 
     if (!tirtc_session_try_get_active_conn(&conn)) {
         tirtc_session_note_event("disconnect idle");
@@ -6428,6 +6731,24 @@ esp_err_t tirtc_session_set_local_audio_send_enabled(bool enabled)
     }
     tirtc_session_note_event(enabled ? "audio send on" : "audio send off");
     tirtc_session_apply_local_media_policy();
+    return ESP_OK;
+}
+
+esp_err_t tirtc_session_set_remote_audio_stream_id(uint8_t stream_id)
+{
+    if (stream_id == TIRTC_SESSION_INVALID_STREAM_ID) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    if (stream_id == s_next_remote_audio_stream_id) {
+        taskEXIT_CRITICAL(&s_rtc_lock);
+        return ESP_OK;
+    }
+    s_next_remote_audio_stream_id = stream_id;
+    taskEXIT_CRITICAL(&s_rtc_lock);
+
+    ESP_LOGI(TAG, "next connection remote audio stream configured: stream=%u", (unsigned)stream_id);
     return ESP_OK;
 }
 

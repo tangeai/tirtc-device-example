@@ -10,6 +10,7 @@
 #include "nvs.h"
 #include "platform_nvs_async.h"
 #include "platform_storage.h"
+#include "thing_service_registry.h"
 
 static const char *TAG = "app_rtc_config";
 
@@ -223,16 +224,24 @@ static esp_err_t app_rtc_save_device_credentials(const char *device_id, const ch
     strlcpy(store.device_id, device_id, sizeof(store.device_id));
     strlcpy(store.device_secret, device_secret, sizeof(store.device_secret));
 
-    esp_err_t ret = platform_nvs_async_set_blob(APP_RTC_NVS_NAMESPACE,
-                                                APP_RTC_NVS_KEY_DEVICE_CREDENTIALS,
-                                                &store,
-                                                sizeof(store));
+    /*
+     * Binding credentials are the durable device identity. Do not report a
+     * successful bind until nvs_commit() has completed; otherwise an immediate
+     * hardware reset can restore the old/empty identity.
+     */
+    esp_err_t ret = platform_nvs_async_set_blob_and_wait(APP_RTC_NVS_NAMESPACE,
+                                                         APP_RTC_NVS_KEY_DEVICE_CREDENTIALS,
+                                                         &store,
+                                                         sizeof(store));
     if (ret == ESP_OK) {
         (void)platform_nvs_async_erase_key(APP_RTC_NVS_NAMESPACE, APP_RTC_NVS_KEY_DEVICE_ID);
         (void)platform_nvs_async_erase_key(APP_RTC_NVS_NAMESPACE, APP_RTC_NVS_KEY_DEVICE_SECRET);
-        ESP_LOGD(TAG, "rtc credentials saved: device_id_len=%u", (unsigned)strlen(device_id));
+        ESP_LOGI(TAG,
+                 "rtc credentials persisted: device_id_len=%u configured=%d",
+                 (unsigned)strlen(device_id),
+                 device_id[0] != '\0' && device_secret[0] != '\0' ? 1 : 0);
     } else {
-        ESP_LOGW(TAG, "rtc credentials save queue failed: ret=%s", esp_err_to_name(ret));
+        ESP_LOGW(TAG, "rtc credentials persist failed: ret=%s", esp_err_to_name(ret));
     }
     return ret;
 }
@@ -241,20 +250,32 @@ static void app_rtc_load_settings(void)
 {
     nvs_handle_t nvs_handle = 0;
     char env_name[8] = {0};
+    esp_err_t ret = ESP_OK;
 
     if (s_rtc_settings_loaded) {
         return;
     }
 
     app_rtc_fill_defaults(&s_rtc_settings);
-    if (platform_storage_init() != ESP_OK) {
-        s_rtc_settings_loaded = true;
+    ret = platform_storage_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "rtc settings storage init failed: %s", esp_err_to_name(ret));
         return;
     }
 
-    esp_err_t ret = nvs_open(APP_RTC_NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+    ret = nvs_open(APP_RTC_NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
     if (ret == ESP_OK) {
-        (void)app_rtc_load_device_credentials(nvs_handle, &s_rtc_settings);
+        ret = app_rtc_load_device_credentials(nvs_handle, &s_rtc_settings);
+        if (ret != ESP_OK) {
+            nvs_close(nvs_handle);
+            ESP_LOGE(TAG, "rtc credentials load failed: %s", esp_err_to_name(ret));
+            return;
+        }
+        ESP_LOGI(TAG,
+                 "rtc credentials restored from nvs: device_id_len=%u configured=%d",
+                 (unsigned)strlen(s_rtc_settings.device_id),
+                 s_rtc_settings.device_id[0] != '\0' &&
+                 s_rtc_settings.device_secret[0] != '\0' ? 1 : 0);
         (void)app_rtc_load_string(nvs_handle,
                                   APP_RTC_NVS_KEY_TOKEN_SUBJECT,
                                   s_rtc_settings.token_subject,
@@ -272,6 +293,9 @@ static void app_rtc_load_settings(void)
             s_rtc_settings.server_env = app_rtc_env_from_name(env_name);
         }
         nvs_close(nvs_handle);
+    } else if (ret != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGE(TAG, "rtc settings namespace open failed: %s", esp_err_to_name(ret));
+        return;
     }
 
     app_rtc_apply_server_profile(&s_rtc_settings);
@@ -330,20 +354,25 @@ esp_err_t app_build_rtc_transport_config(rtc_transport_config_t *config)
     memset(config, 0, sizeof(*config));
     config->enabled = APP_CONFIG_RTC_ENABLE != 0;
     config->default_session_mode = RTC_TRANSPORT_MODE_LISTEN;
-    strlcpy(config->service_endpoint, settings.access_url, sizeof(config->service_endpoint));
+    const char *service_endpoint = settings.access_url;
+    if (settings.server_env == APP_RTC_SERVER_ENV_PROD &&
+        thing_service_registry_is_discovered()) {
+        service_endpoint = thing_service_registry_tirtc_endpoint();
+    }
+    strlcpy(config->service_endpoint, service_endpoint, sizeof(config->service_endpoint));
     strlcpy(config->device_id, settings.device_id, sizeof(config->device_id));
     strlcpy(config->device_secret_key, settings.device_secret, sizeof(config->device_secret_key));
+    /*
+     * client_id identifies the physical product and must remain stable across
+     * bind/unbind cycles. The same client_id may use different device_id values
+     * over time, but a device_id must never be started with a second client_id.
+     */
     identity_ret = device_identity_get(&identity);
     if (identity_ret == ESP_OK && identity.mac[0] != '\0') {
         strlcpy(config->client_id, identity.mac, sizeof(config->client_id));
-    } else if (settings.device_id[0] != '\0') {
-        strlcpy(config->client_id, settings.device_id, sizeof(config->client_id));
-        ESP_LOGW(TAG,
-                 "rtc physical client id unavailable, falling back to device id: %s",
-                 esp_err_to_name(identity_ret));
     } else {
         ESP_LOGW(TAG,
-                 "rtc fallback client id unavailable: %s",
+                 "rtc physical client id unavailable: %s",
                  esp_err_to_name(identity_ret));
     }
     strlcpy(config->remote_device_id, APP_CONFIG_RTC_REMOTE_DEVICE_ID, sizeof(config->remote_device_id));

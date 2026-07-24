@@ -3,7 +3,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
@@ -36,6 +38,7 @@ typedef struct {
     int header_events;
     int disconnect_events;
     esp_err_t last_event_error;
+    uint32_t retry_after_sec;
 } thing_http_response_t;
 
 static bool thing_http_is_https(const char *url)
@@ -119,6 +122,13 @@ static esp_err_t thing_http_event_handler(esp_http_client_event_t *event)
         if (response->first_header_us == 0) {
             response->first_header_us = esp_timer_get_time();
         }
+        if (event->header_key != NULL && event->header_value != NULL &&
+            strcasecmp(event->header_key, "Retry-After") == 0) {
+            unsigned long retry_after = strtoul(event->header_value, NULL, 10);
+            if (retry_after > 0UL && retry_after <= 3600UL) {
+                response->retry_after_sec = (uint32_t)retry_after;
+            }
+        }
         return ESP_OK;
     case HTTP_EVENT_ON_DATA:
         if (event->data == NULL || event->data_len <= 0 || response->data == NULL) {
@@ -148,12 +158,54 @@ static esp_err_t thing_http_event_handler(esp_http_client_event_t *event)
     }
 }
 
-static esp_http_client_method_t thing_http_method_from_string(const char *method)
+static esp_err_t thing_http_method_from_string(const char *method,
+                                               esp_http_client_method_t *http_method)
 {
-    if (method != NULL && strcmp(method, "GET") == 0) {
-        return HTTP_METHOD_GET;
+    if (http_method == NULL) {
+        return ESP_ERR_INVALID_ARG;
     }
-    return HTTP_METHOD_POST;
+    if (method == NULL || strcmp(method, "POST") == 0) {
+        *http_method = HTTP_METHOD_POST;
+        return ESP_OK;
+    }
+    if (strcmp(method, "GET") == 0) {
+        *http_method = HTTP_METHOD_GET;
+        return ESP_OK;
+    }
+    if (strcmp(method, "PUT") == 0) {
+        *http_method = HTTP_METHOD_PUT;
+        return ESP_OK;
+    }
+    if (strcmp(method, "DELETE") == 0) {
+        *http_method = HTTP_METHOD_DELETE;
+        return ESP_OK;
+    }
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+static bool thing_http_method_has_json_body(esp_http_client_method_t method)
+{
+    return method == HTTP_METHOD_POST ||
+           method == HTTP_METHOD_PUT ||
+           method == HTTP_METHOD_DELETE;
+}
+
+bool thing_http_error_is_recoverable(esp_err_t ret)
+{
+    switch (ret) {
+    case ESP_ERR_TIMEOUT:
+    case ESP_ERR_HTTP_CONNECT:
+    case ESP_ERR_HTTP_WRITE_DATA:
+    case ESP_ERR_HTTP_FETCH_HEADER:
+    case ESP_ERR_HTTP_CONNECTING:
+    case ESP_ERR_HTTP_EAGAIN:
+    case ESP_ERR_HTTP_CONNECTION_CLOSED:
+    case ESP_ERR_HTTP_READ_TIMEOUT:
+    case ESP_ERR_HTTP_INCOMPLETE_DATA:
+        return true;
+    default:
+        return false;
+    }
 }
 
 static bool thing_http_should_retry(const thing_http_request_t *request,
@@ -162,6 +214,17 @@ static bool thing_http_should_retry(const thing_http_request_t *request,
                                     const thing_http_response_t *response)
 {
     if (request == NULL || request->retry_count == 0 || ret == ESP_OK || response == NULL) {
+        return false;
+    }
+
+    /*
+     * The transport layer cannot prove that a mutating request is idempotent.
+     * In particular, signed Device Report/Token requests carry a one-time
+     * nonce; replaying the same headers can turn a lost response into a nonce
+     * replay error.  Their service owner retries the whole operation instead,
+     * which regenerates the signature material.
+     */
+    if (request->method == NULL || strcmp(request->method, "GET") != 0) {
         return false;
     }
     return status == 0 &&
@@ -174,6 +237,19 @@ esp_err_t thing_http_request_json(const thing_http_request_t *request,
                                   char *response_buf,
                                   size_t response_buf_size,
                                   int *status_code)
+{
+    return thing_http_request_json_ex(request,
+                                      response_buf,
+                                      response_buf_size,
+                                      status_code,
+                                      NULL);
+}
+
+esp_err_t thing_http_request_json_ex(const thing_http_request_t *request,
+                                     char *response_buf,
+                                     size_t response_buf_size,
+                                     int *status_code,
+                                     thing_http_response_info_t *response_info)
 {
     if (request == NULL || request->url == NULL || request->url[0] == '\0' ||
         response_buf == NULL || response_buf_size < 2 ||
@@ -188,6 +264,15 @@ esp_err_t thing_http_request_json(const thing_http_request_t *request,
     }
     esp_err_t ret = ESP_OK;
     int status = 0;
+    esp_http_client_method_t http_method = HTTP_METHOD_POST;
+
+    ret = thing_http_method_from_string(request->method, &http_method);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "unsupported HTTP method: %s",
+                 request->method != NULL ? request->method : "(null)");
+        return ret;
+    }
 
     for (uint8_t attempt = 1; attempt <= attempts; ++attempt) {
         thing_http_response_t response = {
@@ -199,10 +284,13 @@ esp_err_t thing_http_request_json(const thing_http_request_t *request,
         if (status_code != NULL) {
             *status_code = 0;
         }
+        if (response_info != NULL) {
+            memset(response_info, 0, sizeof(*response_info));
+        }
 
         esp_http_client_config_t config = {
             .url = request->url,
-            .method = thing_http_method_from_string(request->method),
+            .method = http_method,
             .event_handler = thing_http_event_handler,
             .user_data = &response,
             .timeout_ms = (int)timeout_ms,
@@ -214,7 +302,7 @@ esp_err_t thing_http_request_json(const thing_http_request_t *request,
         ESP_LOGD(TAG,
                  "request begin: trace=%s method=%s attempt=%u/%u timeout=%ums internal_free=%u largest=%u",
                  request->trace_name != NULL ? request->trace_name : "-",
-                 config.method == HTTP_METHOD_GET ? "GET" : "POST",
+                 request->method != NULL ? request->method : "POST",
                  (unsigned)attempt,
                  (unsigned)attempts,
                  (unsigned)timeout_ms,
@@ -234,7 +322,7 @@ esp_err_t thing_http_request_json(const thing_http_request_t *request,
                 esp_http_client_set_header(client, header->name, header->value);
             }
         }
-        if (config.method == HTTP_METHOD_POST) {
+        if (thing_http_method_has_json_body(config.method)) {
             const char *body = request->body != NULL ? request->body : "";
             esp_http_client_set_header(client, "Content-Type", "application/json");
             esp_http_client_set_post_field(client, body, (int)strlen(body));
@@ -244,6 +332,9 @@ esp_err_t thing_http_request_json(const thing_http_request_t *request,
         status = esp_http_client_get_status_code(client);
         if (ret == ESP_OK && status_code != NULL) {
             *status_code = status;
+        }
+        if (response_info != NULL) {
+            response_info->retry_after_sec = response.retry_after_sec;
         }
         int64_t elapsed_ms = thing_http_elapsed_ms(&response);
         ESP_LOGD(TAG,

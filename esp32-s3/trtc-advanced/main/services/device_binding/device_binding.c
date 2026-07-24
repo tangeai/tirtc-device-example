@@ -8,7 +8,6 @@
 #include "device_identity.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
-#include "esp_http_client.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
@@ -17,14 +16,11 @@
 #include "nvs.h"
 #include "platform_nvs_async.h"
 #include "platform_task_reaper.h"
+#include "thing_http_client.h"
 
 static const char *TAG = "device_binding";
 
-/*
- * The binding worker may fall back to HTTP polling after MQTT is skipped for
- * low internal RAM. That path nests esp_http_client/TLS/cJSON plus the binding
- * auth structs. Keep the stack in PSRAM, but size it for the worst case.
- */
+/* The worker owns the HTTP report and temporary MQTT binding lifecycle. */
 #define DEVICE_BINDING_TASK_STACK_SIZE (16 * 1024)
 #define DEVICE_BINDING_TASK_PRIORITY   2
 #define DEVICE_BINDING_TASK_CAPS       (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
@@ -32,16 +28,12 @@ static const char *TAG = "device_binding";
 #define DEVICE_BINDING_PENDING_NVS_NAMESPACE "bind"
 #define DEVICE_BINDING_PENDING_NVS_KEY       "pending"
 #define DEVICE_BINDING_PENDING_MAGIC         0x42444E50U
-#define DEVICE_BINDING_PENDING_VERSION       1U
+#define DEVICE_BINDING_PENDING_VERSION       2U
 #define DEVICE_BINDING_REPORT_RETRY_MAX_MS   300000U
 #define DEVICE_BINDING_WEAK_NET_RETRY_MAX_MS 60000U
 #define DEVICE_BINDING_WEAK_NET_RETRY_MS     5000U
 #define DEVICE_BINDING_WAIT_POLL_MS          500U
 #define DEVICE_BINDING_REASON_MAX_LEN        32
-#define DEVICE_BINDING_MQTT_MIN_INTERNAL_FREE    (32U * 1024U)
-#define DEVICE_BINDING_MQTT_MIN_INTERNAL_LARGEST (16U * 1024U)
-#define DEVICE_BINDING_HTTP_POLL_MS              5000U
-#define DEVICE_BINDING_HTTP_POLL_MAX_BACKOFF_MS  10000U
 
 typedef struct {
     uint32_t magic;
@@ -49,7 +41,6 @@ typedef struct {
     uint16_t reserved;
     int64_t expires_at_unix;
     char mac[DEVICE_BINDING_MAC_MAX_LEN];
-    char chip_uid[DEVICE_BINDING_CHIP_UID_MAX_LEN];
     char code[DEVICE_BINDING_HTTP_CODE_MAX_LEN];
     char temp_client_id[DEVICE_BINDING_HTTP_CLIENT_ID_MAX_LEN];
     char temp_token[DEVICE_BINDING_HTTP_TOKEN_MAX_LEN];
@@ -189,12 +180,10 @@ static bool device_binding_pending_store_valid(const device_binding_pending_stor
            store->magic == DEVICE_BINDING_PENDING_MAGIC &&
            store->version == DEVICE_BINDING_PENDING_VERSION &&
            store->mac[sizeof(store->mac) - 1] == '\0' &&
-           store->chip_uid[sizeof(store->chip_uid) - 1] == '\0' &&
            store->code[sizeof(store->code) - 1] == '\0' &&
            store->temp_client_id[sizeof(store->temp_client_id) - 1] == '\0' &&
            store->temp_token[sizeof(store->temp_token) - 1] == '\0' &&
            strcmp(store->mac, identity->mac) == 0 &&
-           strcmp(store->chip_uid, identity->chip_uid) == 0 &&
            store->code[0] != '\0' &&
            store->temp_client_id[0] != '\0' &&
            store->temp_token[0] != '\0' &&
@@ -207,9 +196,16 @@ static esp_err_t device_binding_clear_pending_session(void)
                                         DEVICE_BINDING_PENDING_NVS_KEY);
 }
 
+static esp_err_t device_binding_clear_pending_session_and_wait(void)
+{
+    return platform_nvs_async_erase_key_and_wait(DEVICE_BINDING_PENDING_NVS_NAMESPACE,
+                                                 DEVICE_BINDING_PENDING_NVS_KEY);
+}
+
 static esp_err_t device_binding_save_pending_session(const device_binding_identity_t *identity,
                                                      const device_binding_http_report_result_t *report,
-                                                     uint32_t wait_timeout_ms)
+                                                     uint32_t wait_timeout_ms,
+                                                     bool wait_for_commit)
 {
     time_t now = 0;
     device_binding_pending_store_t store = {
@@ -227,18 +223,23 @@ static esp_err_t device_binding_save_pending_session(const device_binding_identi
     time(&now);
     store.expires_at_unix = (int64_t)now + (int64_t)((wait_timeout_ms + 999U) / 1000U);
     strlcpy(store.mac, identity->mac, sizeof(store.mac));
-    strlcpy(store.chip_uid, identity->chip_uid, sizeof(store.chip_uid));
     strlcpy(store.code, report->code, sizeof(store.code));
     strlcpy(store.temp_client_id, report->temp_client_id, sizeof(store.temp_client_id));
     strlcpy(store.temp_token, report->temp_token, sizeof(store.temp_token));
 
-    esp_err_t ret = platform_nvs_async_set_blob(DEVICE_BINDING_PENDING_NVS_NAMESPACE,
+    esp_err_t ret = wait_for_commit ?
+                    platform_nvs_async_set_blob_and_wait(DEVICE_BINDING_PENDING_NVS_NAMESPACE,
+                                                         DEVICE_BINDING_PENDING_NVS_KEY,
+                                                         &store,
+                                                         sizeof(store)) :
+                    platform_nvs_async_set_blob(DEVICE_BINDING_PENDING_NVS_NAMESPACE,
                                                 DEVICE_BINDING_PENDING_NVS_KEY,
                                                 &store,
                                                 sizeof(store));
     if (ret == ESP_OK) {
         ESP_LOGI(TAG,
-                 "binding pending session save queued: code=%s temp_client=%s expires_in=%us",
+                 "binding pending session %s: code=%s temp_client=%s expires_in=%us",
+                 wait_for_commit ? "persisted" : "save queued",
                  store.code,
                  store.temp_client_id,
                  (unsigned)((wait_timeout_ms + 999U) / 1000U));
@@ -297,7 +298,12 @@ static esp_err_t device_binding_apply_credentials(const char *device_id,
 
     esp_err_t ret = s_binding.config.save_credentials(device_id, device_key, s_binding.config.ctx);
     if (ret == ESP_OK) {
-        (void)device_binding_clear_pending_session();
+        esp_err_t clear_ret = device_binding_clear_pending_session_and_wait();
+        if (clear_ret != ESP_OK) {
+            ESP_LOGW(TAG,
+                     "binding pending session clear failed after credential commit: %s",
+                     esp_err_to_name(clear_ret));
+        }
         device_binding_set_code("");
         device_binding_set_device_id(device_id);
         device_binding_set_state(DEVICE_BINDING_STATE_BOUND, ESP_OK, "device bound");
@@ -322,140 +328,6 @@ static bool device_binding_load_existing_credentials(device_binding_credentials_
         return false;
     }
     return true;
-}
-
-static bool device_binding_report_error_recoverable(esp_err_t ret)
-{
-    switch (ret) {
-    case ESP_ERR_TIMEOUT:
-    case ESP_ERR_HTTP_CONNECT:
-    case ESP_ERR_HTTP_WRITE_DATA:
-    case ESP_ERR_HTTP_FETCH_HEADER:
-    case ESP_ERR_HTTP_CONNECTING:
-    case ESP_ERR_HTTP_EAGAIN:
-    case ESP_ERR_HTTP_CONNECTION_CLOSED:
-    case ESP_ERR_HTTP_READ_TIMEOUT:
-    case ESP_ERR_HTTP_INCOMPLETE_DATA:
-        return true;
-    default:
-        return false;
-    }
-}
-
-static bool device_binding_can_start_mqtt_wait(void)
-{
-    size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    size_t internal_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-
-    if (internal_free >= DEVICE_BINDING_MQTT_MIN_INTERNAL_FREE &&
-        internal_largest >= DEVICE_BINDING_MQTT_MIN_INTERNAL_LARGEST) {
-        return true;
-    }
-
-    /*
-     * ESP-MQTT creates its own FreeRTOS task and stack in internal RAM.  When
-     * TiRTC/AI/VoIP have fragmented the internal heap, starting that task at
-     * the six-digit binding screen is riskier than polling the report endpoint.
-     * Keep binding functional by falling back to HTTP polling instead of trying
-     * to force another internal task into a small contiguous block.
-     */
-    ESP_LOGW(TAG,
-             "binding mqtt wait skipped: internal_free=%u largest=%u need=%u/%u fallback=http-poll",
-             (unsigned)internal_free,
-             (unsigned)internal_largest,
-             (unsigned)DEVICE_BINDING_MQTT_MIN_INTERNAL_FREE,
-             (unsigned)DEVICE_BINDING_MQTT_MIN_INTERNAL_LARGEST);
-    return false;
-}
-
-static uint32_t device_binding_next_http_poll_delay_ms(const device_binding_http_report_result_t *report,
-                                                       uint32_t remaining_ms)
-{
-    uint32_t delay_ms = DEVICE_BINDING_HTTP_POLL_MS;
-
-    if (report != NULL &&
-        report->type == DEVICE_BINDING_HTTP_REPORT_RETRY_AFTER &&
-        report->retry_after_sec != 0U) {
-        uint32_t retry_ms = report->retry_after_sec * 1000U;
-        delay_ms = retry_ms < DEVICE_BINDING_HTTP_POLL_MAX_BACKOFF_MS ?
-                   retry_ms :
-                   DEVICE_BINDING_HTTP_POLL_MAX_BACKOFF_MS;
-    }
-    return delay_ms < remaining_ms ? delay_ms : remaining_ms;
-}
-
-static esp_err_t device_binding_wait_auth_grant_by_http(const device_binding_identity_t *identity,
-                                                        const device_binding_credentials_t *existing,
-                                                        bool has_existing_credentials,
-                                                        uint32_t wait_timeout_ms,
-                                                        const device_binding_cancel_ctx_t *cancel_ctx,
-                                                        binding_mqtt_auth_grant_t *grant)
-{
-    uint32_t elapsed_ms = 0;
-    uint32_t generation = cancel_ctx != NULL ? cancel_ctx->generation : 0U;
-    device_binding_http_report_result_t poll_report = {0};
-
-    if (identity == NULL || grant == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    memset(grant, 0, sizeof(*grant));
-    ESP_LOGI(TAG, "binding auth grant wait by HTTP poll");
-
-    while (elapsed_ms < wait_timeout_ms) {
-        uint32_t remaining_ms = wait_timeout_ms - elapsed_ms;
-        uint32_t delay_ms = device_binding_next_http_poll_delay_ms(&poll_report, remaining_ms);
-
-        esp_err_t ret = device_binding_delay_or_cancel(generation, delay_ms);
-        if (ret != ESP_OK) {
-            return ret;
-        }
-        elapsed_ms += delay_ms;
-
-        memset(&poll_report, 0, sizeof(poll_report));
-        ret = device_binding_http_report(s_binding.config.api_base,
-                                         identity->mac,
-                                         identity->chip_uid,
-                                         has_existing_credentials && existing != NULL ? existing->device_id : NULL,
-                                         has_existing_credentials && existing != NULL ? existing->device_key : NULL,
-                                         &poll_report);
-        if (device_binding_cancelled(generation)) {
-            return ESP_ERR_INVALID_STATE;
-        }
-        if (ret != ESP_OK) {
-            if (device_binding_report_error_recoverable(ret)) {
-                ESP_LOGW(TAG,
-                         "binding HTTP poll retry: ret=%s elapsed_ms=%u",
-                         esp_err_to_name(ret),
-                         (unsigned)elapsed_ms);
-                continue;
-            }
-            return ret;
-        }
-        if (poll_report.type == DEVICE_BINDING_HTTP_REPORT_BOUND) {
-            grant->has_credentials = true;
-            strlcpy(grant->device_id, poll_report.device_id, sizeof(grant->device_id));
-            strlcpy(grant->device_key, poll_report.device_key, sizeof(grant->device_key));
-            ESP_LOGI(TAG, "binding HTTP poll received credentials");
-            return ESP_OK;
-        }
-        if (poll_report.type == DEVICE_BINDING_HTTP_REPORT_UNBOUND) {
-            device_binding_set_code(poll_report.code);
-            (void)device_binding_save_pending_session(identity, &poll_report, wait_timeout_ms - elapsed_ms);
-            ESP_LOGI(TAG,
-                     "binding HTTP poll still waiting: code=%s elapsed_ms=%u",
-                     poll_report.code,
-                     (unsigned)elapsed_ms);
-            continue;
-        }
-        ESP_LOGD(TAG,
-                 "binding HTTP poll pending: service_code=%d retry_after=%us elapsed_ms=%u",
-                 poll_report.service_code,
-                 (unsigned)poll_report.retry_after_sec,
-                 (unsigned)elapsed_ms);
-    }
-
-    return ESP_ERR_TIMEOUT;
 }
 
 static esp_err_t device_binding_run(void)
@@ -513,7 +385,6 @@ static esp_err_t device_binding_run(void)
         memset(&report, 0, sizeof(report));
         ret = device_binding_http_report(s_binding.config.api_base,
                                          identity.mac,
-                                         identity.chip_uid,
                                          has_existing_credentials ? existing.device_id : NULL,
                                          has_existing_credentials ? existing.device_key : NULL,
                                          &report);
@@ -521,7 +392,7 @@ static esp_err_t device_binding_run(void)
             return ESP_ERR_INVALID_STATE;
         }
         if (ret != ESP_OK) {
-            if (device_binding_report_error_recoverable(ret) &&
+            if (thing_http_error_is_recoverable(ret) &&
                 weak_net_retry_elapsed_ms < DEVICE_BINDING_WEAK_NET_RETRY_MAX_MS) {
                 uint32_t delay_ms = DEVICE_BINDING_WEAK_NET_RETRY_MS;
                 if (weak_net_retry_elapsed_ms + delay_ms > DEVICE_BINDING_WEAK_NET_RETRY_MAX_MS) {
@@ -565,12 +436,6 @@ static esp_err_t device_binding_run(void)
             report_retry_elapsed_ms += delay_ms;
             continue;
         }
-        if (report.type == DEVICE_BINDING_HTTP_REPORT_BOUND) {
-            if (device_binding_cancelled(cancel_ctx.generation)) {
-                return ESP_ERR_INVALID_STATE;
-            }
-            return device_binding_apply_credentials(report.device_id, report.device_key, "report-bound");
-        }
         /*
          * Signed rebind keeps the pre-burned device_id/device_key in flash.
          * The server may send an empty auth_grant payload, using the retained
@@ -579,7 +444,10 @@ static esp_err_t device_binding_run(void)
         if (device_binding_cancelled(cancel_ctx.generation)) {
             return ESP_ERR_INVALID_STATE;
         }
-        ret = device_binding_save_pending_session(&identity, &report, wait_timeout_ms);
+        ret = device_binding_save_pending_session(&identity,
+                                                  &report,
+                                                  wait_timeout_ms,
+                                                  true);
         if (device_binding_cancelled(cancel_ctx.generation)) {
             (void)device_binding_clear_pending_session();
             return ESP_ERR_INVALID_STATE;
@@ -607,24 +475,14 @@ static esp_err_t device_binding_run(void)
         .cancel_ctx = &cancel_ctx,
     };
 
-    if (device_binding_can_start_mqtt_wait()) {
-        ret = binding_mqtt_client_wait_auth_grant(&mqtt_config, &grant);
-    } else {
-        ret = ESP_ERR_NO_MEM;
-    }
-    if (ret == ESP_ERR_NO_MEM) {
-        ret = device_binding_wait_auth_grant_by_http(&identity,
-                                                     &existing,
-                                                     has_existing_credentials,
-                                                     wait_timeout_ms,
-                                                     &cancel_ctx,
-                                                     &grant);
-    }
+    ret = binding_mqtt_client_wait_auth_grant(&mqtt_config, &grant);
     if (ret == ESP_ERR_INVALID_STATE) {
         return ret;
     }
     if (ret != ESP_OK) {
-        (void)device_binding_clear_pending_session();
+        if (ret == ESP_ERR_TIMEOUT) {
+            (void)device_binding_clear_pending_session();
+        }
         device_binding_set_state(DEVICE_BINDING_STATE_ERROR, ret, "auth grant wait failed");
         ESP_LOGW(TAG, "binding auth grant wait failed: %s", esp_err_to_name(ret));
         return ret;
@@ -642,53 +500,23 @@ static esp_err_t device_binding_run(void)
                                                 existing.device_key,
                                                 "mqtt-auth-grant-retained");
     }
-    ESP_LOGI(TAG, "binding auth grant has no inline credentials, reconciling by HTTP report");
-    memset(&report, 0, sizeof(report));
-    ret = device_binding_http_report(s_binding.config.api_base,
-                                     identity.mac,
-                                     identity.chip_uid,
-                                     NULL,
-                                     NULL,
-                                     &report);
-    if (device_binding_cancelled(cancel_ctx.generation)) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (ret == ESP_OK && report.type == DEVICE_BINDING_HTTP_REPORT_BOUND) {
-        if (device_binding_cancelled(cancel_ctx.generation)) {
-            return ESP_ERR_INVALID_STATE;
-        }
-        return device_binding_apply_credentials(report.device_id,
-                                                report.device_key,
-                                                "mqtt-auth-grant-report");
-    }
-    if (ret != ESP_OK) {
-        device_binding_set_state(DEVICE_BINDING_STATE_ERROR, ret, "auth grant report failed");
-        ESP_LOGW(TAG, "binding auth grant report failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    ESP_LOGW(TAG,
-             "binding auth grant report did not return credentials: type=%d service_code=%d",
-             (int)report.type,
-             report.service_code);
-    if (!has_existing_credentials) {
-        device_binding_set_state(DEVICE_BINDING_STATE_ERROR,
-                                 ESP_ERR_INVALID_RESPONSE,
-                                 "auth grant empty");
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-    if (device_binding_cancelled(cancel_ctx.generation)) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    return device_binding_apply_credentials(existing.device_id,
-                                            existing.device_key,
-                                            "mqtt-auth-grant-existing");
+    (void)device_binding_clear_pending_session();
+    device_binding_set_state(DEVICE_BINDING_STATE_ERROR,
+                             ESP_ERR_INVALID_RESPONSE,
+                             "auth grant empty without local credentials");
+    ESP_LOGW(TAG, "binding auth grant omitted credentials for an unprovisioned device");
+    return ESP_ERR_INVALID_RESPONSE;
 }
 
 static void device_binding_task(void *arg)
 {
     (void)arg;
     bool restart_requested = false;
+    bool notify_bound = false;
     char restart_reason[DEVICE_BINDING_REASON_MAX_LEN] = {0};
+    char bound_device_id[DEVICE_BINDING_DEVICE_ID_MAX_LEN] = {0};
+    device_binding_bound_cb_t on_bound = NULL;
+    void *bound_ctx = NULL;
 
     esp_err_t ret = device_binding_run();
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
@@ -709,8 +537,20 @@ static void device_binding_task(void *arg)
     s_binding.task = NULL;
     s_binding.task_generation = 0;
     s_binding.snapshot.running = false;
+    if (!restart_requested && ret == ESP_OK &&
+        s_binding.snapshot.state == DEVICE_BINDING_STATE_BOUND) {
+        notify_bound = true;
+        strlcpy(bound_device_id,
+                s_binding.snapshot.device_id,
+                sizeof(bound_device_id));
+        on_bound = s_binding.config.on_bound;
+        bound_ctx = s_binding.config.bound_ctx;
+    }
     xSemaphoreGive(s_binding.lock);
 
+    if (notify_bound && on_bound != NULL) {
+        on_bound(bound_device_id, bound_ctx);
+    }
     if (restart_requested) {
         ESP_LOGI(TAG, "binding task restarting: reason=%s", restart_reason);
         (void)device_binding_start_async(restart_reason);
@@ -720,8 +560,21 @@ static void device_binding_task(void *arg)
 
 esp_err_t device_binding_init(const device_binding_config_t *config)
 {
+    device_binding_credentials_t existing = {0};
+    bool credentials_restored = false;
+
     if (config == NULL) {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    if (config->enabled && config->load_credentials != NULL) {
+        esp_err_t load_ret = config->load_credentials(&existing, config->ctx);
+        credentials_restored = load_ret == ESP_OK &&
+                               existing.device_id[0] != '\0' &&
+                               existing.device_key[0] != '\0';
+        if (load_ret != ESP_OK && load_ret != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(TAG, "binding credentials restore failed: %s", esp_err_to_name(load_ret));
+        }
     }
 
     if (s_binding.lock == NULL) {
@@ -740,11 +593,25 @@ esp_err_t device_binding_init(const device_binding_config_t *config)
     s_binding.reason[0] = '\0';
     s_binding.restart_reason[0] = '\0';
     memset(&s_binding.snapshot, 0, sizeof(s_binding.snapshot));
-    s_binding.snapshot.state = config->enabled ? DEVICE_BINDING_STATE_IDLE : DEVICE_BINDING_STATE_DISABLED;
+    s_binding.snapshot.state = !config->enabled ?
+                               DEVICE_BINDING_STATE_DISABLED :
+                               (credentials_restored ? DEVICE_BINDING_STATE_BOUND : DEVICE_BINDING_STATE_IDLE);
+    if (credentials_restored) {
+        strlcpy(s_binding.snapshot.device_id,
+                existing.device_id,
+                sizeof(s_binding.snapshot.device_id));
+    }
     strlcpy(s_binding.snapshot.message,
-            config->enabled ? "binding idle" : "binding disabled",
+            !config->enabled ?
+            "binding disabled" :
+            (credentials_restored ? "binding credentials restored" : "binding idle"),
             sizeof(s_binding.snapshot.message));
     xSemaphoreGive(s_binding.lock);
+    if (credentials_restored) {
+        ESP_LOGI(TAG,
+                 "binding credentials restored: device_id_len=%u",
+                 (unsigned)strlen(existing.device_id));
+    }
     return ESP_OK;
 }
 
@@ -799,10 +666,10 @@ esp_err_t device_binding_start_async(const char *reason)
     return ESP_OK;
 }
 
-void device_binding_reset_state(const char *reason)
+esp_err_t device_binding_reset_state(const char *reason)
 {
     if (s_binding.lock == NULL) {
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
 
     xSemaphoreTake(s_binding.lock, portMAX_DELAY);
@@ -821,7 +688,49 @@ void device_binding_reset_state(const char *reason)
             reason != NULL ? reason : "binding reset",
             sizeof(s_binding.snapshot.message));
     xSemaphoreGive(s_binding.lock);
-    (void)device_binding_clear_pending_session();
+
+    /* A replacement task must never restore the previous verification code or
+     * temporary MQTT token after reset. Confirm the erase before allowing the
+     * application layer to queue the next binding generation. */
+    esp_err_t ret = device_binding_clear_pending_session_and_wait();
+    if (ret != ESP_OK) {
+        device_binding_set_state(DEVICE_BINDING_STATE_ERROR,
+                                 ret,
+                                 "binding pending clear failed");
+        ESP_LOGW(TAG,
+                 "binding pending session clear failed during reset: %s",
+                 esp_err_to_name(ret));
+    }
+    return ret;
+}
+
+esp_err_t device_binding_confirm_online(const char *device_id, const char *reason)
+{
+    if (device_id == NULL || device_id[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_binding.lock == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreTake(s_binding.lock, portMAX_DELAY);
+    if (!s_binding.config.enabled ||
+        s_binding.snapshot.state == DEVICE_BINDING_STATE_REPORTING ||
+        s_binding.snapshot.state == DEVICE_BINDING_STATE_WAITING_USER) {
+        xSemaphoreGive(s_binding.lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_binding.snapshot.state = DEVICE_BINDING_STATE_BOUND;
+    s_binding.snapshot.code[0] = '\0';
+    strlcpy(s_binding.snapshot.device_id,
+            device_id,
+            sizeof(s_binding.snapshot.device_id));
+    s_binding.snapshot.last_error = ESP_OK;
+    strlcpy(s_binding.snapshot.message,
+            reason != NULL ? reason : "formal mqtt online",
+            sizeof(s_binding.snapshot.message));
+    xSemaphoreGive(s_binding.lock);
+    return ESP_OK;
 }
 
 void device_binding_get_snapshot(device_binding_snapshot_t *snapshot)

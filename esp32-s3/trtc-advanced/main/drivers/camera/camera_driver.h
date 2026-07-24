@@ -21,6 +21,7 @@ typedef struct {
 } camera_driver_frame_t;
 
 bool camera_driver_is_configured(void);
+bool camera_driver_is_initialized(void);
 esp_err_t camera_driver_init(void);
 esp_err_t camera_driver_capture(camera_driver_frame_t *frame);
 void camera_driver_release(camera_driver_frame_t *frame);

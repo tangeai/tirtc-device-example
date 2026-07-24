@@ -132,12 +132,13 @@ esp_err_t wechat_voip_api_report_profile(const char *api_base, const char *mqtt_
 {
     char response[VOIP_HTTP_RESPONSE_MAX_LEN] = {0};
     int status = 0;
-    char body[192];
+    char body[256];
     snprintf(body,
              sizeof(body),
              "{\"screen_width\":1,\"screen_height\":1,"
              "\"audio_rate\":%u,\"audio_channels\":%u,"
-             "\"video_mt\":\"\",\"no_video\":true,"
+             "\"up_video_mt\":\"\",\"down_video_mt\":\"\","
+             "\"down_audio_mt\":\"alaw\",\"no_video\":true,"
              "\"calling_timeout_sec\":%u}",
              DEVICE_AUDIO_RATE,
              DEVICE_AUDIO_CHANNELS,
@@ -174,7 +175,7 @@ esp_err_t wechat_voip_api_fetch_callers(const char *api_base,
     int status = 0;
 
     esp_err_t ret = voip_http_request(api_base,
-                                      "/v1/voip/device/callers",
+                                      "/v1/voip/device/contacts",
                                       "GET",
                                       NULL,
                                       mqtt_token,
@@ -314,95 +315,4 @@ esp_err_t wechat_voip_api_request_call(const char *api_base,
         return ESP_FAIL;
     }
     return parse_and_check_reply(response, "device call");
-}
-
-esp_err_t wechat_voip_api_report_auth(const char *api_base,
-                                      const char *device_id,
-                                      const char *open_id)
-{
-    if (device_id == NULL || device_id[0] == '\0' || open_id == NULL || open_id[0] == '\0') {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    char body[VOIP_HTTP_BODY_MAX_LEN];
-    int written = snprintf(body,
-                           sizeof(body),
-                           "{\"device_id\":\"%s\",\"wx_open_id\":\"%s\"}",
-                           device_id,
-                           open_id);
-    if (written <= 0 || written >= (int)sizeof(body)) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    char response[VOIP_HTTP_RESPONSE_MAX_LEN] = {0};
-    int status = 0;
-    esp_err_t ret = voip_http_request(api_base,
-                                      "/v1/voip/user/report-auth",
-                                      "POST",
-                                      body,
-                                      NULL,
-                                      response,
-                                      sizeof(response),
-                                      &status);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    if (status != 200) {
-        ESP_LOGW(TAG, "report auth HTTP status=%d body_len=%u",
-                 status,
-                 (unsigned)strlen(response));
-        return ESP_FAIL;
-    }
-    return parse_and_check_reply(response, "report auth");
-}
-
-esp_err_t wechat_voip_api_delete_auth(const char *api_base,
-                                      const char *device_id,
-                                      const wechat_voip_auth_user_t *removed)
-{
-    if (device_id == NULL || device_id[0] == '\0' ||
-        removed == NULL || removed->openid[0] == '\0') {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    char body[VOIP_HTTP_BODY_MAX_LEN];
-    int written = 0;
-    if (removed->app_id[0] != '\0') {
-        written = snprintf(body,
-                           sizeof(body),
-                           "{\"device_id\":\"%s\",\"wx_open_id\":\"%s\",\"wx_app_id\":\"%s\"}",
-                           device_id,
-                           removed->openid,
-                           removed->app_id);
-    } else {
-        written = snprintf(body,
-                           sizeof(body),
-                           "{\"device_id\":\"%s\",\"wx_open_id\":\"%s\"}",
-                           device_id,
-                           removed->openid);
-    }
-    if (written <= 0 || written >= (int)sizeof(body)) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    char response[VOIP_HTTP_RESPONSE_MAX_LEN] = {0};
-    int status = 0;
-    esp_err_t ret = voip_http_request(api_base,
-                                      "/v1/voip/user/delete-auth",
-                                      "POST",
-                                      body,
-                                      NULL,
-                                      response,
-                                      sizeof(response),
-                                      &status);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    if (status != 200) {
-        ESP_LOGW(TAG, "delete auth HTTP status=%d body_len=%u",
-                 status,
-                 (unsigned)strlen(response));
-        return ESP_FAIL;
-    }
-    return parse_and_check_reply(response, "delete auth");
 }

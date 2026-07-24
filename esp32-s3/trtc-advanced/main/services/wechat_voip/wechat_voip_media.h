@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -9,7 +9,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
 typedef struct {
     bool running;
     bool uplink_enabled;

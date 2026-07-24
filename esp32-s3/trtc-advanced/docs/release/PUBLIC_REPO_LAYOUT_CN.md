@@ -1,78 +1,87 @@
-# 公开仓库目录规划
+# 统一设备示例仓
 
-未来公开远端仓库：
+公开仓库：
 
 <https://github.com/tangeai/tirtc-device-example>
 
-仓库名：
-
-`tirtc-device-example`
-
-## 目标目录结构
+## 目录
 
 ```text
 tirtc-device-example/
-├── esp32-s3/               # ESP32-S3 平台示例
-│   ├── trtc-basic-call/    # 基础音视频通话
-│   └── trtc-advanced/      # 高级功能示例
-├── esp32-c3/               # ESP32-C3 平台示例
-├── esp32-p4/               # ESP32-P4 平台示例
-├── s10/                    # 君正 S10 平台示例
-├── realtek/                # Realtek 平台示例
-├── common/                 # 跨平台公共组件
-└── docs/                   # 跨平台文档、接入说明和发布说明
+├── esp32-s3/
+│   ├── trtc-basic-call/
+│   └── trtc-advanced/
+├── esp32-c3/
+├── esp32-p4/
+├── s10/
+├── realtek/
+├── common/
+└── docs/
 ```
 
-## 当前工程归属
-
-当前 `esp32s3_tirtc_device_monitor_demo` 属于 ESP32-S3 高级示例，后续放入：
+当前工程发布到：
 
 ```text
 esp32-s3/trtc-advanced/
 ```
 
-它覆盖的能力包括：
+S3 与 P4 是同级平台，不能互相嵌套。每个平台保留自己的板级驱动、构建配置和版本说明；
+只有确认被两个及以上平台复用的协议、工具和文档才进入 `common/`。
 
-- TiRTC 设备端音视频链路
-- IPC 查看
-- 微信 VoIP
-- AI 对讲
-- OTA
-- 6 位验证码绑定
-- 屏幕、触摸、音频、摄像头等板级适配
+## Git 保存什么
 
-基础音视频通话最小示例后续放入：
+Git 保存：
+
+- 可构建源码
+- README 和接入文档
+- 构建、校验和发布脚本
+- 必要的 TiRTC SDK 头文件和平台静态库
+- UI 图片、字体和其他运行期必需资源
+- Release 说明和版本元数据
+
+Git 不保存：
+
+- `build/` 和临时构建目录
+- `.bin/.zip` 固件产物
+- `release_assets/`、`artifacts/`、`releases/`
+- 串口日志、抓包、截图临时文件和个人 IDE 配置
+- Wi-Fi 密码、设备密钥、token、私钥和个人联系人标识
+
+## 固件放在哪里
+
+正式固件发布到：
+
+<https://github.com/tangeai/tirtc-device-example/releases>
+
+推荐平台作用域标签：
 
 ```text
-esp32-s3/trtc-basic-call/
+esp32-s3-trtc-advanced-vX.Y.Z
+esp32-p4-trtc-advanced-vX.Y.Z
 ```
 
-## 目录归档规则
+每个 Release 至少包含：
 
-| 目录 | 放什么 |
-| --- | --- |
-| `esp32-s3/trtc-basic-call` | ESP32-S3 上最小 TiRTC 音视频通话示例，依赖最少，便于快速跑通 SDK |
-| `esp32-s3/trtc-advanced` | 当前设备监控示例，包含 IPC、微信 VoIP、AI 对讲、OTA 和完整 UI |
-| `esp32-c3` | ESP32-C3 平台示例，按后续硬件能力拆分子目录 |
-| `esp32-p4` | ESP32-P4 平台示例，按后续硬件能力拆分子目录 |
-| `s10` | 君正 S10 平台示例 |
-| `realtek` | Realtek 平台示例 |
-| `common` | 确认被两个及以上平台复用的组件、协议适配层、工具脚本或公共说明 |
-| `docs` | 跨平台说明、SDK 接入流程、烧录说明、发布流程和问题排查文档 |
+- 普通体验者使用的 `0x0` 完整镜像
+- 维护者多地址烧录 zip
+- OTA app，平台支持 OTA 时提供
+- `SHA256SUMS.txt`
+- `release-manifest.json`
+- 发布说明和验证边界
 
-## 迁移边界
+GitHub Actions artifact 只用于短期构建验证，不能作为长期正式下载地址。OTA 服务仍保存
+在线升级所需 app 和 manifest；GitHub Release 负责公开下载、人工烧录和版本归档。
 
-- 当前阶段先记录公开仓库目标结构，不急着推送代码。
-- 现有 ESP32-S3 工程发布前仍在当前目录完成版本收口、编译和打包。
-- 真正迁移到 `tirtc-device-example` 时，再把当前工程整体放入 `esp32-s3/trtc-advanced/`，避免现在移动源码影响本地构建。
-- `release_assets` 后续跟随具体示例目录走，例如 `esp32-s3/trtc-advanced/release_assets/`。
-- 敏感配置、真实设备密钥、个人联系人标识和私有服务端密钥不能进入公开仓库。
+## 发布顺序
 
-## 后续迁移检查项
-
-1. 确认当前工程在原路径完整编译通过。
-2. 将工程整体迁移到 `esp32-s3/trtc-advanced/`。
-3. 修正相对路径、文档链接、脚本路径和发布资产路径。
-4. 在新目录重新执行一次完整构建。
-5. 检查公开仓库里只包含可公开示例、必要文档和当前发布资产。
-6. 确认 `README.md`、烧录说明、OTA 说明和 TiRTC 配置说明全部指向新仓库结构。
+1. 在平台权威源工程完成开发。
+2. 检查工作区范围和敏感信息。
+3. 使用目标 ESP-IDF 环境重新构建。
+4. 记录源码 commit、SDK 版本、app 大小和 SHA-256。
+5. 同步源码到统一仓对应平台目录，不复制 `.git`、`build` 或固件包。
+6. 在统一仓再次检查 diff 和文档链接。
+7. 提交源码和文档。
+8. 创建平台作用域标签。
+9. 从已验证 build 生成 Release 资产并上传。
+10. 清理临时资产目录，确认 Git 中没有 `.bin/.zip`。
+11. 分别记录构建、Release 下载、网页烧录、OTA 和真机功能验证结果。

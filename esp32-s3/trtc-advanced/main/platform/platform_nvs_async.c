@@ -164,8 +164,11 @@ static esp_err_t enqueue_request(platform_nvs_async_op_t op,
                                  const char *namespace_name,
                                  const char *key,
                                  const void *value,
-                                 size_t value_len)
+                                 size_t value_len,
+                                 bool wait_for_completion)
 {
+    SemaphoreHandle_t done = NULL;
+
     if (!name_valid(namespace_name) || !name_valid(key)) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -194,13 +197,33 @@ static esp_err_t enqueue_request(platform_nvs_async_op_t op,
         memcpy(request->value, value, value_len);
     }
 
+    if (wait_for_completion) {
+        done = xSemaphoreCreateBinaryWithCaps(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (done == NULL) {
+            free(request);
+            return ESP_ERR_NO_MEM;
+        }
+        request->done = done;
+    }
+
     if (xQueueSend(s_nvs_async_queue,
                    &request,
                    pdMS_TO_TICKS(PLATFORM_NVS_ASYNC_ENQUEUE_WAIT_MS)) != pdPASS) {
+        if (done != NULL) {
+            vSemaphoreDeleteWithCaps(done);
+        }
         free(request);
         return ESP_ERR_TIMEOUT;
     }
-    return ESP_OK;
+    if (!wait_for_completion) {
+        return ESP_OK;
+    }
+
+    xSemaphoreTake(done, portMAX_DELAY);
+    esp_err_t ret = request->result;
+    vSemaphoreDeleteWithCaps(done);
+    free(request);
+    return ret;
 }
 
 esp_err_t platform_nvs_async_set_blob(const char *namespace_name,
@@ -215,7 +238,24 @@ esp_err_t platform_nvs_async_set_blob(const char *namespace_name,
                            namespace_name,
                            key,
                            value,
-                           value_len);
+                           value_len,
+                           false);
+}
+
+esp_err_t platform_nvs_async_set_blob_and_wait(const char *namespace_name,
+                                               const char *key,
+                                               const void *value,
+                                               size_t value_len)
+{
+    if (value_len > 0U && value == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return enqueue_request(PLATFORM_NVS_ASYNC_OP_SET_BLOB,
+                           namespace_name,
+                           key,
+                           value,
+                           value_len,
+                           true);
 }
 
 esp_err_t platform_nvs_async_set_str(const char *namespace_name,
@@ -229,7 +269,8 @@ esp_err_t platform_nvs_async_set_str(const char *namespace_name,
                            namespace_name,
                            key,
                            value,
-                           strlen(value) + 1U);
+                           strlen(value) + 1U,
+                           false);
 }
 
 esp_err_t platform_nvs_async_set_u8(const char *namespace_name,
@@ -240,7 +281,8 @@ esp_err_t platform_nvs_async_set_u8(const char *namespace_name,
                            namespace_name,
                            key,
                            &value,
-                           sizeof(value));
+                           sizeof(value),
+                           false);
 }
 
 esp_err_t platform_nvs_async_erase_key(const char *namespace_name,
@@ -250,7 +292,19 @@ esp_err_t platform_nvs_async_erase_key(const char *namespace_name,
                            namespace_name,
                            key,
                            NULL,
-                           0);
+                           0,
+                           false);
+}
+
+esp_err_t platform_nvs_async_erase_key_and_wait(const char *namespace_name,
+                                                const char *key)
+{
+    return enqueue_request(PLATFORM_NVS_ASYNC_OP_ERASE_KEY,
+                           namespace_name,
+                           key,
+                           NULL,
+                           0,
+                           true);
 }
 
 esp_err_t platform_nvs_async_get_blob(const char *namespace_name,

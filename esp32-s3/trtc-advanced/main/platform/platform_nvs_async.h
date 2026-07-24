@@ -10,6 +10,11 @@ esp_err_t platform_nvs_async_set_blob(const char *namespace_name,
                                       const char *key,
                                       const void *value,
                                       size_t value_len);
+/* Returns only after the queued write has been committed to flash. */
+esp_err_t platform_nvs_async_set_blob_and_wait(const char *namespace_name,
+                                               const char *key,
+                                               const void *value,
+                                               size_t value_len);
 esp_err_t platform_nvs_async_set_str(const char *namespace_name,
                                      const char *key,
                                      const char *value);
@@ -18,6 +23,9 @@ esp_err_t platform_nvs_async_set_u8(const char *namespace_name,
                                     uint8_t value);
 esp_err_t platform_nvs_async_erase_key(const char *namespace_name,
                                        const char *key);
+/* Returns only after the queued erase has been committed to flash. */
+esp_err_t platform_nvs_async_erase_key_and_wait(const char *namespace_name,
+                                                const char *key);
 esp_err_t platform_nvs_async_get_blob(const char *namespace_name,
                                       const char *key,
                                       void *value,

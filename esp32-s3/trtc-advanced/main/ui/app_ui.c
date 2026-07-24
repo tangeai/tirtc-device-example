@@ -229,6 +229,25 @@ static display_wechat_call_state_t app_ui_to_display_wechat_call_state(app_wecha
     }
 }
 
+static display_call_state_t app_ui_to_display_call_state(app_call_state_t state)
+{
+    switch (state) {
+    case APP_CALL_STATE_OUTGOING:
+        return DISPLAY_CALL_STATE_OUTGOING;
+    case APP_CALL_STATE_INCOMING:
+        return DISPLAY_CALL_STATE_INCOMING;
+    case APP_CALL_STATE_CONNECTING:
+        return DISPLAY_CALL_STATE_CONNECTING;
+    case APP_CALL_STATE_IN_CALL:
+        return DISPLAY_CALL_STATE_IN_CALL;
+    case APP_CALL_STATE_ERROR:
+        return DISPLAY_CALL_STATE_ERROR;
+    case APP_CALL_STATE_IDLE:
+    default:
+        return DISPLAY_CALL_STATE_IDLE;
+    }
+}
+
 static app_id_t app_ui_from_display_app(display_app_id_t app_id)
 {
     switch (app_id) {
@@ -326,7 +345,7 @@ static esp_err_t app_ui_on_set_capture_gain(uint8_t percent, void *ctx)
     return app_set_capture_gain(percent);
 }
 
-static esp_err_t app_ui_on_call_contact(const char *device_id, const char *pair_key, void *ctx)
+static esp_err_t app_ui_on_call_contact(const char *device_id, void *ctx)
 {
     (void)ctx;
     esp_err_t ret = app_enter_app(APP_ID_CALL);
@@ -335,19 +354,19 @@ static esp_err_t app_ui_on_call_contact(const char *device_id, const char *pair_
         return ret;
     }
 
-    return app_call_contact(device_id, pair_key);
+    return app_call_contact(device_id);
 }
 
-static esp_err_t app_ui_on_add_call_contact(const char *device_id, const char *pair_key, void *ctx)
+static esp_err_t app_ui_on_add_call_contact(const char *device_id, void *ctx)
 {
     (void)ctx;
-    return app_add_call_contact(device_id, pair_key);
+    return app_add_call_contact(device_id);
 }
 
-static esp_err_t app_ui_on_remove_call_contact(const char *device_id, void *ctx)
+static esp_err_t app_ui_on_refresh_call_contacts(void *ctx)
 {
     (void)ctx;
-    return app_remove_call_contact(device_id);
+    return app_refresh_call_contacts();
 }
 
 static esp_err_t app_ui_on_scan_contact(void *ctx)
@@ -513,6 +532,11 @@ static esp_err_t app_ui_on_wechat_hangup_call(void *ctx)
 static esp_err_t app_ui_on_wechat_accept_call(void *ctx)
 {
     (void)ctx;
+    esp_err_t ret = app_enter_app(APP_ID_WECHAT);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "enter wechat before accept failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
     return app_wechat_accept_call();
 }
 
@@ -627,7 +651,7 @@ void app_ui_configure_display_actions(display_actions_t *actions)
         .on_set_capture_gain = app_ui_on_set_capture_gain,
         .on_call_contact = app_ui_on_call_contact,
         .on_add_call_contact = app_ui_on_add_call_contact,
-        .on_remove_call_contact = app_ui_on_remove_call_contact,
+        .on_refresh_call_contacts = app_ui_on_refresh_call_contacts,
         .on_scan_contact = app_ui_on_scan_contact,
         .on_start_contact_scan = app_ui_on_start_contact_scan,
         .on_stop_contact_scan = app_ui_on_stop_contact_scan,
@@ -767,6 +791,7 @@ void app_ui_fill_display_status(display_status_t *status, void *ctx)
     strlcpy(status->binding_message,
             snapshot->binding.message,
             sizeof(status->binding_message));
+    status->call_state = app_ui_to_display_call_state(snapshot->call.state);
     call_contact_count = snapshot->call_contacts.count > DISPLAY_CALL_CONTACT_MAX ?
         DISPLAY_CALL_CONTACT_MAX : snapshot->call_contacts.count;
     status->call_contact_count = call_contact_count;
@@ -774,12 +799,10 @@ void app_ui_fill_display_status(display_status_t *status, void *ctx)
         strlcpy(status->call_contacts[index].device_id,
                 snapshot->call_contacts.contacts[index].device_id,
                 sizeof(status->call_contacts[index].device_id));
-        strlcpy(status->call_contacts[index].pair_key,
-                snapshot->call_contacts.contacts[index].pair_key,
-                sizeof(status->call_contacts[index].pair_key));
-        strlcpy(status->call_contacts[index].last_time,
-                snapshot->call_contacts.contacts[index].last_time,
-                sizeof(status->call_contacts[index].last_time));
+        strlcpy(status->call_contacts[index].remark,
+                snapshot->call_contacts.contacts[index].remark,
+                sizeof(status->call_contacts[index].remark));
+        status->call_contacts[index].online = snapshot->call_contacts.contacts[index].online;
     }
     status->wechat_incoming_call_pending = snapshot->wechat.incoming_call_pending;
     status->wechat_call_state = app_ui_to_display_wechat_call_state(snapshot->wechat.call_state);

@@ -270,6 +270,8 @@ static bool tirtc_session_is_showcase_command_id(uint16_t cmd_id)
 {
     return cmd_id == TIRTC_SESSION_CMD_CALL || cmd_id == TIRTC_SESSION_CMD_VOLUME ||
            cmd_id == TIRTC_SESSION_CMD_DOOR || cmd_id == TIRTC_SESSION_CMD_HANGUP ||
+           cmd_id == TIRTC_SESSION_CMD_DEVICE_CALL_CONNECTED ||
+           cmd_id == TIRTC_SESSION_CMD_DEVICE_CALL_HANGUP ||
            cmd_id == TIRTC_SESSION_CMD_REQ_VIDEO || cmd_id == TIRTC_SESSION_CMD_REQ_AUDIO ||
            cmd_id == TIRTC_SESSION_CMD_SET_SEND_VIDEO || cmd_id == TIRTC_SESSION_CMD_SET_SEND_AUDIO ||
            cmd_id == TIRTC_SESSION_CMD_RGB_LEGACY || cmd_id == TIRTC_SESSION_CMD_STATE_LEGACY ||
@@ -584,6 +586,14 @@ static esp_err_t tirtc_session_send_request(uint16_t cmd, const void *data, size
     return tirtc_session_send_command_raw(conn, cmdw, data, data_len);
 }
 
+esp_err_t tirtc_session_send_active_command(uint32_t cmdw, const void *data, size_t data_len)
+{
+    tirtc_conn_t conn = NULL;
+
+    ESP_RETURN_ON_FALSE(tirtc_session_try_get_active_conn(&conn), ESP_ERR_INVALID_STATE, TAG, "rtc connection not ready");
+    return tirtc_session_send_command_raw(conn, cmdw, data, data_len);
+}
+
 static esp_err_t tirtc_session_send_response(tirtc_conn_t conn, uint32_t request_cmdw, const void *data, size_t data_len)
 {
     return tirtc_session_send_command_raw(conn,
@@ -885,6 +895,24 @@ void tirtc_session_handle_remote_command(const tirtc_session_event_t *event)
         tirtc_session_apply_hangup_local_state();
         (void)tirtc_session_disconnect();
         tirtc_session_note_event("hangup rx");
+        break;
+    case TIRTC_SESSION_CMD_DEVICE_CALL_CONNECTED:
+        if (!is_response) {
+            tirtc_session_complete_call_response(true);
+            (void)tirtc_session_set_local_video_send_enabled(true);
+            (void)tirtc_session_set_local_audio_send_enabled(true);
+            tirtc_session_apply_local_media_policy();
+            tirtc_session_note_event("device call connected");
+            ESP_LOGI(TAG,
+                     "device call connected command: hconn=%p payload_len=%lu",
+                     event->payload.command.conn,
+                     (unsigned long)event->payload.command.data_len);
+        }
+        break;
+    case TIRTC_SESSION_CMD_DEVICE_CALL_HANGUP:
+        tirtc_session_apply_hangup_local_state();
+        (void)tirtc_session_disconnect();
+        tirtc_session_note_event("device call hangup rx");
         break;
     case TIRTC_SESSION_CMD_REQ_VIDEO: {
         bool enabled = tirtc_session_toggle_from_command_payload(event->payload.command.data,

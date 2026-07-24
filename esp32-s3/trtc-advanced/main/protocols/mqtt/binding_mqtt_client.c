@@ -30,8 +30,10 @@ typedef struct {
     char ack_topic[BINDING_MQTT_TOPIC_MAX_LEN];
     char payload[BINDING_MQTT_PAYLOAD_MAX_LEN];
     size_t payload_len;
+    bool receiving_cmd;
     binding_mqtt_auth_grant_t grant;
     esp_err_t last_error;
+    int ack_msg_id;
 } binding_mqtt_runtime_t;
 
 static bool binding_mqtt_has_start_heap(void)
@@ -218,12 +220,12 @@ cleanup:
     return ret;
 }
 
-static void binding_mqtt_publish_ack(binding_mqtt_runtime_t *runtime)
+static esp_err_t binding_mqtt_publish_ack(binding_mqtt_runtime_t *runtime)
 {
     static const char ack_payload[] = "{\"ack\":true}";
 
     if (runtime == NULL || runtime->client == NULL || runtime->ack_topic[0] == '\0') {
-        return;
+        return ESP_ERR_INVALID_ARG;
     }
 
     int msg_id = esp_mqtt_client_publish(runtime->client,
@@ -232,7 +234,23 @@ static void binding_mqtt_publish_ack(binding_mqtt_runtime_t *runtime)
                                          0,
                                          1,
                                          0);
-    ESP_LOGD(TAG, "binding ack published: msg_id=%d", msg_id);
+    if (msg_id < 0) {
+        ESP_LOGW(TAG, "binding ack publish failed: msg_id=%d", msg_id);
+        return ESP_FAIL;
+    }
+    runtime->ack_msg_id = msg_id;
+    ESP_LOGD(TAG, "binding ack queued: msg_id=%d", msg_id);
+    return ESP_OK;
+}
+
+static void binding_mqtt_reset_payload(binding_mqtt_runtime_t *runtime)
+{
+    if (runtime == NULL) {
+        return;
+    }
+    runtime->payload_len = 0;
+    runtime->payload[0] = '\0';
+    runtime->receiving_cmd = false;
 }
 
 static void binding_mqtt_handle_data(binding_mqtt_runtime_t *runtime, const esp_mqtt_event_t *event)
@@ -242,19 +260,27 @@ static void binding_mqtt_handle_data(binding_mqtt_runtime_t *runtime, const esp_
     if (runtime == NULL || event == NULL || event->data == NULL || event->data_len <= 0) {
         return;
     }
-    if (!binding_mqtt_topic_equals(event, runtime->cmd_topic)) {
-        return;
-    }
     if (event->total_data_len >= (int)sizeof(runtime->payload)) {
+        binding_mqtt_reset_payload(runtime);
         runtime->last_error = ESP_ERR_INVALID_SIZE;
         xEventGroupSetBits(runtime->events, BINDING_MQTT_ERROR_BIT);
         return;
     }
     if (event->current_data_offset == 0) {
-        runtime->payload_len = 0;
-        runtime->payload[0] = '\0';
+        binding_mqtt_reset_payload(runtime);
+        runtime->receiving_cmd = binding_mqtt_topic_equals(event, runtime->cmd_topic);
+    }
+    if (!runtime->receiving_cmd) {
+        return;
+    }
+    if (event->current_data_offset != (int)runtime->payload_len) {
+        binding_mqtt_reset_payload(runtime);
+        runtime->last_error = ESP_ERR_INVALID_RESPONSE;
+        xEventGroupSetBits(runtime->events, BINDING_MQTT_ERROR_BIT);
+        return;
     }
     if (runtime->payload_len + (size_t)event->data_len >= sizeof(runtime->payload)) {
+        binding_mqtt_reset_payload(runtime);
         runtime->last_error = ESP_ERR_INVALID_SIZE;
         xEventGroupSetBits(runtime->events, BINDING_MQTT_ERROR_BIT);
         return;
@@ -266,6 +292,7 @@ static void binding_mqtt_handle_data(binding_mqtt_runtime_t *runtime, const esp_
     if (event->current_data_offset + event->data_len < event->total_data_len) {
         return;
     }
+    runtime->receiving_cmd = false;
 
     ESP_LOGI(TAG,
              "binding mqtt command received: topic=%s bytes=%u",
@@ -273,8 +300,11 @@ static void binding_mqtt_handle_data(binding_mqtt_runtime_t *runtime, const esp_
              (unsigned)runtime->payload_len);
     ret = binding_mqtt_parse_auth_grant(runtime, runtime->payload);
     if (ret == ESP_OK) {
-        binding_mqtt_publish_ack(runtime);
-        xEventGroupSetBits(runtime->events, BINDING_MQTT_GRANT_BIT);
+        ret = binding_mqtt_publish_ack(runtime);
+        if (ret != ESP_OK) {
+            runtime->last_error = ret;
+            xEventGroupSetBits(runtime->events, BINDING_MQTT_ERROR_BIT);
+        }
     } else if (ret != ESP_ERR_NOT_FOUND) {
         ESP_LOGW(TAG, "binding command parse failed: %s", esp_err_to_name(ret));
     }
@@ -304,6 +334,13 @@ static void binding_mqtt_event_handler(void *handler_args,
     case MQTT_EVENT_DATA:
         binding_mqtt_handle_data(runtime, event);
         break;
+    case MQTT_EVENT_PUBLISHED:
+        if (runtime->ack_msg_id >= 0 && event->msg_id == runtime->ack_msg_id) {
+            ESP_LOGI(TAG, "binding ack confirmed: msg_id=%d", event->msg_id);
+            runtime->ack_msg_id = -1;
+            xEventGroupSetBits(runtime->events, BINDING_MQTT_GRANT_BIT);
+        }
+        break;
     case MQTT_EVENT_ERROR:
         runtime->last_error = ESP_FAIL;
         xEventGroupSetBits(runtime->events, BINDING_MQTT_ERROR_BIT);
@@ -332,6 +369,7 @@ esp_err_t binding_mqtt_client_wait_auth_grant(const binding_mqtt_client_config_t
     }
 
     memset(grant, 0, sizeof(*grant));
+    runtime.ack_msg_id = -1;
     if (strlen(config->temp_client_id) >= sizeof(client_id)) {
         return ESP_ERR_INVALID_SIZE;
     }
@@ -355,7 +393,7 @@ esp_err_t binding_mqtt_client_wait_auth_grant(const binding_mqtt_client_config_t
         .credentials.authentication.password = config->temp_token,
         .session.keepalive = 30,
         .network.timeout_ms = 10000,
-        .network.disable_auto_reconnect = true,
+        .network.reconnect_timeout_ms = 3000,
         .task.stack_size = 6144,
         .buffer.size = 1024,
         .buffer.out_size = 1024,
@@ -419,7 +457,6 @@ esp_err_t binding_mqtt_client_wait_auth_grant(const binding_mqtt_client_config_t
              grant->has_credentials ? 1 : 0);
 
     (void)esp_mqtt_client_stop(runtime.client);
-    vTaskDelay(pdMS_TO_TICKS(100));
     esp_mqtt_client_destroy(runtime.client);
     vEventGroupDelete(runtime.events);
     return ret;

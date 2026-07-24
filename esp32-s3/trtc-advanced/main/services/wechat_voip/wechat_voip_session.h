@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 /* 微信 VoIP 会话:保存本次入会信息,驱动 WHIP 建连和通话状态. */
 
@@ -12,7 +12,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
 typedef enum {
     WECHAT_VOIP_SESSION_STATE_IDLE = 0,
     WECHAT_VOIP_SESSION_STATE_RINGING,
@@ -23,6 +22,7 @@ typedef enum {
 } wechat_voip_session_state_t;
 
 esp_err_t wechat_voip_session_handle_join_room(cJSON *payload, bool auto_answer);
+esp_err_t wechat_voip_session_reject_join_room_busy(cJSON *payload);
 esp_err_t wechat_voip_session_answer(void);
 esp_err_t wechat_voip_session_reject_incoming(void);
 bool wechat_voip_session_has_incoming_call(void);
