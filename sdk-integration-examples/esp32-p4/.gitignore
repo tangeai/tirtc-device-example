@@ -1,0 +1,7 @@
+build*/
+.vscode/
+.agents/
+firmware/
+managed_components/
+*.pyc
+__pycache__/

@@ -1,0 +1,17 @@
+menuconfig CONFIG_APPLICATION_TIRTC_WIFI_LINK
+    bool "TiRTC G32S10X minimal WiFi link demo"
+    depends on CONFIG_SOC_G32S10X
+    depends on CONFIG_WIRELESS_ATBM
+    select CONFIG_APPLICATION
+    select CONFIG_NET
+    select CONFIG_NET_LWIP
+    select CONFIG_NET_MANAGE
+    select CONFIG_LIB_CRC32
+    select CONFIG_G32S10X_DTRNG
+    select CONFIG_MBEDTLS
+    default n
+    help
+      Minimal control-plane example containing only RTOS, WiFi, lwIP and
+      TiRTC lifecycle/connection handling. No media hardware is initialized.
+
+endmenu

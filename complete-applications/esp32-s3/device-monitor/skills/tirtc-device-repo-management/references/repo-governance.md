@@ -1,0 +1,68 @@
+# 仓库治理参考
+
+## 目标公开仓结构
+
+```text
+tirtc-device-example/
+├── esp32-s3/
+│   ├── trtc-basic-call/
+│   └── trtc-advanced/
+├── esp32-c3/
+├── esp32-p4/
+├── s10/
+├── realtek/
+├── common/
+└── docs/
+```
+
+## 当前工程归档
+
+当前 ESP32-S3 设备监控工程归到：
+
+```text
+complete-applications/esp32-s3/device-monitor/
+```
+
+它不是最小 SDK 示例，而是高级示例，包含：
+
+- IPC 查看
+- 设备间 TiRTC 呼叫
+- 微信 VoIP
+- AI 对讲
+- OTA
+- 6 位验证码绑定
+- LVGL UI
+- 屏幕、触摸、音频、摄像头适配
+
+未来最小 SDK 跑通示例归到：
+
+```text
+esp32-s3/trtc-basic-call/
+```
+
+## 迁移策略
+
+迁移分两步，不要混在一次提交里：
+
+1. 当前路径内完成版本发布、文档收口、资产清理和构建验证。
+2. 另起一次目录迁移提交，把工程整体放入 `complete-applications/esp32-s3/device-monitor/`，再修正路径并重新构建。
+
+## 发布资产规则
+
+- `.bin/.zip` 不进入 Git 历史，也不放在统一仓工作树中。
+- 打包暂存目录放在仓库外，远端上传并复核完成后才能清理。
+- 普通体验者从 GitHub Release 下载 `full` 完整镜像，并在 ESP Launchpad 从 `0x0` 烧录。
+- OTA app、完整镜像、维护包、`SHA256SUMS.txt` 和 `release-manifest.json` 作为 Release 附件。
+- 手动多地址包只作为维护者排障备用，不作为小白首次体验入口。
+- 不再推荐自建网页烧录页。
+
+## 敏感信息规则
+
+公开仓不能包含：
+
+- 真实 `device_id/device_key`
+- 长期有效 token
+- 私有服务器密钥
+- 个人联系人 openid
+- 私有 Wi-Fi SSID/password
+- 内部临时调试日志中暴露的业务凭证

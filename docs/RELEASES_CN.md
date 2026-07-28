@@ -1,4 +1,4 @@
-# 发布与二进制管理
+# 固件下载与校验
 
 ## 为什么固件不放在 Git
 
@@ -29,7 +29,11 @@ GitHub Packages 更适合带包格式和依赖语义的软件包或容器。当�
 | `*-webinstall-vX.Y.Z.zip` | 普通体验者 | 完整镜像和简明烧录说明 |
 | `*-webflash-vX.Y.Z.zip` | 维护者 | bootloader、分区表、app、storage 和 offset |
 | `SHA256SUMS.txt` | 所有人 | 下载完整性校验 |
-| `release-manifest.json` | 发布工具 | 版本、commit、offset、大小和 SHA-256 |
+| `release-manifest.json` | 校验工具 | 版本、commit、offset、大小和 SHA-256 |
+
+本次统一源码 Release 还提供五个已完成干净构建的验证固件。它们按 `minimal-app`、
+`device-monitor-app` 或 `rtos-with-spl` 命名，供开发者在对应目标板上继续集成验证；
+首次完整烧录仍应选择与开发板匹配的 `*-full-*.bin`。
 
 ## 标签约定
 
@@ -40,15 +44,28 @@ esp32-s3-trtc-advanced-v0.7.5
 esp32-p4-trtc-advanced-v1.1.0
 ```
 
-## 发布检查
+## 下载后校验
 
-1. 确认源工程版本、SDK 版本和 Release 标签一致。
-2. 在干净或明确记录差异的工作树中完成构建。
-3. 根据 `flasher_args.json` 生成资产，不手写 offset。
-4. 生成并复核 `release-manifest.json`、`SHA256SUMS.txt`。
-5. 确认 `git ls-files "*.bin" "*.zip"` 无固件产物。
-6. 复核 README 中的开发板、下载文件名、地址 `0x0` 和 H5 流程。
-7. 推送源码与标签。
-8. 创建 GitHub Release 并上传附件。
-9. 从远端重新下载附件，复算 SHA-256。
-10. 把构建通过和真机通过分开记录；未烧录、未运行的测试不得写成通过。
+1. 从 [GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases) 选择与开发板
+   和项目版本完全匹配的 Release。
+2. 下载固件和同一 Release 中的 `SHA256SUMS.txt`。
+3. 计算下载文件 SHA-256，并与清单逐字比对。
+4. 首次烧录使用 `*-full-*.bin` 和地址 `0x0`；OTA 文件不能替代完整镜像。
+5. 启动后核对串口或界面显示的应用版本、TiRTC SDK 版本和目标板型。
+
+PowerShell：
+
+```powershell
+Get-FileHash .\downloaded-firmware.bin -Algorithm SHA256
+```
+
+Linux/macOS：
+
+```bash
+sha256sum ./downloaded-firmware.bin
+```
+
+Release 中的 manifest 用于核对 Tag、commit、项目路径、版本、源码文件清单和附件哈希。
+
+静态校验可以证明发布记录之间一致，但不能单独证明 `.bin` 由对应源码构建。二进制来源需要
+可复现构建、受控 CI，或固件内嵌 commit/版本元数据并进行比对。

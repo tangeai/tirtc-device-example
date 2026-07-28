@@ -1,0 +1,8 @@
+menu "Application"
+
+config CONFIG_APPLICATION
+    bool
+
+source package/application/tirtc_g32s10x_wifi_link_demo/Config.in
+
+endmenu
