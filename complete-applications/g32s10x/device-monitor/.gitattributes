@@ -4,6 +4,7 @@
 *.mk text eol=lf
 *.in text eol=lf
 integration/configs/*_defconfig text eol=lf
+integration/vendor_overrides/application/data/.keep text eol=lf
 *.sh text eol=lf
 *.ps1 text eol=crlf
 *.md text eol=lf
