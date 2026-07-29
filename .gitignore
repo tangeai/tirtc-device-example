@@ -10,7 +10,14 @@
 **/artifacts/
 **/releases/
 *.bin
+*.elf
+*.map
+*.yaffs2
+*.uf2
+*.hex
 *.zip
+*.tgz
+*.tar.gz
 
 # Local/editor files
 .vscode/
