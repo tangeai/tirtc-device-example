@@ -10,7 +10,7 @@
 - [SDK 接入与历史示例](sdk-integration-examples/README.md)：聚焦联网、时间同步、TiRTC
   初始化、上线、连接、音视频收发和释放，适合移植与理解 SDK。
 - [完整应用](complete-applications/README.md)：在 TiRTC 之外加入设备绑定、ThingConnect、
-  UI、真实摄像头和音频、AI 对讲、微信 VoIP、设备互呼与 OTA 等业务能力。
+  UI、真实摄像头和音频，并按平台提供 AI 对讲、微信 VoIP、设备互呼或 OTA 等业务能力。
 
 第一次接触 TiRTC 设备端集成，建议先阅读对应平台的最小 TiRTC 集成示例；需要完整交互设备或
 演示样机，再进入对应平台的完整应用。
