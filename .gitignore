@@ -5,6 +5,12 @@
 **/sdkconfig
 **/sdkconfig.old
 
+# G32 source overlays happen to use vendor directories named "build".
+!sdk-integration-examples/g32s10x/port/g32/vendor_overrides/package/build/
+!sdk-integration-examples/g32s10x/port/g32/vendor_overrides/package/build/build.mk
+!complete-applications/g32s10x/device-monitor/integration/vendor_overrides/build/
+!complete-applications/g32s10x/device-monitor/integration/vendor_overrides/build/fs.mk
+
 # Firmware release outputs belong to GitHub Releases
 **/release_assets/
 **/artifacts/
