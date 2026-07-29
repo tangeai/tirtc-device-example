@@ -278,6 +278,7 @@ static void app_call_start_cleanup(const app_call_start_runtime_t *runtime,
 static void app_call_start_task(void *arg)
 {
 	uint32_t generation = (uint32_t)(uintptr_t)arg;
+	int64_t started_at_us = esp_timer_get_time();
 	app_call_start_runtime_t runtime = app_call_start_get_runtime();
 	bool resources_acquired = false;
 	bool signalling_started = false;
@@ -311,6 +312,10 @@ static void app_call_start_task(void *arg)
 		goto done;
 	}
 	resources_acquired = true;
+	ESP_LOGI(CALL_FLOW_TAG,
+		 "stage=app_call_media_ready gen=%lu elapsed_ms=%llu",
+		 (unsigned long)generation,
+		 (unsigned long long)((esp_timer_get_time() - started_at_us) / 1000LL));
 
 	if (app_call_start_should_cancel(generation)) {
 		canceled = true;
@@ -334,6 +339,10 @@ static void app_call_start_task(void *arg)
 		goto done;
 	}
 	signalling_started = true;
+	ESP_LOGI(CALL_FLOW_TAG,
+		 "stage=app_call_signalling_queued gen=%lu elapsed_ms=%llu",
+		 (unsigned long)generation,
+		 (unsigned long long)((esp_timer_get_time() - started_at_us) / 1000LL));
 
 	if (runtime.action == APP_CALL_START_ACCEPT) {
 		(void)app_state_sync_call_media_defaults(true, NULL);

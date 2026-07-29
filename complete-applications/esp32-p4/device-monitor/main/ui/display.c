@@ -26,6 +26,7 @@
 #include "sdkconfig.h"
 #include "extra/libs/qrcode/qrcodegen.h"
 
+#include "app_version.h"
 #include "app_task_affinity.h"
 #include "app_config.h"
 #include "ai_chat_assets.h"
@@ -60,12 +61,51 @@ static void *display_calloc_psram(size_t count, size_t size)
  * active video call, and ticks without a new frame are intentionally cheap. */
 #define DISPLAY_VIDEO_REFRESH_TASK_PERIOD_MS 10
 #define DISPLAY_CALL_PAGE_TRANSITION_GRACE_US (750LL * 1000LL)
+#define DISPLAY_CALL_VIDEO_CONTROLS_VISIBLE_US (3LL * 1000LL * 1000LL)
+#define DISPLAY_CALL_VIDEO_SCREEN_WIDTH       DISPLAY_NATIVE_WIDTH
+#define DISPLAY_CALL_VIDEO_SCREEN_HEIGHT      DISPLAY_NATIVE_HEIGHT
+#define DISPLAY_CALL_VIDEO_X                  0U
+#define DISPLAY_CALL_VIDEO_Y                  0U
+#define DISPLAY_CALL_VIDEO_OVERLAY_MARGIN     8U
+#define DISPLAY_CALL_VIDEO_TOP_X              DISPLAY_CALL_VIDEO_OVERLAY_MARGIN
+#define DISPLAY_CALL_VIDEO_TOP_Y              DISPLAY_CALL_VIDEO_OVERLAY_MARGIN
+#define DISPLAY_CALL_VIDEO_TOP_WIDTH          \
+    (DISPLAY_CALL_VIDEO_SCREEN_WIDTH - (2U * DISPLAY_CALL_VIDEO_OVERLAY_MARGIN))
+#define DISPLAY_CALL_VIDEO_TOP_HEIGHT         64U
+#define DISPLAY_CALL_VIDEO_CONTROLS_X         DISPLAY_CALL_VIDEO_OVERLAY_MARGIN
+#define DISPLAY_CALL_VIDEO_CONTROLS_Y         260U
+#define DISPLAY_CALL_VIDEO_CONTROLS_WIDTH     330U
+#define DISPLAY_CALL_VIDEO_CONTROLS_HEIGHT    52U
+#define DISPLAY_CALL_VIDEO_HANGUP_X           350U
+#define DISPLAY_CALL_VIDEO_HANGUP_Y           DISPLAY_CALL_VIDEO_CONTROLS_Y
+#define DISPLAY_CALL_VIDEO_HANGUP_WIDTH       122U
+#define DISPLAY_CALL_VIDEO_HANGUP_HEIGHT      DISPLAY_CALL_VIDEO_CONTROLS_HEIGHT
 #define DISPLAY_UI_WATCHDOG_TASK_STACK_SIZE 3072
 #define DISPLAY_UI_WATCHDOG_PERIOD_MS       1000
 #define DISPLAY_UI_WATCHDOG_STALL_US        (2LL * 1000LL * 1000LL)
 #define DISPLAY_UI_WATCHDOG_LOG_INTERVAL_US (3LL * 1000LL * 1000LL)
 #define DISPLAY_LVGL_STACK_LOW_WATERMARK    2048U
 #define DISPLAY_LVGL_STACK_LOG_INTERVAL_US  (5LL * 1000LL * 1000LL)
+
+_Static_assert(DISPLAY_CALL_VIDEO_SCREEN_WIDTH == 480U &&
+                   DISPLAY_CALL_VIDEO_SCREEN_HEIGHT == 320U,
+               "call video layout is designed for the native landscape panel");
+_Static_assert(CALL_VIDEO_RENDER_WIDTH == DISPLAY_CALL_VIDEO_SCREEN_WIDTH &&
+                   CALL_VIDEO_RENDER_HEIGHT == DISPLAY_CALL_VIDEO_SCREEN_HEIGHT,
+               "call video must fill the native landscape panel");
+_Static_assert(DISPLAY_CALL_VIDEO_TOP_X + DISPLAY_CALL_VIDEO_TOP_WIDTH +
+                       DISPLAY_CALL_VIDEO_OVERLAY_MARGIN ==
+                   DISPLAY_CALL_VIDEO_SCREEN_WIDTH,
+               "top call overlay must preserve equal side margins");
+_Static_assert(DISPLAY_CALL_VIDEO_CONTROLS_Y +
+                       DISPLAY_CALL_VIDEO_CONTROLS_HEIGHT +
+                       DISPLAY_CALL_VIDEO_OVERLAY_MARGIN ==
+                   DISPLAY_CALL_VIDEO_SCREEN_HEIGHT,
+               "bottom call overlays must preserve the lower margin");
+_Static_assert(DISPLAY_CALL_VIDEO_HANGUP_X + DISPLAY_CALL_VIDEO_HANGUP_WIDTH +
+                       DISPLAY_CALL_VIDEO_OVERLAY_MARGIN ==
+                   DISPLAY_CALL_VIDEO_SCREEN_WIDTH,
+               "hangup control must fit the landscape panel");
 
 static lv_disp_t *s_display;
 static lv_indev_t *s_touch_indev;
@@ -412,6 +452,19 @@ static portMUX_TYPE s_debug_capture_lock = portMUX_INITIALIZER_UNLOCKED;
 static display_debug_action_request_t *s_debug_action_request;
 static display_debug_capture_request_t *s_debug_capture_request;
 
+typedef enum {
+    DISPLAY_VIDEO_SURFACE_DEVICE_CALL = 0,
+    DISPLAY_VIDEO_SURFACE_WECHAT,
+} display_video_surface_t;
+
+typedef struct {
+    lv_obj_t *top;
+    lv_obj_t *controls;
+    lv_obj_t *hangup;
+    int64_t hide_at_us;
+    bool hidden;
+} display_call_video_overlays_t;
+
 static lv_obj_t *s_home_page;
 static lv_obj_t *s_home_carousel;
 static lv_obj_t *s_home_pages[2];
@@ -546,6 +599,9 @@ static lv_obj_t *s_call_audio_peer_label;
 static lv_obj_t *s_call_video_state_label;
 static lv_obj_t *s_call_video_peer_label;
 static lv_obj_t *s_call_video_duration_label;
+static lv_obj_t *s_call_video_stats_label;
+static lv_obj_t *s_call_video_mic_value_label;
+static lv_obj_t *s_call_video_speaker_value_label;
 static lv_obj_t *s_call_video_image;
 static lv_obj_t *s_call_video_placeholder_label;
 static lv_obj_t *s_call_hangup_confirm_box;
@@ -554,6 +610,9 @@ static uint32_t s_call_video_sequence;
 static bool s_call_video_first_frame_logged;
 static bool s_call_video_direct_lcd_active;
 static bool s_call_video_direct_lcd_failed;
+static bool s_call_video_landscape_active;
+static display_call_video_overlays_t s_call_video_overlays;
+static bool s_call_hangup_pending;
 static display_call_type_t s_call_visible_type = DISPLAY_CALL_TYPE_AUDIO;
 static char s_call_visible_room_id[DISPLAY_CALL_ROOM_ID_MAX];
 static lv_obj_t *s_call_add_value_labels[DISPLAY_CALL_ADD_FIELD_COUNT];
@@ -568,6 +627,17 @@ static display_qr_image_t s_wechat_qr_image;
 static lv_obj_t *s_wechat_duration_label;
 static lv_obj_t *s_wechat_mic_value_label;
 static lv_obj_t *s_wechat_speaker_value_label;
+static lv_obj_t *s_wechat_video_panel;
+static lv_obj_t *s_wechat_video_image;
+static lv_obj_t *s_wechat_video_placeholder_label;
+static lv_obj_t *s_wechat_video_state_label;
+static lv_img_dsc_t s_wechat_video_image_dsc;
+static uint32_t s_wechat_video_sequence;
+static bool s_wechat_video_first_frame_logged;
+static bool s_wechat_video_direct_lcd_active;
+static bool s_wechat_video_direct_lcd_failed;
+static bool s_wechat_video_session_active;
+static display_call_video_overlays_t s_wechat_video_overlays;
 static lv_obj_t *s_wechat_scan_info_overlay;
 static lv_obj_t *s_wechat_add_open_id_label;
 static lv_obj_t *s_wechat_add_edit_ta;
@@ -684,6 +754,7 @@ static void display_call_hangup_btn_cb(lv_event_t *event);
 static void display_call_hangup_cancel_btn_cb(lv_event_t *event);
 static void display_call_hangup_confirm_btn_cb(lv_event_t *event);
 static void display_call_volume_btn_cb(lv_event_t *event);
+static void display_call_video_surface_tap_cb(lv_event_t *event);
 static void display_wechat_child_back_btn_cb(lv_event_t *event);
 static void display_wechat_add_btn_cb(lv_event_t *event);
 static void display_wechat_list_btn_cb(lv_event_t *event);
@@ -751,6 +822,9 @@ static void display_update_network_test_page(const display_status_t *status);
 static void display_update_tirtc_config_page(const display_status_t *status);
 static void display_update_call_active_page(const display_status_t *status);
 static void display_update_call_video_frame(void);
+static void display_reset_call_video_surface(void);
+static void display_reset_wechat_video_surface(void);
+static void display_apply_call_video_layout(bool active);
 static bool display_call_state_keeps_active_page(display_call_state_t state);
 static void display_update_wechat_page(const display_status_t *status);
 static void display_update_wechat_contact_list(const display_status_t *status);
@@ -780,6 +854,7 @@ static esp_err_t display_start_refresh_timer(void);
 static void display_read_latest_status(display_status_t *status);
 static void display_show_wifi_alert(const char *title, const char *message);
 static const lv_font_t *display_ascii_font(uint8_t size);
+static const lv_font_t *display_cjk_font(void);
 static const lv_font_t *display_ai_chat_font(void);
 static void display_apply_ai_dialog_font_if_ready(void);
 static void display_text_set(lv_obj_t *obj, const char *text);
@@ -805,6 +880,13 @@ static lv_obj_t *display_create_native_text(lv_obj_t *parent,
                                             lv_color_t color,
                                             uint8_t font_size,
                                             lv_text_align_t align);
+static lv_obj_t *display_create_native_live_text(lv_obj_t *parent,
+                                                 const char *text,
+                                                 lv_coord_t x,
+                                                 lv_coord_t y,
+                                                 lv_coord_t width,
+                                                 lv_color_t color,
+                                                 lv_text_align_t align);
 static lv_obj_t *display_create_ai_text(lv_obj_t *parent,
                                         const char *text,
                                         lv_coord_t x,
@@ -928,7 +1010,7 @@ static void display_show_wechat_delete_confirm(uint8_t contact_index);
 #define DISPLAY_KB_BTN_SPACE_ID              37
 #define DISPLAY_KB_BTN_CURSOR_RIGHT_ID       38
 #define DISPLAY_KB_BTN_JOIN_ID               39
-#define DISPLAY_TIRTC_VERSION_TEXT           "TiRTC 2.2.0"
+#define DISPLAY_TIRTC_VERSION_TEXT           "TiRTC " APP_DEMO_TIRTC_SDK_VERSION
 #define DISPLAY_AI_CHAT_STATE_IDLE           0U
 #define DISPLAY_AI_CHAT_STATE_STARTING       1U
 #define DISPLAY_AI_CHAT_STATE_TOKEN          2U
@@ -1351,6 +1433,8 @@ static const char *display_contact_scan_error_text(esp_err_t result)
         return "摄像头不可用";
     case ESP_ERR_INVALID_STATE:
         return "扫码服务忙";
+    case ESP_ERR_NOT_ALLOWED:
+        return "请先在微信小程序完成授权";
     case ESP_ERR_NOT_FOUND:
         return "未识别二维码";
     case ESP_ERR_INVALID_RESPONSE:
@@ -2746,9 +2830,14 @@ static const lv_font_t *display_ascii_font(uint8_t size)
 #endif
 }
 
-static const lv_font_t *display_ai_chat_font(void)
+static const lv_font_t *display_cjk_font(void)
 {
     return ai_chat_font_get_current();
+}
+
+static const lv_font_t *display_ai_chat_font(void)
+{
+    return display_cjk_font();
 }
 
 static void display_apply_ai_dialog_font_one(lv_obj_t *label)
@@ -3232,6 +3321,27 @@ static lv_obj_t *display_create_native_text(lv_obj_t *parent,
                                       font_size,
                                       align,
                                       true);
+}
+
+static lv_obj_t *display_create_native_live_text(lv_obj_t *parent,
+                                                 const char *text,
+                                                 lv_coord_t x,
+                                                 lv_coord_t y,
+                                                 lv_coord_t width,
+                                                 lv_color_t color,
+                                                 lv_text_align_t align)
+{
+    lv_obj_t *label = lv_label_create(parent);
+
+    display_obj_set_native_pos(label, x, y);
+    lv_obj_set_width(label, display_native_scale_x(width));
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(label, color, 0);
+    lv_obj_set_style_text_align(label, align, 0);
+    lv_obj_set_style_text_font(label, display_cjk_font(), 0);
+    lv_obj_clear_flag(label, LV_OBJ_FLAG_SCROLLABLE);
+    display_text_set(label, text != NULL ? text : "");
+    return label;
 }
 
 static lv_obj_t *display_create_ai_text(lv_obj_t *parent,
@@ -5144,41 +5254,6 @@ static void display_create_wechat_contact_row(lv_obj_t *parent, uint8_t index, l
     lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
 }
 
-static lv_obj_t *display_create_call_duration_row(lv_obj_t *parent,
-                                                  lv_coord_t y,
-                                                  lv_obj_t **value_label)
-{
-    lv_obj_t *row = display_create_figma_box(parent,
-                                             8,
-                                             y,
-                                             304,
-                                             32,
-                                             lv_color_hex(0xFFFFFF),
-                                             lv_color_hex(0xD6E4EF),
-                                             7);
-
-    display_create_figma_text(row,
-                              "通话时长",
-                              16,
-                              8,
-                              180,
-                              lv_color_hex(0x10233B),
-                              12,
-                              LV_TEXT_ALIGN_LEFT);
-    lv_obj_t *value_obj = lv_label_create(row);
-    display_obj_set_design_pos(value_obj, 184, 7);
-    lv_obj_set_width(value_obj, display_scale_x(104));
-    lv_label_set_long_mode(value_obj, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_color(value_obj, lv_color_hex(0x20C982), 0);
-    lv_obj_set_style_text_align(value_obj, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_style_text_font(value_obj, display_ai_chat_font(), 0);
-    lv_label_set_text(value_obj, "00:00");
-    if (value_label != NULL) {
-        *value_label = value_obj;
-    }
-    return row;
-}
-
 static void display_create_call_scan_info_overlay(lv_obj_t *parent)
 {
     lv_obj_t *card = NULL;
@@ -5326,87 +5401,6 @@ static void display_create_wechat_scan_info_overlay(lv_obj_t *parent)
                                             12,
                                             display_wechat_scan_info_close_btn_cb);
     lv_obj_set_style_radius(close_btn, 7, 0);
-}
-
-static lv_obj_t *display_create_call_volume_row(lv_obj_t *parent,
-                                                lv_coord_t y,
-                                                const char *label,
-                                                const char *value,
-                                                display_call_volume_action_t down_action,
-                                                display_call_volume_action_t up_action,
-                                                lv_obj_t **value_label,
-                                                lv_event_cb_t cb)
-{
-    lv_obj_t *row = display_create_figma_box(parent,
-                                             8,
-                                             y,
-                                             304,
-                                             34,
-                                             lv_color_hex(0xFFFFFF),
-                                             lv_color_hex(0xD6E4EF),
-                                             7);
-    lv_obj_t *down_btn = NULL;
-    lv_obj_t *up_btn = NULL;
-
-    display_create_figma_text(row,
-                              label,
-                              12,
-                              9,
-                              132,
-                              lv_color_hex(0x10233B),
-                              12,
-                              LV_TEXT_ALIGN_LEFT);
-    down_btn = display_create_figma_button(row,
-                                           152,
-                                           4,
-                                           32,
-                                           26,
-                                           lv_color_hex(0xEDF5FB),
-                                           lv_color_hex(0xD6E4EF),
-                                           "-",
-                                           lv_color_hex(0x10233B),
-                                           16,
-                                           NULL);
-    lv_obj_set_style_radius(down_btn, 7, 0);
-    lv_obj_add_event_cb(down_btn,
-                        cb,
-                        LV_EVENT_CLICKED,
-                        (void *)(uintptr_t)down_action);
-    lv_obj_t *pill = display_create_figma_box(row,
-                                              192,
-                                              4,
-                                              34,
-                                              26,
-                                              lv_color_hex(0xEDF8F2),
-                                              lv_color_hex(0xEDF8F2),
-                                              6);
-    if (value_label != NULL) {
-        *value_label = display_create_figma_text(pill,
-                                                 value,
-                                                 0,
-                                                 6,
-                                                 34,
-                                                 lv_color_hex(0x20C982),
-                                                 12,
-                                                 LV_TEXT_ALIGN_CENTER);
-    }
-    up_btn = display_create_figma_button(row,
-                                         234,
-                                         4,
-                                         32,
-                                         26,
-                                         lv_color_hex(0xEDF5FB),
-                                         lv_color_hex(0xD6E4EF),
-                                         "+",
-                                         lv_color_hex(0x10233B),
-                                         16,
-                                         NULL);
-    lv_obj_set_style_radius(up_btn, 7, 0);
-    lv_obj_add_event_cb(up_btn,
-                        cb,
-                        LV_EVENT_CLICKED,
-                        (void *)(uintptr_t)up_action);
-    return row;
 }
 
 static lv_obj_t *display_create_call_native_volume_card(lv_obj_t *parent,
@@ -5678,8 +5672,150 @@ static void display_exit_call_scan_to_previous(void)
     }
 }
 
+static void display_set_call_video_overlays_hidden(
+    display_call_video_overlays_t *overlays,
+    lv_obj_t *image,
+    lv_obj_t *placeholder,
+    bool direct_lcd_active,
+    bool hidden)
+{
+    if (overlays == NULL) {
+        return;
+    }
+
+    lv_obj_t *objects[] = {
+        overlays->top,
+        overlays->controls,
+        overlays->hangup,
+    };
+    for (size_t index = 0; index < sizeof(objects) / sizeof(objects[0]); ++index) {
+        if (objects[index] == NULL) {
+            continue;
+        }
+        if (hidden) {
+            lv_obj_add_flag(objects[index], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(objects[index], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    if (placeholder != NULL) {
+        bool frame_visible =
+            direct_lcd_active ||
+            (image != NULL && !lv_obj_has_flag(image, LV_OBJ_FLAG_HIDDEN));
+        if (hidden || frame_visible) {
+            lv_obj_add_flag(placeholder, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(placeholder, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    overlays->hidden = hidden;
+    overlays->hide_at_us =
+        hidden ? 0 : esp_timer_get_time() + DISPLAY_CALL_VIDEO_CONTROLS_VISIBLE_US;
+}
+
+static void display_reset_call_video_surface(void)
+{
+    s_call_video_sequence = 0;
+    s_call_video_first_frame_logged = false;
+    s_call_video_direct_lcd_active = false;
+    s_call_video_direct_lcd_failed = false;
+    display_set_call_video_overlays_hidden(&s_call_video_overlays,
+                                           s_call_video_image,
+                                           s_call_video_placeholder_label,
+                                           false,
+                                           false);
+    if (s_call_video_image != NULL) {
+        lv_obj_add_flag(s_call_video_image, LV_OBJ_FLAG_HIDDEN);
+        lv_img_cache_invalidate_src(&s_call_video_image_dsc);
+        s_call_video_image_dsc.data = NULL;
+    }
+    call_video_renderer_release_presented_rgb565();
+    if (s_call_video_placeholder_label != NULL) {
+        lv_obj_clear_flag(s_call_video_placeholder_label, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void display_reset_wechat_video_surface(void)
+{
+    s_wechat_video_sequence = 0;
+    s_wechat_video_first_frame_logged = false;
+    s_wechat_video_direct_lcd_active = false;
+    s_wechat_video_direct_lcd_failed = false;
+    display_set_call_video_overlays_hidden(&s_wechat_video_overlays,
+                                           s_wechat_video_image,
+                                           s_wechat_video_placeholder_label,
+                                           false,
+                                           false);
+    if (s_wechat_video_image != NULL) {
+        lv_obj_add_flag(s_wechat_video_image, LV_OBJ_FLAG_HIDDEN);
+        lv_img_cache_invalidate_src(&s_wechat_video_image_dsc);
+        s_wechat_video_image_dsc.data = NULL;
+    }
+    call_video_renderer_release_presented_rgb565();
+    if (s_wechat_video_placeholder_label != NULL) {
+        lv_obj_clear_flag(s_wechat_video_placeholder_label, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void display_apply_call_video_layout(bool active)
+{
+    const display_driver_orientation_t target =
+        DISPLAY_DRIVER_ORIENTATION_LANDSCAPE;
+    if (s_call_video_landscape_active == active &&
+        display_driver_get_orientation() == target) {
+        return;
+    }
+
+    display_set_video_refresh_enabled(false);
+    display_reset_call_video_surface();
+    display_reset_wechat_video_surface();
+    if (display_driver_get_orientation() != target) {
+        esp_err_t ret = display_driver_set_orientation(target);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG,
+                     "call video landscape restore failed: %s",
+                     esp_err_to_name(ret));
+            return;
+        }
+    }
+
+    s_call_video_landscape_active = active;
+    if (s_call_active_page != NULL) {
+        lv_obj_set_size(s_call_active_page,
+                        DISPLAY_CALL_VIDEO_SCREEN_WIDTH,
+                        DISPLAY_CALL_VIDEO_SCREEN_HEIGHT);
+    }
+    if (s_call_audio_panel != NULL) {
+        lv_obj_set_size(s_call_audio_panel, DISPLAY_NATIVE_WIDTH, DISPLAY_NATIVE_HEIGHT);
+    }
+    if (s_call_video_panel != NULL) {
+        lv_obj_set_size(s_call_video_panel,
+                        DISPLAY_CALL_VIDEO_SCREEN_WIDTH,
+                        DISPLAY_CALL_VIDEO_SCREEN_HEIGHT);
+    }
+    if (s_wechat_active_page != NULL) {
+        lv_obj_set_size(s_wechat_active_page,
+                        DISPLAY_CALL_VIDEO_SCREEN_WIDTH,
+                        DISPLAY_CALL_VIDEO_SCREEN_HEIGHT);
+    }
+    if (s_wechat_video_panel != NULL) {
+        lv_obj_set_size(s_wechat_video_panel,
+                        DISPLAY_CALL_VIDEO_SCREEN_WIDTH,
+                        DISPLAY_CALL_VIDEO_SCREEN_HEIGHT);
+    }
+    lv_obj_invalidate(lv_scr_act());
+}
+
 static void display_show_page(lv_obj_t *page)
 {
+    bool keep_video_layout =
+        (page == s_call_active_page && s_call_visible_type == DISPLAY_CALL_TYPE_VIDEO) ||
+        (page == s_wechat_active_page &&
+         CONFIG_APP_WECHAT_VOIP_REMOTE_VIDEO_ENABLE);
+    if (!keep_video_layout) {
+        display_apply_call_video_layout(false);
+    }
     if (page != s_call_scan_page) {
         display_stop_call_scan_if_active();
     }
@@ -5801,8 +5937,17 @@ static void display_show_call_active_page(void)
     bool was_visible = display_page_is_visible(s_call_active_page);
 
     if (s_call_active_page == NULL) {
+        /* Audio and video share the native landscape coordinate space. */
+        display_apply_call_video_layout(false);
         display_build_call_active_page(lv_scr_act());
         was_visible = false;
+    }
+    if (!was_visible) {
+        display_set_call_video_overlays_hidden(&s_call_video_overlays,
+                                               s_call_video_image,
+                                               s_call_video_placeholder_label,
+                                               s_call_video_direct_lcd_active,
+                                               false);
     }
     display_update_call_active_page(&s_last_status);
     display_show_page(s_call_active_page);
@@ -5866,11 +6011,23 @@ static void display_show_wechat_list_page(void)
 
 static void display_show_wechat_active_page(void)
 {
+    bool was_visible = display_page_is_visible(s_wechat_active_page);
+
+    display_apply_call_video_layout(
+        CONFIG_APP_WECHAT_VOIP_REMOTE_VIDEO_ENABLE);
     if (s_wechat_active_page == NULL) {
         display_build_wechat_active_page(lv_scr_act());
+        was_visible = false;
     }
-    display_update_wechat_active_page(&s_last_status);
+    if (!was_visible) {
+        display_set_call_video_overlays_hidden(&s_wechat_video_overlays,
+                                               s_wechat_video_image,
+                                               s_wechat_video_placeholder_label,
+                                               s_wechat_video_direct_lcd_active,
+                                               false);
+    }
     display_show_page(s_wechat_active_page);
+    display_update_wechat_active_page(&s_last_status);
 }
 
 static void display_show_system_page(void)
@@ -6803,20 +6960,37 @@ static void display_call_contact_call_btn_cb(lv_event_t *event)
 static void display_call_hangup_btn_cb(lv_event_t *event)
 {
     esp_err_t ret = ESP_ERR_INVALID_STATE;
+    const lv_event_code_t code = lv_event_get_code(event);
 
-    (void)event;
+    if ((code != LV_EVENT_PRESSED && code != LV_EVENT_CLICKED) ||
+        s_call_hangup_pending) {
+        return;
+    }
 
+    s_call_hangup_pending = true;
+    display_hide_call_hangup_confirm();
+    display_set_video_refresh_enabled(false);
+    if (s_call_audio_state_label != NULL) {
+        display_text_set(s_call_audio_state_label, "正在挂断");
+    }
+    if (s_call_video_state_label != NULL) {
+        display_text_set(s_call_video_state_label, "正在挂断");
+    }
     if (s_actions.on_hangup_call != NULL) {
         ret = s_actions.on_hangup_call(s_actions.ctx);
     }
     if (ret != ESP_OK) {
+        s_call_hangup_pending = false;
+        display_update_call_active_page(&s_last_status);
         display_show_wifi_alert("CALL", "HANGUP FAILED");
         return;
     }
 
-    display_hide_call_hangup_confirm();
-    s_call_active_started_us = 0;
-    display_show_call_page();
+    /*
+     * Stay on the active page until the business snapshot reaches idle. Going
+     * to the list here makes the next refresh reopen the still-active call
+     * page, which looks like a slow or ignored hangup.
+     */
 }
 
 static void display_call_hangup_cancel_btn_cb(lv_event_t *event)
@@ -6879,6 +7053,59 @@ static void display_call_volume_btn_cb(lv_event_t *event)
     display_call_volume_action_t action =
         (display_call_volume_action_t)(uintptr_t)lv_event_get_user_data(event);
     display_apply_call_volume_action(action, false);
+}
+
+static void display_call_video_surface_tap_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    display_video_surface_t surface =
+        (display_video_surface_t)(uintptr_t)lv_event_get_user_data(event);
+    lv_obj_t *target = lv_event_get_target(event);
+    display_call_video_overlays_t *overlays = NULL;
+    lv_obj_t *image = NULL;
+    lv_obj_t *placeholder = NULL;
+    bool direct_lcd_active = false;
+    const char *owner = NULL;
+
+    if (surface == DISPLAY_VIDEO_SURFACE_WECHAT) {
+        if (target != s_wechat_video_panel ||
+            !display_page_is_visible(s_wechat_active_page) ||
+            !CONFIG_APP_WECHAT_VOIP_REMOTE_VIDEO_ENABLE) {
+            return;
+        }
+        overlays = &s_wechat_video_overlays;
+        image = s_wechat_video_image;
+        placeholder = s_wechat_video_placeholder_label;
+        direct_lcd_active = s_wechat_video_direct_lcd_active;
+        owner = "wechat";
+    } else {
+        if (target != s_call_video_panel ||
+            !display_page_is_visible(s_call_active_page) ||
+            s_call_visible_type != DISPLAY_CALL_TYPE_VIDEO) {
+            return;
+        }
+        overlays = &s_call_video_overlays;
+        image = s_call_video_image;
+        placeholder = s_call_video_placeholder_label;
+        direct_lcd_active = s_call_video_direct_lcd_active;
+        owner = "device-call";
+    }
+
+    display_set_call_video_overlays_hidden(overlays,
+                                           image,
+                                           placeholder,
+                                           direct_lcd_active,
+                                           !overlays->hidden);
+    /* The currently presented RGB slot remains owned by the renderer, so LVGL
+     * can redraw only the changed controls without waiting for another frame. */
+    lv_refr_now(s_display);
+    ESP_LOGI(TAG,
+             "%s video controls %s",
+             owner,
+             overlays->hidden ? "hidden" : "visible");
 }
 
 static void display_wechat_child_back_btn_cb(lv_event_t *event)
@@ -7020,7 +7247,11 @@ static void display_wechat_confirm_add_btn_cb(lv_event_t *event)
     ret = s_actions.on_add_wechat_contact(open_id_trimmed, s_actions.ctx);
     if (ret != ESP_OK) {
         display_show_wifi_alert("微信联系人",
-                                ret == ESP_ERR_INVALID_STATE ? "请先进入微信呼叫" : "添加失败");
+                                ret == ESP_ERR_INVALID_STATE
+                                    ? "请先进入微信呼叫"
+                                    : ret == ESP_ERR_NOT_ALLOWED
+                                          ? "请先在微信小程序完成授权"
+                                          : "添加失败");
         return;
     }
 
@@ -7050,8 +7281,19 @@ static void display_wechat_contact_call_btn_cb(lv_event_t *event)
     open_id = s_last_status.wechat_contacts[contact_index].open_id;
     ret = s_actions.on_wechat_contact(open_id, s_actions.ctx);
     if (ret != ESP_OK) {
+        const char *message = "呼叫启动失败";
+        if (ret == ESP_ERR_INVALID_STATE) {
+            if (!s_last_status.network_connected) {
+                message = "请先连接 Wi-Fi";
+            } else if (s_last_status.wechat_call_state ==
+                       DISPLAY_WECHAT_CALL_STATE_CLOSING) {
+                message = "上一通呼叫正在结束";
+            } else {
+                message = "通话资源暂未就绪";
+            }
+        }
         display_show_wifi_alert("微信呼叫",
-                                ret == ESP_ERR_INVALID_STATE ? "请先连接 Wi-Fi" : "呼叫启动失败");
+                                message);
         return;
     }
     s_wechat_active_started_us = 0;
@@ -7182,7 +7424,9 @@ static void display_wechat_delete_confirm_btn_cb(lv_event_t *event)
     if (ret != ESP_OK) {
         display_hide_wechat_delete_confirm();
         display_show_wifi_alert("微信联系人",
-                                ret == ESP_ERR_NOT_FOUND ? "联系人不存在" : "删除失败");
+                                ret == ESP_ERR_NOT_SUPPORTED
+                                    ? "请在微信小程序取消授权"
+                                    : ret == ESP_ERR_NOT_FOUND ? "联系人不存在" : "删除失败");
         return;
     }
 
@@ -7194,7 +7438,8 @@ static void display_wechat_delete_confirm_btn_cb(lv_event_t *event)
 
 static void display_wechat_hangup_btn_cb(lv_event_t *event)
 {
-    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+    lv_event_code_t code = lv_event_get_code(event);
+    if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED) {
         return;
     }
 
@@ -8177,18 +8422,18 @@ static const char *display_call_state_text(display_call_state_t state)
 {
     switch (state) {
     case DISPLAY_CALL_STATE_OUTGOING:
-        return "CALLING";
+        return "正在呼叫";
     case DISPLAY_CALL_STATE_INCOMING:
-        return "INCOMING";
+        return "来电";
     case DISPLAY_CALL_STATE_CONNECTING:
-        return "CONNECTING";
+        return "正在连接";
     case DISPLAY_CALL_STATE_IN_CALL:
-        return "IN CALL";
+        return "通话中";
     case DISPLAY_CALL_STATE_ERROR:
-        return "CALL ERROR";
+        return "通话异常";
     case DISPLAY_CALL_STATE_IDLE:
     default:
-        return "IDLE";
+        return "空闲";
     }
 }
 
@@ -8204,11 +8449,56 @@ static void display_update_call_video_frame(void)
     call_video_renderer_stats_t stats = {0};
     const uint16_t *pixels = NULL;
     size_t pixel_count = 0;
+    lv_obj_t *image = NULL;
+    lv_obj_t *placeholder = NULL;
+    lv_img_dsc_t *image_dsc = NULL;
+#if CONFIG_APP_CALL_VIDEO_DIRECT_LCD
+    display_call_video_overlays_t *overlays = NULL;
+#endif
+    uint32_t *sequence = NULL;
+    bool *first_frame_logged = NULL;
+    bool *direct_lcd_active = NULL;
+#if CONFIG_APP_CALL_VIDEO_DIRECT_LCD
+    bool *direct_lcd_failed = NULL;
+#endif
+    const char *owner = NULL;
     const char *presentation_path = "lvgl";
     uint32_t direct_transfer_us = 0;
     bool frame_presented = false;
 
-    if (s_call_video_image == NULL || !display_page_is_visible(s_call_active_page)) {
+    if (s_call_video_image != NULL &&
+        s_call_video_landscape_active &&
+        display_page_is_visible(s_call_active_page)) {
+        image = s_call_video_image;
+        placeholder = s_call_video_placeholder_label;
+        image_dsc = &s_call_video_image_dsc;
+#if CONFIG_APP_CALL_VIDEO_DIRECT_LCD
+        overlays = &s_call_video_overlays;
+#endif
+        sequence = &s_call_video_sequence;
+        first_frame_logged = &s_call_video_first_frame_logged;
+        direct_lcd_active = &s_call_video_direct_lcd_active;
+#if CONFIG_APP_CALL_VIDEO_DIRECT_LCD
+        direct_lcd_failed = &s_call_video_direct_lcd_failed;
+#endif
+        owner = "device-call";
+    } else if (s_wechat_video_image != NULL &&
+               s_call_video_landscape_active &&
+               display_page_is_visible(s_wechat_active_page)) {
+        image = s_wechat_video_image;
+        placeholder = s_wechat_video_placeholder_label;
+        image_dsc = &s_wechat_video_image_dsc;
+#if CONFIG_APP_CALL_VIDEO_DIRECT_LCD
+        overlays = &s_wechat_video_overlays;
+#endif
+        sequence = &s_wechat_video_sequence;
+        first_frame_logged = &s_wechat_video_first_frame_logged;
+        direct_lcd_active = &s_wechat_video_direct_lcd_active;
+#if CONFIG_APP_CALL_VIDEO_DIRECT_LCD
+        direct_lcd_failed = &s_wechat_video_direct_lcd_failed;
+#endif
+        owner = "wechat";
+    } else {
         return;
     }
 
@@ -8217,9 +8507,29 @@ static void display_update_call_video_frame(void)
         return;
     }
 
+#if CONFIG_APP_CALL_VIDEO_DIRECT_LCD
+    if (overlays != NULL &&
+        !overlays->hidden &&
+        overlays->hide_at_us > 0 &&
+        esp_timer_get_time() >= overlays->hide_at_us &&
+        image_dsc->data != NULL) {
+        /*
+         * Remove controls while the previous RGB slot is still retained.
+         * LVGL only refreshes the overlay rectangles; subsequent video frames
+         * can then use one full-screen DMA transaction without temporal strips.
+         */
+        display_set_call_video_overlays_hidden(overlays,
+                                               image,
+                                               placeholder,
+                                               *direct_lcd_active,
+                                               true);
+        lv_refr_now(s_display);
+    }
+#endif
+
     esp_err_t ret = call_video_renderer_present_next_rgb565(&pixels,
                                                              &pixel_count,
-                                                             &s_call_video_sequence);
+                                                             sequence);
     if (ret != ESP_OK) {
         return;
     }
@@ -8230,16 +8540,29 @@ static void display_update_call_video_frame(void)
     }
 
 #if CONFIG_APP_CALL_VIDEO_DIRECT_LCD
-    if (!s_call_video_direct_lcd_failed) {
-        if (s_call_video_placeholder_label != NULL &&
-            !lv_obj_has_flag(s_call_video_placeholder_label, LV_OBJ_FLAG_HIDDEN)) {
-            lv_obj_add_flag(s_call_video_placeholder_label, LV_OBJ_FLAG_HIDDEN);
-            /* Commit the one-time placeholder removal before the direct frame
-             * takes ownership of the video viewport. */
-            lv_refr_now(s_display);
+    bool image_backing_ready =
+        image_dsc->data != NULL &&
+        lv_img_get_src(image) == image_dsc &&
+        !lv_obj_has_flag(image, LV_OBJ_FLAG_HIDDEN);
+    if (!*direct_lcd_failed &&
+        overlays != NULL &&
+        overlays->hidden &&
+        image_backing_ready) {
+        bool direct_transition = !*direct_lcd_active;
+        if (placeholder != NULL &&
+            !lv_obj_has_flag(placeholder, LV_OBJ_FLAG_HIDDEN)) {
+            lv_obj_add_flag(placeholder, LV_OBJ_FLAG_HIDDEN);
         }
-        ret = display_driver_blit_rgb565(CALL_VIDEO_RENDER_SOURCE_X,
-                                         CALL_VIDEO_RENDER_SOURCE_Y,
+        /*
+         * Keep the presented slot retained and update LVGL's backing pointer
+         * without invalidating the image. This lets a tap redraw controls
+         * immediately over the current frame while normal video presentation
+         * stays on the single-transfer direct path.
+         */
+        lv_img_cache_invalidate_src(image_dsc);
+        image_dsc->data = (const uint8_t *)pixels;
+        ret = display_driver_blit_rgb565(DISPLAY_CALL_VIDEO_X,
+                                         DISPLAY_CALL_VIDEO_Y,
                                          CALL_VIDEO_RENDER_WIDTH,
                                          CALL_VIDEO_RENDER_HEIGHT,
                                          pixels,
@@ -8247,49 +8570,54 @@ static void display_update_call_video_frame(void)
         if (ret == ESP_OK) {
             frame_presented = true;
             presentation_path = "direct-psram-dma";
-            s_call_video_direct_lcd_active = true;
-            /* Direct drawing is synchronous, so the converter can reuse this
-             * output slot immediately after the SPI DMA queue drains. */
-            call_video_renderer_release_presented_rgb565();
+            *direct_lcd_active = true;
+            if (direct_transition) {
+                ESP_LOGI(TAG,
+                         "%s video path=direct transfer=%luus",
+                         owner,
+                         (unsigned long)direct_transfer_us);
+            }
         } else {
-            s_call_video_direct_lcd_failed = true;
-            s_call_video_direct_lcd_active = false;
+            *direct_lcd_failed = true;
+            *direct_lcd_active = false;
             ESP_LOGW(TAG,
-                     "call video direct LCD unavailable: %s; using LVGL fallback",
+                     "%s video direct LCD unavailable: %s; using LVGL fallback",
+                     owner,
                      esp_err_to_name(ret));
         }
     }
 #endif
 
     if (!frame_presented) {
-        bool image_was_hidden = lv_obj_has_flag(s_call_video_image, LV_OBJ_FLAG_HIDDEN);
-        lv_img_cache_invalidate_src(&s_call_video_image_dsc);
-        s_call_video_image_dsc.data = (const uint8_t *)pixels;
-        if (image_was_hidden || lv_img_get_src(s_call_video_image) != &s_call_video_image_dsc) {
-            lv_img_set_src(s_call_video_image, &s_call_video_image_dsc);
+        bool image_was_hidden = lv_obj_has_flag(image, LV_OBJ_FLAG_HIDDEN);
+        lv_img_cache_invalidate_src(image_dsc);
+        image_dsc->data = (const uint8_t *)pixels;
+        if (image_was_hidden || lv_img_get_src(image) != image_dsc) {
+            lv_img_set_src(image, image_dsc);
         } else {
-            lv_obj_invalidate(s_call_video_image);
+            lv_obj_invalidate(image);
         }
         if (image_was_hidden) {
-            lv_obj_clear_flag(s_call_video_image, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(image, LV_OBJ_FLAG_HIDDEN);
         }
-        s_call_video_direct_lcd_active = false;
+        *direct_lcd_active = false;
     }
-    if (s_call_video_placeholder_label != NULL &&
-        !lv_obj_has_flag(s_call_video_placeholder_label, LV_OBJ_FLAG_HIDDEN)) {
-        lv_obj_add_flag(s_call_video_placeholder_label, LV_OBJ_FLAG_HIDDEN);
+    if (placeholder != NULL &&
+        !lv_obj_has_flag(placeholder, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_add_flag(placeholder, LV_OBJ_FLAG_HIDDEN);
     }
-    if (!s_call_video_first_frame_logged) {
-        s_call_video_first_frame_logged = true;
+    if (!*first_frame_logged) {
+        *first_frame_logged = true;
         ESP_LOGI(TAG,
-                 "call video first frame presented: path=%s source=%ux%u output=%ux%u "
+                 "%s video first frame presented: path=%s source=%ux%u output=%ux%u "
                  "sequence=%lu transfer=%luus",
+                 owner,
                  presentation_path,
                  stats.source_width,
                  stats.source_height,
                  CALL_VIDEO_RENDER_WIDTH,
                  CALL_VIDEO_RENDER_HEIGHT,
-                 (unsigned long)s_call_video_sequence,
+                 (unsigned long)*sequence,
                  (unsigned long)direct_transfer_us);
     }
 }
@@ -8307,7 +8635,8 @@ static void display_update_call_active_page(const display_status_t *status)
     char mic_text[4] = {0};
     char speaker_text[4] = {0};
     char duration[8] = "00:00";
-    char peer[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX + 8] = "PEER --";
+    char stats_text[64] = "--x-- | TX -- | RX --";
+    char peer[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX + 8] = "设备 --";
     const char *state_text = NULL;
 
     if (status == NULL) {
@@ -8317,12 +8646,17 @@ static void display_update_call_active_page(const display_status_t *status)
     call_video_renderer_get_stats(&video_stats);
     video = status->call_type == DISPLAY_CALL_TYPE_VIDEO ||
             (video_stats.running && display_call_state_keeps_active_page(status->call_state));
-    display_set_video_refresh_enabled(video &&
+    visible_type = video ? DISPLAY_CALL_TYPE_VIDEO : DISPLAY_CALL_TYPE_AUDIO;
+    display_apply_call_video_layout(video);
+    display_set_video_refresh_enabled(!s_call_hangup_pending &&
+                                      video &&
+                                      s_call_video_landscape_active &&
                                       display_call_state_keeps_active_page(status->call_state) &&
                                       display_page_is_visible(s_call_active_page));
-    visible_type = video ? DISPLAY_CALL_TYPE_VIDEO : DISPLAY_CALL_TYPE_AUDIO;
     in_call = status->call_state == DISPLAY_CALL_STATE_IN_CALL;
-    state_text = display_call_state_text(status->call_state);
+    state_text = s_call_hangup_pending ?
+                     "正在挂断" :
+                     display_call_state_text(status->call_state);
     session_changed = s_call_visible_type != visible_type ||
                       strcmp(s_call_visible_room_id, status->call_room_id) != 0;
     if (session_changed) {
@@ -8330,19 +8664,7 @@ static void display_update_call_active_page(const display_status_t *status)
         strlcpy(s_call_visible_room_id,
                 status->call_room_id,
                 sizeof(s_call_visible_room_id));
-        s_call_video_sequence = 0;
-        s_call_video_first_frame_logged = false;
-        s_call_video_direct_lcd_active = false;
-        s_call_video_direct_lcd_failed = false;
-        if (s_call_video_image != NULL) {
-            lv_obj_add_flag(s_call_video_image, LV_OBJ_FLAG_HIDDEN);
-            lv_img_cache_invalidate_src(&s_call_video_image_dsc);
-            s_call_video_image_dsc.data = NULL;
-            call_video_renderer_release_presented_rgb565();
-        }
-        if (s_call_video_placeholder_label != NULL) {
-            lv_obj_clear_flag(s_call_video_placeholder_label, LV_OBJ_FLAG_HIDDEN);
-        }
+        display_reset_call_video_surface();
     }
 
     if (s_call_audio_panel != NULL && s_call_video_panel != NULL) {
@@ -8382,7 +8704,7 @@ static void display_update_call_active_page(const display_status_t *status)
     }
 
     if (status->call_peer_device_id[0] != '\0') {
-        snprintf(peer, sizeof(peer), "PEER %s", status->call_peer_device_id);
+        snprintf(peer, sizeof(peer), "设备 %s", status->call_peer_device_id);
     }
     if (s_call_audio_state_label != NULL) {
         display_text_set(s_call_audio_state_label, state_text);
@@ -8405,13 +8727,43 @@ static void display_update_call_active_page(const display_status_t *status)
     if (s_call_video_duration_label != NULL) {
         display_text_set(s_call_video_duration_label, duration);
     }
+    if (in_call && video) {
+        if (video_stats.source_width > 0U && video_stats.source_height > 0U) {
+            snprintf(stats_text,
+                     sizeof(stats_text),
+                     "%ux%u | TX %uf/%luk | RX %uf/%luk",
+                     (unsigned)video_stats.source_width,
+                     (unsigned)video_stats.source_height,
+                     (unsigned)status->rtc_tx_video_fps,
+                     (unsigned long)status->rtc_tx_video_transport_bitrate_kbps,
+                     (unsigned)status->rtc_rx_video_fps,
+                     (unsigned long)status->rtc_rx_video_transport_bitrate_kbps);
+        } else {
+            snprintf(stats_text,
+                     sizeof(stats_text),
+                     "--x-- | TX %uf/%luk | RX %uf/%luk",
+                     (unsigned)status->rtc_tx_video_fps,
+                     (unsigned long)status->rtc_tx_video_transport_bitrate_kbps,
+                     (unsigned)status->rtc_rx_video_fps,
+                     (unsigned long)status->rtc_rx_video_transport_bitrate_kbps);
+        }
+    }
+    if (s_call_video_stats_label != NULL) {
+        display_text_set(s_call_video_stats_label, stats_text);
+    }
+    snprintf(mic_text, sizeof(mic_text), "%u", (unsigned)mic);
+    snprintf(speaker_text, sizeof(speaker_text), "%u", (unsigned)speaker);
     if (s_call_mic_value_label != NULL) {
-        snprintf(mic_text, sizeof(mic_text), "%u", (unsigned)mic);
         display_text_set(s_call_mic_value_label, mic_text);
     }
     if (s_call_speaker_value_label != NULL) {
-        snprintf(speaker_text, sizeof(speaker_text), "%u", (unsigned)speaker);
         display_text_set(s_call_speaker_value_label, speaker_text);
+    }
+    if (s_call_video_mic_value_label != NULL) {
+        display_text_set(s_call_video_mic_value_label, mic_text);
+    }
+    if (s_call_video_speaker_value_label != NULL) {
+        display_text_set(s_call_video_speaker_value_label, speaker_text);
     }
 
     if (video && s_call_video_placeholder_label != NULL &&
@@ -8419,7 +8771,7 @@ static void display_update_call_active_page(const display_status_t *status)
         (s_call_video_image == NULL || lv_obj_has_flag(s_call_video_image, LV_OBJ_FLAG_HIDDEN))) {
         display_text_set(s_call_video_placeholder_label,
                          status->call_state == DISPLAY_CALL_STATE_ERROR ?
-                         "VIDEO UNAVAILABLE" : "WAITING FOR VIDEO");
+                         "视频暂不可用" : "正在建立视频...");
     }
 }
 
@@ -8443,7 +8795,8 @@ static void display_update_wechat_active_page(const display_status_t *status)
     uint8_t mic = 0;
     uint8_t speaker = 0;
     int64_t elapsed_seconds = 0;
-    char duration[16] = "呼叫中";
+    char duration[16] = "00:00";
+    const char *state_text = "正在呼叫";
 
     if (status == NULL) {
         status = &s_last_status;
@@ -8451,6 +8804,65 @@ static void display_update_wechat_active_page(const display_status_t *status)
 
     bool in_call = status->wechat_call_state == DISPLAY_WECHAT_CALL_STATE_IN_CALL ||
                    status->rtc_call_active;
+    bool session_active =
+        display_wechat_call_state_keeps_active_page(status->wechat_call_state);
+
+    switch (status->wechat_call_state) {
+    case DISPLAY_WECHAT_CALL_STATE_CONNECTING:
+        state_text = "正在连接";
+        break;
+    case DISPLAY_WECHAT_CALL_STATE_IN_CALL:
+        state_text = "通话中";
+        break;
+    case DISPLAY_WECHAT_CALL_STATE_CLOSING:
+        state_text = "正在挂断";
+        break;
+    case DISPLAY_WECHAT_CALL_STATE_CALLING:
+    default:
+        state_text = "正在呼叫";
+        break;
+    }
+
+    if (session_active && !s_wechat_video_session_active) {
+        s_wechat_video_sequence = 0;
+        s_wechat_video_first_frame_logged = false;
+        s_wechat_video_direct_lcd_active = false;
+        s_wechat_video_direct_lcd_failed = false;
+        display_set_call_video_overlays_hidden(&s_wechat_video_overlays,
+                                               s_wechat_video_image,
+                                               s_wechat_video_placeholder_label,
+                                               false,
+                                               false);
+        if (s_wechat_video_image != NULL) {
+            lv_obj_add_flag(s_wechat_video_image, LV_OBJ_FLAG_HIDDEN);
+            lv_img_cache_invalidate_src(&s_wechat_video_image_dsc);
+            s_wechat_video_image_dsc.data = NULL;
+            call_video_renderer_release_presented_rgb565();
+        }
+        if (s_wechat_video_placeholder_label != NULL) {
+            lv_obj_clear_flag(s_wechat_video_placeholder_label, LV_OBJ_FLAG_HIDDEN);
+        }
+    } else if (!session_active && s_wechat_video_session_active) {
+        display_set_call_video_overlays_hidden(&s_wechat_video_overlays,
+                                               s_wechat_video_image,
+                                               s_wechat_video_placeholder_label,
+                                               s_wechat_video_direct_lcd_active,
+                                               false);
+        if (s_wechat_video_image != NULL) {
+            lv_obj_add_flag(s_wechat_video_image, LV_OBJ_FLAG_HIDDEN);
+            lv_img_cache_invalidate_src(&s_wechat_video_image_dsc);
+            s_wechat_video_image_dsc.data = NULL;
+            call_video_renderer_release_presented_rgb565();
+        }
+        s_wechat_video_direct_lcd_active = false;
+    }
+    s_wechat_video_session_active = session_active;
+
+    display_set_video_refresh_enabled(
+        CONFIG_APP_WECHAT_VOIP_REMOTE_VIDEO_ENABLE &&
+        s_call_video_landscape_active &&
+        session_active &&
+        display_page_is_visible(s_wechat_active_page));
 
     if (in_call && s_wechat_active_started_us == 0) {
         s_wechat_active_started_us = esp_timer_get_time();
@@ -8477,11 +8889,22 @@ static void display_update_wechat_active_page(const display_status_t *status)
     if (s_wechat_duration_label != NULL) {
         display_text_set(s_wechat_duration_label, duration);
     }
+    if (s_wechat_video_state_label != NULL) {
+        display_text_set(s_wechat_video_state_label, state_text);
+    }
     if (s_wechat_mic_value_label != NULL) {
         lv_label_set_text_fmt(s_wechat_mic_value_label, "%u", (unsigned)mic);
     }
     if (s_wechat_speaker_value_label != NULL) {
         lv_label_set_text_fmt(s_wechat_speaker_value_label, "%u", (unsigned)speaker);
+    }
+    if (s_wechat_video_placeholder_label != NULL &&
+        !s_wechat_video_direct_lcd_active &&
+        (s_wechat_video_image == NULL ||
+         lv_obj_has_flag(s_wechat_video_image, LV_OBJ_FLAG_HIDDEN))) {
+        display_text_set(s_wechat_video_placeholder_label,
+                         CONFIG_APP_WECHAT_VOIP_REMOTE_VIDEO_ENABLE ?
+                         "WAITING FOR WECHAT VIDEO" : "WECHAT AUDIO CALL");
     }
 }
 
@@ -9388,10 +9811,243 @@ static void display_build_call_list_page(lv_obj_t *screen)
     }
 }
 
+typedef struct {
+    const char *title;
+    const char *initial_state;
+    lv_event_cb_t back_cb;
+    lv_event_cb_t hangup_cb;
+    lv_event_cb_t volume_cb;
+    lv_obj_t **title_label;
+    lv_obj_t **state_label;
+    lv_obj_t **duration_label;
+    lv_obj_t **stats_label;
+    lv_obj_t **mic_value_label;
+    lv_obj_t **speaker_value_label;
+    display_call_video_overlays_t *overlays;
+} display_call_video_overlay_config_t;
+
+static void display_style_call_video_overlay(lv_obj_t *overlay)
+{
+    if (overlay == NULL) {
+        return;
+    }
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(overlay, 1, 0);
+    lv_obj_set_style_border_color(overlay, lv_color_hex(0x435363), 0);
+    lv_obj_clear_flag(overlay, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+}
+
+static lv_obj_t *display_create_call_video_control_button(
+    lv_obj_t *parent,
+    lv_coord_t x,
+    const char *text,
+    lv_event_cb_t cb,
+    display_call_volume_action_t action)
+{
+    lv_obj_t *button = display_create_native_button(parent,
+                                                    x,
+                                                    6,
+                                                    40,
+                                                    40,
+                                                    lv_color_hex(0x1B2731),
+                                                    lv_color_hex(0x536474),
+                                                    text,
+                                                    lv_color_hex(0xFFFFFF),
+                                                    18,
+                                                    NULL);
+    lv_obj_set_style_radius(button, LV_RADIUS_CIRCLE, 0);
+    if (cb != NULL) {
+        lv_obj_add_event_cb(button,
+                            cb,
+                            LV_EVENT_CLICKED,
+                            (void *)(uintptr_t)action);
+    }
+    return button;
+}
+
+static void display_create_call_video_overlay(
+    lv_obj_t *parent,
+    const display_call_video_overlay_config_t *config)
+{
+    if (parent == NULL || config == NULL) {
+        return;
+    }
+
+    lv_obj_t *top_overlay = display_create_native_box(
+        parent,
+        DISPLAY_CALL_VIDEO_TOP_X,
+        DISPLAY_CALL_VIDEO_TOP_Y,
+        DISPLAY_CALL_VIDEO_TOP_WIDTH,
+        DISPLAY_CALL_VIDEO_TOP_HEIGHT,
+        lv_color_hex(0x0B1117),
+        lv_color_hex(0x435363),
+        8);
+    display_style_call_video_overlay(top_overlay);
+
+    lv_obj_t *button = display_create_native_button(top_overlay,
+                                                    4,
+                                                    4,
+                                                    40,
+                                                    40,
+                                                    lv_color_hex(0x1B2731),
+                                                    lv_color_hex(0x536474),
+                                                    "<",
+                                                    lv_color_hex(0xFFFFFF),
+                                                    20,
+                                                    NULL);
+    lv_obj_set_style_radius(button, LV_RADIUS_CIRCLE, 0);
+    if (config->back_cb != NULL) {
+        lv_obj_add_event_cb(button, config->back_cb, LV_EVENT_PRESSED, NULL);
+    }
+
+    /*
+     * The title and state change at runtime and can contain device IDs or
+     * Chinese status text. Keep them as labels backed by the compiled CJK font
+     * instead of binding the object type to its initial static bitmap.
+     */
+    lv_obj_t *title_label = display_create_native_live_text(top_overlay,
+                                                            config->title,
+                                                            52,
+                                                            3,
+                                                            268,
+                                                            lv_color_hex(0xFFFFFF),
+                                                            LV_TEXT_ALIGN_LEFT);
+    lv_obj_t *state_label = display_create_native_live_text(top_overlay,
+                                                            config->initial_state,
+                                                            52,
+                                                            24,
+                                                            268,
+                                                            lv_color_hex(0x6EDCB0),
+                                                            LV_TEXT_ALIGN_LEFT);
+    lv_obj_t *stats_label = NULL;
+    if (config->stats_label != NULL) {
+        stats_label = display_create_native_live_text(top_overlay,
+                                                      "--x-- | TX -- | RX --",
+                                                      52,
+                                                      43,
+                                                      268,
+                                                      lv_color_hex(0xC3D2DD),
+                                                      LV_TEXT_ALIGN_LEFT);
+        lv_obj_set_style_text_font(stats_label, display_ascii_font(10), 0);
+    }
+    lv_obj_t *duration_label = display_create_native_text(top_overlay,
+                                                          "00:00",
+                                                          354,
+                                                          14,
+                                                          100,
+                                                          lv_color_hex(0xFFFFFF),
+                                                          16,
+                                                          LV_TEXT_ALIGN_CENTER);
+
+    lv_obj_t *controls_overlay = display_create_native_box(
+        parent,
+        DISPLAY_CALL_VIDEO_CONTROLS_X,
+        DISPLAY_CALL_VIDEO_CONTROLS_Y,
+        DISPLAY_CALL_VIDEO_CONTROLS_WIDTH,
+        DISPLAY_CALL_VIDEO_CONTROLS_HEIGHT,
+        lv_color_hex(0x0B1117),
+        lv_color_hex(0x435363),
+        8);
+    display_style_call_video_overlay(controls_overlay);
+
+    display_create_native_text(controls_overlay,
+                               "MIC",
+                               8,
+                               5,
+                               34,
+                               lv_color_hex(0xAFC0CE),
+                               10,
+                               LV_TEXT_ALIGN_CENTER);
+    lv_obj_t *mic_value_label = display_create_native_text(controls_overlay,
+                                                           "62",
+                                                           8,
+                                                           25,
+                                                           34,
+                                                           lv_color_hex(0xFFFFFF),
+                                                           12,
+                                                           LV_TEXT_ALIGN_CENTER);
+    display_create_call_video_control_button(controls_overlay,
+                                             48,
+                                             "-",
+                                             config->volume_cb,
+                                             DISPLAY_CALL_VOLUME_MIC_DOWN);
+    display_create_call_video_control_button(controls_overlay,
+                                             94,
+                                             "+",
+                                             config->volume_cb,
+                                             DISPLAY_CALL_VOLUME_MIC_UP);
+
+    display_create_native_text(controls_overlay,
+                               "SPK",
+                               154,
+                               5,
+                               34,
+                               lv_color_hex(0xAFC0CE),
+                               10,
+                               LV_TEXT_ALIGN_CENTER);
+    lv_obj_t *speaker_value_label = display_create_native_text(controls_overlay,
+                                                               "70",
+                                                               154,
+                                                               25,
+                                                               34,
+                                                               lv_color_hex(0xFFFFFF),
+                                                               12,
+                                                               LV_TEXT_ALIGN_CENTER);
+    display_create_call_video_control_button(controls_overlay,
+                                             194,
+                                             "-",
+                                             config->volume_cb,
+                                             DISPLAY_CALL_VOLUME_SPEAKER_DOWN);
+    display_create_call_video_control_button(controls_overlay,
+                                             240,
+                                             "+",
+                                             config->volume_cb,
+                                             DISPLAY_CALL_VOLUME_SPEAKER_UP);
+
+    button = display_create_native_button(parent,
+                                          DISPLAY_CALL_VIDEO_HANGUP_X,
+                                          DISPLAY_CALL_VIDEO_HANGUP_Y,
+                                          DISPLAY_CALL_VIDEO_HANGUP_WIDTH,
+                                          DISPLAY_CALL_VIDEO_HANGUP_HEIGHT,
+                                          lv_color_hex(0xD94444),
+                                          lv_color_hex(0xFF7777),
+                                          "挂断",
+                                          lv_color_hex(0xFFFFFF),
+                                          15,
+                                          NULL);
+    lv_obj_set_style_radius(button, 8, 0);
+    if (config->hangup_cb != NULL) {
+        lv_obj_add_event_cb(button, config->hangup_cb, LV_EVENT_PRESSED, NULL);
+    }
+
+    if (config->title_label != NULL) {
+        *config->title_label = title_label;
+    }
+    if (config->state_label != NULL) {
+        *config->state_label = state_label;
+    }
+    if (config->duration_label != NULL) {
+        *config->duration_label = duration_label;
+    }
+    if (config->stats_label != NULL) {
+        *config->stats_label = stats_label;
+    }
+    if (config->mic_value_label != NULL) {
+        *config->mic_value_label = mic_value_label;
+    }
+    if (config->speaker_value_label != NULL) {
+        *config->speaker_value_label = speaker_value_label;
+    }
+    if (config->overlays != NULL) {
+        config->overlays->top = top_overlay;
+        config->overlays->controls = controls_overlay;
+        config->overlays->hangup = button;
+        config->overlays->hidden = false;
+    }
+}
+
 static void display_build_call_active_page(lv_obj_t *screen)
 {
-    lv_obj_t *video_top_bar = NULL;
-    lv_obj_t *video_bottom_bar = NULL;
     lv_obj_t *control_btn = NULL;
 
     s_call_active_page = lv_obj_create(screen);
@@ -9422,22 +10078,22 @@ static void display_build_call_active_page(lv_obj_t *screen)
                                lv_color_hex(DISPLAY_UI_COLOR_TEXT),
                                20,
                                LV_TEXT_ALIGN_CENTER);
-    s_call_audio_peer_label = display_create_native_text(s_call_audio_panel,
-                                                         "PEER --",
-                                                         40,
-                                                         91,
-                                                         400,
-                                                         lv_color_hex(DISPLAY_UI_COLOR_TEXT_MUTED),
-                                                         14,
-                                                         LV_TEXT_ALIGN_CENTER);
-    s_call_audio_state_label = display_create_native_text(s_call_audio_panel,
-                                                          "CALLING",
-                                                          40,
-                                                          117,
-                                                          400,
-                                                          lv_color_hex(DISPLAY_UI_COLOR_BLUE),
-                                                          14,
-                                                          LV_TEXT_ALIGN_CENTER);
+    s_call_audio_peer_label = display_create_native_live_text(
+        s_call_audio_panel,
+        "设备 --",
+        40,
+        91,
+        400,
+        lv_color_hex(DISPLAY_UI_COLOR_TEXT_MUTED),
+        LV_TEXT_ALIGN_CENTER);
+    s_call_audio_state_label = display_create_native_live_text(
+        s_call_audio_panel,
+        "正在呼叫",
+        40,
+        117,
+        400,
+        lv_color_hex(DISPLAY_UI_COLOR_BLUE),
+        LV_TEXT_ALIGN_CENTER);
     s_call_duration_label = display_create_native_text(s_call_audio_panel,
                                                        "00:00",
                                                        40,
@@ -9476,14 +10132,20 @@ static void display_build_call_active_page(lv_obj_t *screen)
     lv_obj_add_event_cb(control_btn, display_call_hangup_btn_cb, LV_EVENT_PRESSED, NULL);
 
     s_call_video_panel = display_create_native_box(s_call_active_page,
-                                                   0,
-                                                   0,
-                                                   DISPLAY_NATIVE_WIDTH,
-                                                   DISPLAY_NATIVE_HEIGHT,
+                                                    0,
+                                                    0,
+                                                    DISPLAY_CALL_VIDEO_SCREEN_WIDTH,
+                                                    DISPLAY_CALL_VIDEO_SCREEN_HEIGHT,
                                                    lv_color_hex(0x05080C),
                                                    lv_color_hex(0x05080C),
                                                    0);
     lv_obj_set_style_border_width(s_call_video_panel, 0, 0);
+    lv_obj_add_flag(s_call_video_panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_call_video_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_call_video_panel,
+                        display_call_video_surface_tap_cb,
+                        LV_EVENT_CLICKED,
+                        (void *)(uintptr_t)DISPLAY_VIDEO_SURFACE_DEVICE_CALL);
     memset(&s_call_video_image_dsc, 0, sizeof(s_call_video_image_dsc));
     s_call_video_image_dsc.header.always_zero = 0;
     s_call_video_image_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
@@ -9494,149 +10156,38 @@ static void display_build_call_active_page(lv_obj_t *screen)
                    (size_t)CALL_VIDEO_RENDER_HEIGHT * sizeof(uint16_t));
     s_call_video_image = lv_img_create(s_call_video_panel);
     display_obj_set_native_pos(s_call_video_image,
-                               CALL_VIDEO_RENDER_SOURCE_X,
-                               CALL_VIDEO_RENDER_SOURCE_Y);
+                               DISPLAY_CALL_VIDEO_X,
+                               DISPLAY_CALL_VIDEO_Y);
     display_obj_set_native_size(s_call_video_image,
                                 CALL_VIDEO_RENDER_WIDTH,
                                 CALL_VIDEO_RENDER_HEIGHT);
     lv_obj_clear_flag(s_call_video_image, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_call_video_image, LV_OBJ_FLAG_HIDDEN);
 
-    s_call_video_placeholder_label = display_create_native_text(s_call_video_panel,
-                                                                "WAITING FOR VIDEO",
-                                                                40,
-                                                                126,
-                                                                400,
-                                                                lv_color_hex(0xB8C4CF),
-                                                                16,
-                                                                LV_TEXT_ALIGN_CENTER);
+    s_call_video_placeholder_label = display_create_native_live_text(
+        s_call_video_panel,
+        "正在建立视频...",
+        40,
+        148,
+        400,
+        lv_color_hex(0xB8C4CF),
+        LV_TEXT_ALIGN_CENTER);
 
-    video_top_bar = display_create_native_box(s_call_video_panel,
-                                              0,
-                                              0,
-                                              480,
-                                              52,
-                                              lv_color_hex(0x101820),
-                                              lv_color_hex(0x101820),
-                                              0);
-    lv_obj_set_style_border_width(video_top_bar, 0, 0);
-    display_create_native_button(video_top_bar,
-                                 6,
-                                 6,
-                                 50,
-                                 40,
-                                 lv_color_hex(0x17232E),
-                                 lv_color_hex(0x324454),
-                                 "<",
-                                 lv_color_hex(0xFFFFFF),
-                                 22,
-                                 display_call_child_back_btn_cb);
-    s_call_video_peer_label = display_create_native_text(video_top_bar,
-                                                         "PEER --",
-                                                         68,
-                                                         7,
-                                                         280,
-                                                         lv_color_hex(0xFFFFFF),
-                                                         13,
-                                                         LV_TEXT_ALIGN_LEFT);
-    s_call_video_state_label = display_create_native_text(video_top_bar,
-                                                          "CALLING",
-                                                          68,
-                                                          28,
-                                                          280,
-                                                          lv_color_hex(0x6EDCB0),
-                                                          11,
-                                                          LV_TEXT_ALIGN_LEFT);
-    s_call_video_duration_label = display_create_native_text(video_top_bar,
-                                                             "00:00",
-                                                             368,
-                                                             18,
-                                                             96,
-                                                             lv_color_hex(0xFFFFFF),
-                                                             15,
-                                                             LV_TEXT_ALIGN_RIGHT);
-
-    video_bottom_bar = display_create_native_box(s_call_video_panel,
-                                                 0,
-                                                 270,
-                                                 480,
-                                                 50,
-                                                 lv_color_hex(0x101820),
-                                                 lv_color_hex(0x101820),
-                                                 0);
-    lv_obj_set_style_border_width(video_bottom_bar, 0, 0);
-    control_btn = display_create_native_button(video_bottom_bar,
-                                               8,
-                                               6,
-                                               44,
-                                               38,
-                                               lv_color_hex(0x17232E),
-                                               lv_color_hex(0x324454),
-                                               "M-",
-                                               lv_color_hex(0xFFFFFF),
-                                               12,
-                                               NULL);
-    lv_obj_add_event_cb(control_btn,
-                        display_call_volume_btn_cb,
-                        LV_EVENT_CLICKED,
-                        (void *)(uintptr_t)DISPLAY_CALL_VOLUME_MIC_DOWN);
-    control_btn = display_create_native_button(video_bottom_bar,
-                                               58,
-                                               6,
-                                               44,
-                                               38,
-                                               lv_color_hex(0x17232E),
-                                               lv_color_hex(0x324454),
-                                               "M+",
-                                               lv_color_hex(0xFFFFFF),
-                                               12,
-                                               NULL);
-    lv_obj_add_event_cb(control_btn,
-                        display_call_volume_btn_cb,
-                        LV_EVENT_CLICKED,
-                        (void *)(uintptr_t)DISPLAY_CALL_VOLUME_MIC_UP);
-    control_btn = display_create_native_button(video_bottom_bar,
-                                               116,
-                                               6,
-                                               44,
-                                               38,
-                                               lv_color_hex(0x17232E),
-                                               lv_color_hex(0x324454),
-                                               "S-",
-                                               lv_color_hex(0xFFFFFF),
-                                               12,
-                                               NULL);
-    lv_obj_add_event_cb(control_btn,
-                        display_call_volume_btn_cb,
-                        LV_EVENT_CLICKED,
-                        (void *)(uintptr_t)DISPLAY_CALL_VOLUME_SPEAKER_DOWN);
-    control_btn = display_create_native_button(video_bottom_bar,
-                                               166,
-                                               6,
-                                               44,
-                                               38,
-                                               lv_color_hex(0x17232E),
-                                               lv_color_hex(0x324454),
-                                               "S+",
-                                               lv_color_hex(0xFFFFFF),
-                                               12,
-                                               NULL);
-    lv_obj_add_event_cb(control_btn,
-                        display_call_volume_btn_cb,
-                        LV_EVENT_CLICKED,
-                        (void *)(uintptr_t)DISPLAY_CALL_VOLUME_SPEAKER_UP);
-    control_btn = display_create_native_button(video_bottom_bar,
-                                               338,
-                                               6,
-                                               134,
-                                               38,
-                                               lv_color_hex(0xD94444),
-                                               lv_color_hex(0xF15A5A),
-                                               "挂断",
-                                               lv_color_hex(0xFFFFFF),
-                                               14,
-                                               NULL);
-    lv_obj_add_event_cb(control_btn, display_call_hangup_btn_cb, LV_EVENT_PRESSED, NULL);
+    const display_call_video_overlay_config_t video_overlay = {
+        .title = "设备 --",
+        .initial_state = "正在连接",
+        .back_cb = display_call_child_back_btn_cb,
+        .hangup_cb = display_call_hangup_btn_cb,
+        .volume_cb = display_call_volume_btn_cb,
+        .title_label = &s_call_video_peer_label,
+        .state_label = &s_call_video_state_label,
+        .duration_label = &s_call_video_duration_label,
+        .stats_label = &s_call_video_stats_label,
+        .mic_value_label = &s_call_video_mic_value_label,
+        .speaker_value_label = &s_call_video_speaker_value_label,
+        .overlays = &s_call_video_overlays,
+    };
+    display_create_call_video_overlay(s_call_video_panel, &video_overlay);
 
     if (s_call_visible_type == DISPLAY_CALL_TYPE_VIDEO) {
         lv_obj_add_flag(s_call_audio_panel, LV_OBJ_FLAG_HIDDEN);
@@ -9827,44 +10378,73 @@ static void display_build_wechat_active_page(lv_obj_t *screen)
 {
     s_wechat_active_page = lv_obj_create(screen);
     display_prepare_figma_page(s_wechat_active_page);
+    lv_obj_set_size(s_wechat_active_page,
+                    DISPLAY_CALL_VIDEO_SCREEN_WIDTH,
+                    DISPLAY_CALL_VIDEO_SCREEN_HEIGHT);
     lv_obj_add_flag(s_wechat_active_page, LV_OBJ_FLAG_HIDDEN);
 
-    (void)display_create_figma_header(s_wechat_active_page,
-                                      "微信通话",
-                                      display_wechat_child_back_btn_cb,
-                                      NULL,
-                                      lv_color_hex(0x21C783),
-                                      NULL);
+    s_wechat_video_panel = display_create_native_box(
+        s_wechat_active_page,
+        0,
+        0,
+        DISPLAY_CALL_VIDEO_SCREEN_WIDTH,
+        DISPLAY_CALL_VIDEO_SCREEN_HEIGHT,
+        lv_color_hex(0x05080C),
+        lv_color_hex(0x05080C),
+        0);
+    lv_obj_set_style_border_width(s_wechat_video_panel, 0, 0);
+    lv_obj_add_flag(s_wechat_video_panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_wechat_video_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_wechat_video_panel,
+                        display_call_video_surface_tap_cb,
+                        LV_EVENT_CLICKED,
+                        (void *)(uintptr_t)DISPLAY_VIDEO_SURFACE_WECHAT);
 
-    (void)display_create_call_duration_row(s_wechat_active_page, 38, &s_wechat_duration_label);
-    display_create_call_volume_row(s_wechat_active_page,
-                                   80,
-                                   "麦克风",
-                                   "62",
-                                   DISPLAY_CALL_VOLUME_MIC_DOWN,
-                                   DISPLAY_CALL_VOLUME_MIC_UP,
-                                   &s_wechat_mic_value_label,
-                                   display_wechat_volume_btn_cb);
-    display_create_call_volume_row(s_wechat_active_page,
-                                   124,
-                                   "扬声器",
-                                   "70",
-                                   DISPLAY_CALL_VOLUME_SPEAKER_DOWN,
-                                   DISPLAY_CALL_VOLUME_SPEAKER_UP,
-                                   &s_wechat_speaker_value_label,
-                                   display_wechat_volume_btn_cb);
-    lv_obj_t *hangup_btn = display_create_figma_button(s_wechat_active_page,
-                                                       8,
-                                                       168,
-                                                       304,
-                                                       38,
-                                                       lv_color_hex(0xFFE7E7),
-                                                       lv_color_hex(0xF15A5A),
-                                                       "挂断",
-                                                       lv_color_hex(0xE44747),
-                                                       16,
-                                                       display_wechat_hangup_btn_cb);
-    lv_obj_set_style_radius(hangup_btn, 8, 0);
+    memset(&s_wechat_video_image_dsc, 0, sizeof(s_wechat_video_image_dsc));
+    s_wechat_video_image_dsc.header.always_zero = 0;
+    s_wechat_video_image_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
+    s_wechat_video_image_dsc.header.w = CALL_VIDEO_RENDER_WIDTH;
+    s_wechat_video_image_dsc.header.h = CALL_VIDEO_RENDER_HEIGHT;
+    s_wechat_video_image_dsc.data_size =
+        (uint32_t)((size_t)CALL_VIDEO_RENDER_WIDTH *
+                   (size_t)CALL_VIDEO_RENDER_HEIGHT * sizeof(uint16_t));
+    s_wechat_video_image = lv_img_create(s_wechat_video_panel);
+    display_obj_set_native_pos(s_wechat_video_image,
+                               DISPLAY_CALL_VIDEO_X,
+                               DISPLAY_CALL_VIDEO_Y);
+    display_obj_set_native_size(s_wechat_video_image,
+                                CALL_VIDEO_RENDER_WIDTH,
+                                CALL_VIDEO_RENDER_HEIGHT);
+    lv_obj_clear_flag(s_wechat_video_image,
+                      LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_wechat_video_image, LV_OBJ_FLAG_HIDDEN);
+
+    s_wechat_video_placeholder_label = display_create_native_text(
+        s_wechat_video_panel,
+        CONFIG_APP_WECHAT_VOIP_REMOTE_VIDEO_ENABLE ?
+            "WAITING FOR WECHAT VIDEO" : "WECHAT AUDIO CALL",
+        40,
+        148,
+        400,
+        lv_color_hex(0xB8C4CF),
+        15,
+        LV_TEXT_ALIGN_CENTER);
+
+    const display_call_video_overlay_config_t video_overlay = {
+        .title = "微信视频",
+        .initial_state = "正在呼叫",
+        .back_cb = display_wechat_hangup_btn_cb,
+        .hangup_cb = display_wechat_hangup_btn_cb,
+        .volume_cb = display_wechat_volume_btn_cb,
+        .title_label = NULL,
+        .state_label = &s_wechat_video_state_label,
+        .duration_label = &s_wechat_duration_label,
+        .stats_label = NULL,
+        .mic_value_label = &s_wechat_mic_value_label,
+        .speaker_value_label = &s_wechat_speaker_value_label,
+        .overlays = &s_wechat_video_overlays,
+    };
+    display_create_call_video_overlay(s_wechat_video_panel, &video_overlay);
     display_update_wechat_active_page(&s_last_status);
 }
 
@@ -11333,6 +11913,9 @@ static void display_refresh_timer(lv_timer_t *timer)
     *previous_status = s_last_status;
     display_read_latest_status(status);
     s_last_status = *status;
+    if (!display_call_state_keeps_active_page(status->call_state)) {
+        s_call_hangup_pending = false;
+    }
     if (display_call_state_keeps_active_page(status->call_state) &&
         !call_active_page_visible) {
         display_show_call_active_page();

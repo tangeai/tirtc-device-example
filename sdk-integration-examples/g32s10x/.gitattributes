@@ -1,0 +1,17 @@
+* text=auto
+.gitattributes text eol=lf
+.gitignore text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.S text eol=lf
+*.mk text eol=lf
+*.md text eol=lf
+Config.in text eol=lf
+*_defconfig text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.ps1 text eol=lf
+VERSION text eol=lf
+*.a binary
+*.avi binary
+*.jpg binary

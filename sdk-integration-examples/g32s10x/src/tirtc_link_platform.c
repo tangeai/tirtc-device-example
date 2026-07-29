@@ -98,6 +98,11 @@ int gettimeofday(struct timeval *tv, void *tz_data)
     return 0;
 }
 
+int _gettimeofday(struct timeval *tv, void *tz_data)
+{
+    return gettimeofday(tv, tz_data);
+}
+
 long HAL_Random(void)
 {
     return (long)dtrng_read_random_data();

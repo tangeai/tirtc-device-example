@@ -1,0 +1,22 @@
+menu "Application"
+
+config CONFIG_APPLICATION
+    bool
+
+source package/application/app_launcher/Config.in
+source package/application/load_kernel/Config.in
+source package/application/app_home/Config.in
+source package/application/infrared_face/Config.in
+source package/application/app_ivs_face/Config.in
+source package/application/app_multi_obj/Config.in
+source package/application/app_scancode/Config.in
+source package/application/app_audio/Config.in
+source package/application/app_tirtc_demo/Config.in
+source package/application/app_setting/Config.in
+source package/application/app_status_bar/Config.in
+source package/application/com_services/Config.in
+source package/application/app_motor/Config.in
+source package/application/app_aliyun/Config.in
+source package/application/app_micropython/Config.in
+
+endmenu

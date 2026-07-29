@@ -5,6 +5,11 @@ esp_err_t rtc_transport_init(const rtc_transport_config_t *config)
     return tirtc_session_init(config);
 }
 
+esp_err_t rtc_transport_prewarm_media_pools(void)
+{
+    return tirtc_session_prewarm_media_pools();
+}
+
 esp_err_t rtc_transport_configure(const rtc_transport_config_t *config)
 {
     return tirtc_session_configure(config);
@@ -33,6 +38,12 @@ void rtc_transport_set_control_ops(const rtc_transport_control_ops_t *ops, void 
 esp_err_t rtc_transport_register_observer(const rtc_transport_observer_t *observer, void *ctx)
 {
     return tirtc_session_register_observer(observer, ctx);
+}
+
+esp_err_t rtc_transport_set_video_bitrate_params(
+    const rtc_transport_video_bitrate_params_t *params)
+{
+    return tirtc_session_set_video_bitrate_params(params);
 }
 
 esp_err_t rtc_transport_start_if_ready(void)

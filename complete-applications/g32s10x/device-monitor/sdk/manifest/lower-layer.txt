@@ -1,0 +1,5 @@
+The matching G32S10X libwebrtc_nosctp.a was used during this build.
+Its object files are embedded in libTiRTC.a, so customer firmware must link only lib/g32/libTiRTC.a.
+
+libwebrtc_nosctp.a size: 1043054 bytes
+libwebrtc_nosctp.a SHA256: 785398c8df06aaf61fc14e92d00b8a5d931cb359e3f5ec832a02269233984e05

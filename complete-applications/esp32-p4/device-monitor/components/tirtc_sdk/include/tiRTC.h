@@ -171,7 +171,7 @@ extern "C" {
 #endif
 
 #define TIRTC_VERSION_MAJOR     2
-#define TIRTC_VERSION_MINOR     2
+#define TIRTC_VERSION_MINOR     3
 #define TIRTC_VERSION_PATCH     0
 /* -------------------------------------------------------------------------
  * 错误码
@@ -200,6 +200,27 @@ extern "C" {
 #define TIRTC_E_INTERNAL_ERROR      -40013  ///< SDK 内部错误
 #define TIRTC_E_NO_SECRET_KEY       -40014  ///< 未设置 secret key
 #define TIRTC_E_UNEXPECTED_RESPONSE -40015  ///< 服务器响应格式非预期
+
+/** \name HTTP层错误码
+ * @{
+ */
+#define TIRTC_E_HTTP_TIMEOUT        -2    ///< 连接超时 (CONN_E_TIMEOUT)
+#define TIRTC_E_HTTP_RESET          -3    ///< 连接被复位 (CONN_E_RESET)
+#define TIRTC_E_HTTP_PEER_CLOSED    -4    ///< 对端关闭连接 (CONN_E_PEER_CLOSED)
+#define TIRTC_E_HTTP_RESOLVE        -5    ///< 域名解析失败 (CONN_E_RESOLVE)
+#define TIRTC_E_HTTP_CONNECT        -6    ///< 连接失败 (CONN_E_CONNECT)
+#define TIRTC_E_HTTP_SSL            -7    ///< SSL握手失败 (CONN_E_SSL)
+#define TIRTC_E_HTTP_GENERIC        -8    ///< 通用连接错误 (CONN_E_GENERIC)
+#define TIRTC_E_HTTP_WS_HANDSHAKE   -9    ///< WebSocket握手失败 (CONN_E_WS_HANDSHAKE)
+#define TIRTC_E_HTTP_INVALID_HANDLE -10   ///< 无效HTTP句柄 (CONN_E_INVALID_HANDLE)
+#define TIRTC_E_HTTP_SERVER_DOWN    -11   ///< 服务器不可用 (CONN_E_SERVER_DOWN)
+#define TIRTC_E_HTTP_INVALID_PROTO  -12   ///< 无效协议 (CONN_E_INVALID_PROTOCOL)
+#define TIRTC_E_HTTP_SOCKET         -13   ///< Socket错误 (CONN_E_SOCKET)
+#define TIRTC_E_HTTP_NOMEM          -14   ///< 内存不足 (CONN_E_NOMEM)
+#define TIRTC_E_HTTP_HEADER         -101  ///< HTTP头解析错误 (EHTTP_HEADER)
+#define TIRTC_E_HTTP_URL            -102  ///< URL格式错误 (EHTTP_URL)
+/** @} */
+
 /** @} */
 
 /* -------------------------------------------------------------------------
@@ -271,6 +292,11 @@ typedef enum TIRTCOPTION {
 
     /** 开发者自己维护的设备标识, 可以取MAC/ICCID/IMEI/芯片标识/..., 唯一作用是与设备 uuid 一起用来防止生产重号. */
     TIRTC_OPT_CLIENT_ID,
+
+    /** tgtrp轮询超时时间(ms). 取值 1~50. 一般为1, 加大可减少系统负载，但会增加响应时间。慎用!
+     * 返回: 实际生效的值
+     */
+    TIRTC_OPT_TGTRP_POLL_TIMEOUT
 
     /** 是否在连接关闭时打印统计日志 （`int *`, 0 不打印 / 1 打印). 默认 0. */
     //TIRTC_OPT_PRINT_CONN_STAT
@@ -435,6 +461,18 @@ typedef struct TIRTCCALLBACKS {
      */
     void (*on_unsubscribe_audio)(tirtc_conn_t hconn, uint8_t stream_id);
 
+    /** 回调：SDK 请求调整指定视频流的目标码率。
+     *
+     * \param hconn              连接句柄
+     * \param stream_id          视频流 ID
+     * \param target_bitrate_bps SDK 建议应用到编码器的绝对目标码率，单位 bps
+     *
+     * \note  回调运行在 SDK 内部线程，应用应快速返回；如需重配编码器，建议投递到编码线程处理。
+     *    - 先调用TiRtcConnSetVideoBitrateParams()设置
+     */
+    void (*on_video_bitrate_required)(tirtc_conn_t hconn,
+                                        uint8_t stream_id,
+                                        uint32_t target_bitrate_bps);
 } TIRTCCALLBACKS;
 
 /** TiRtcConnect() 的结果回调。
@@ -579,6 +617,16 @@ TiRTC_EXPORT int TiRtcConnSetUserData(tirtc_conn_t hconn, void *user_data);
  */
 TiRTC_EXPORT void *TiRtcConnGetUserData(tirtc_conn_t hconn);
 
+/** 设置指定视频流的码率参数（用于底层动态计算）.
+ * \param hconn      连接句柄。
+ * \param stream_id  视频流 ID
+ * \param min_bps    最小目标码率，单位 bps。
+ * \param max_bps    最大目标码率，单位 bps。
+ * \param start_bps  当前/初始目标码率，单位 bps。
+ * \return 0 或 错误码
+ */
+TiRTC_EXPORT int TiRtcConnSetVideoBitrateParams( tirtc_conn_t hconn,
+        uint8_t stream_id, uint32_t min_bps, uint32_t max_bps, uint32_t start_bps);
 /** @} */ /* tirtc_conn */
 
 /* =========================================================================

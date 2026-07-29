@@ -774,6 +774,7 @@ void app_ui_fill_display_status(display_status_t *status, void *ctx)
     status->rtc_tx_audio_frames = snapshot->rtc.tx_audio_frames;
     status->rtc_rx_audio_frames = snapshot->rtc.rx_audio_frames;
     status->rtc_tx_video_fps = snapshot->rtc.tx_video_fps;
+    status->rtc_rx_video_fps = snapshot->rtc.rx_video_fps;
     status->rtc_tx_audio_fps = snapshot->rtc.tx_audio_fps;
     status->rtc_rx_audio_fps = snapshot->rtc.rx_audio_fps;
     status->rtc_tx_video_width = snapshot->rtc.tx_video_width;
@@ -782,6 +783,10 @@ void app_ui_fill_display_status(display_status_t *status, void *ctx)
     status->rtc_tx_video_configured_bitrate_kbps = snapshot->rtc.tx_video_configured_bitrate_kbps;
     status->rtc_tx_video_measured_fps_x10 = snapshot->rtc.tx_video_measured_fps_x10;
     status->rtc_tx_video_measured_bitrate_kbps = snapshot->rtc.tx_video_measured_bitrate_kbps;
+    status->rtc_tx_video_transport_bitrate_kbps =
+        snapshot->rtc.tx_video_transport_bitrate_kbps;
+    status->rtc_rx_video_transport_bitrate_kbps =
+        snapshot->rtc.rx_video_transport_bitrate_kbps;
     strlcpy(status->tirtc_device_id,
             snapshot->rtc_config.device_id,
             sizeof(status->tirtc_device_id));
@@ -860,7 +865,10 @@ void app_ui_fill_display_status(display_status_t *status, void *ctx)
     status->ai_chat_active = snapshot->ai_chat.active;
     status->ai_chat_listening = snapshot->ai_chat.listening;
     status->ai_chat_cloud_speaking = snapshot->ai_chat.cloud_speaking;
+    status->ai_chat_video_active = snapshot->ai_chat.video_active;
     status->ai_chat_tx_audio_frames = snapshot->ai_chat.tx_audio_frames;
+    status->ai_chat_tx_video_frames = snapshot->ai_chat.tx_video_frames;
+    status->ai_chat_tx_video_failures = snapshot->ai_chat.tx_video_failures;
     status->ai_chat_rx_commands = snapshot->ai_chat.rx_commands;
     status->ai_chat_last_error = snapshot->ai_chat.last_error;
     strlcpy(status->ai_chat_asr_caption,

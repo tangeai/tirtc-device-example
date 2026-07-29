@@ -40,6 +40,16 @@ static void tirtc_session_handle_conn_accepted(const tirtc_session_event_t *even
              "rtc connection accepted: hconn=%p auto_media=%d",
              event->payload.conn.conn,
              auto_media ? 1 : 0);
+    esp_err_t bitrate_ret =
+        tirtc_session_apply_video_bitrate_params(event->payload.conn.conn);
+    if (bitrate_ret == ESP_ERR_NOT_SUPPORTED) {
+        ESP_LOGI(TAG,
+                 "TGMP unavailable for this build/connection; continue with normal video profile");
+    } else if (bitrate_ret != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "rtc video bitrate control registration failed; continue with normal profile: %s",
+                 esp_err_to_name(bitrate_ret));
+    }
     if (!auto_media) {
         if (tirtc_session_get_session_mode() == TIRTC_SESSION_MODE_CONNECT) {
             esp_err_t call_ret = tirtc_session_request_call();

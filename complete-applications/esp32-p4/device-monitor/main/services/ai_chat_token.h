@@ -12,3 +12,5 @@ typedef struct {
 } ai_chat_join_info_t;
 
 esp_err_t ai_chat_token_request_join(const ai_chat_config_t *config, ai_chat_join_info_t *join_info);
+esp_err_t ai_chat_token_prefetch_join(const ai_chat_config_t *config);
+void ai_chat_token_invalidate_cache(void);

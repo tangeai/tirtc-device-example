@@ -19,6 +19,7 @@
 #include "sdio_reg.h"
 #include "serial_drv.h"
 #include "stats.h"
+#include "sdkconfig.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_hosted_log.h"
@@ -42,7 +43,14 @@ static const char TAG[] = "H_SDIO_DRV";
 #define TX_TASK_STACK_SIZE                4096
 #define PROCESS_RX_TASK_STACK_SIZE        4096
 #define RX_TIMEOUT_TICKS                  50
-#define SDIO_STREAM_RX_PREALLOC_BYTES     (4U * 1024U)
+#define SDIO_STREAM_RX_PSRAM_PREALLOC_BYTES   (64U * 1024U)
+#define SDIO_STREAM_RX_INTERNAL_FALLBACK_BYTES (4U * 1024U)
+
+#if CONFIG_CACHE_L2_CACHE_LINE_SIZE > CONFIG_CACHE_L1_CACHE_LINE_SIZE
+#define SDIO_STREAM_RX_CACHE_ALIGNMENT CONFIG_CACHE_L2_CACHE_LINE_SIZE
+#else
+#define SDIO_STREAM_RX_CACHE_ALIGNMENT CONFIG_CACHE_L1_CACHE_LINE_SIZE
+#endif
 
 #define BUFFER_AVAILABLE                  1
 #define BUFFER_UNAVAILABLE                0
@@ -148,23 +156,62 @@ static void sdio_read_task(void const* pvParameters);
 static void sdio_process_rx_task(void const* pvParameters);
 static void sdio_log_dma_no_mem(const char *stage, uint32_t len, uint32_t drops);
 
+static uint8_t *sdio_alloc_stream_rx_psram(uint32_t len)
+{
+#if CONFIG_SPIRAM && CONFIG_SOC_PSRAM_DMA_CAPABLE
+	return (uint8_t *)heap_caps_aligned_alloc(
+		SDIO_STREAM_RX_CACHE_ALIGNMENT,
+		len,
+		MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+#else
+	(void)len;
+	return NULL;
+#endif
+}
+
 static void sdio_prealloc_stream_rx_buffers(void)
 {
 #if H_SDIO_HOST_RX_MODE == H_SDIO_HOST_STREAMING_MODE
+	bool psram_buffer[2] = {false, false};
+
 	for (int index = 0; index < 2; ++index) {
 		if (double_buf.buffer[index].buf != NULL) {
 			continue;
 		}
 
-		double_buf.buffer[index].buf = (uint8_t *)MEM_ALLOC(SDIO_STREAM_RX_PREALLOC_BYTES);
+		uint32_t allocated_size = SDIO_STREAM_RX_PSRAM_PREALLOC_BYTES;
+		double_buf.buffer[index].buf =
+			sdio_alloc_stream_rx_psram(allocated_size);
+		psram_buffer[index] = double_buf.buffer[index].buf != NULL;
+		if (double_buf.buffer[index].buf == NULL) {
+			/*
+			 * Keep the generic ESP-Hosted fallback small. On P4, SDMMC can
+			 * DMA directly to cache-aligned PSRAM and performs cache sync
+			 * in the host driver, so large burst buffers must not fragment
+			 * the scarce internal DMA heap used by H264 and Wi-Fi packets.
+			 */
+			allocated_size = SDIO_STREAM_RX_INTERNAL_FALLBACK_BYTES;
+			double_buf.buffer[index].buf = (uint8_t *)MEM_ALLOC(allocated_size);
+		}
 		if (double_buf.buffer[index].buf == NULL) {
 			sdio_rx_stream_alloc_drop_count++;
 			sdio_log_dma_no_mem("stream_prealloc",
-					    SDIO_STREAM_RX_PREALLOC_BYTES,
+					    allocated_size,
 					    sdio_rx_stream_alloc_drop_count);
 			continue;
 		}
-		double_buf.buffer[index].buf_size = SDIO_STREAM_RX_PREALLOC_BYTES;
+		double_buf.buffer[index].buf_size = allocated_size;
+	}
+
+	if (double_buf.buffer[0].buf != NULL && double_buf.buffer[1].buf != NULL) {
+		const char *location =
+			psram_buffer[0] && psram_buffer[1] ? "psram-dma" :
+			(!psram_buffer[0] && !psram_buffer[1] ? "internal-dma" : "mixed");
+		ESP_LOGI(TAG,
+			 "SDIO streaming RX buffers ready: memory=%s sizes=%lu/%lu",
+			 location,
+			 (unsigned long)double_buf.buffer[0].buf_size,
+			 (unsigned long)double_buf.buffer[1].buf_size);
 	}
 #endif
 }
@@ -203,13 +250,16 @@ static void sdio_log_dma_no_mem(const char *stage, uint32_t len, uint32_t drops)
 		heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
 	size_t dma_largest =
 		heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+	size_t psram_largest =
+		heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 	ESP_LOGW(TAG,
-		"SDIO RX no DMA memory: stage=%s len=%lu drops=%lu dma_free=%u dma_largest=%u",
+		"SDIO RX no DMA memory: stage=%s len=%lu drops=%lu dma_free=%u dma_largest=%u psram_largest=%u",
 		stage,
 		(unsigned long)len,
 		(unsigned long)drops,
 		(unsigned)dma_free,
-		(unsigned)dma_largest);
+		(unsigned)dma_largest,
+		(unsigned)psram_largest);
 }
 
 void transport_deinit_internal(void)
@@ -710,7 +760,10 @@ static uint8_t * sdio_rx_get_buffer(uint32_t len)
 	uint8_t ** buf = &double_buf.buffer[index].buf;
 
 	if (len > double_buf.buffer[index].buf_size) {
-		uint8_t *new_buf = (uint8_t *)MEM_ALLOC(len);
+		uint8_t *new_buf = sdio_alloc_stream_rx_psram(len);
+		if (!new_buf) {
+			new_buf = (uint8_t *)MEM_ALLOC(len);
+		}
 		if (!new_buf) {
 			sdio_rx_stream_alloc_drop_count++;
 			sdio_log_dma_no_mem("stream_buffer", len, sdio_rx_stream_alloc_drop_count);

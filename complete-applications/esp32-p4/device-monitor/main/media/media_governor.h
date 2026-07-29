@@ -6,6 +6,14 @@
 
 #include "esp_err.h"
 
+/*
+ * P4 ISP output sizes used by the RTC pipeline. Keep these in the media-policy
+ * layer so resource fallback can select a capture/encoder pair that stays on
+ * the zero-copy YUV420 path instead of introducing an application PPA resize.
+ */
+#define MEDIA_GOVERNOR_COMPACT_CAPTURE_WIDTH  800U
+#define MEDIA_GOVERNOR_COMPACT_CAPTURE_HEIGHT 640U
+
 typedef enum {
     MEDIA_GOVERNOR_PROFILE_IDLE = 0,
     MEDIA_GOVERNOR_PROFILE_QR_SCAN,
@@ -54,6 +62,26 @@ typedef struct {
     bool prepare_playback_while_video_first;
 } media_governor_rtc_policy_t;
 
+typedef struct {
+    bool active;
+    bool backpressure_active;
+    uint32_t backpressure_events;
+    uint8_t target_fps;
+    uint32_t camera_fps_x10;
+    uint32_t tx_fps_x10;
+    uint32_t tx_failures;
+    uint32_t tx_queue_depth;
+    size_t send_buffer_used;
+    size_t send_buffer_limit;
+    int8_t wifi_rssi;
+} media_governor_network_sample_t;
+
+typedef struct {
+    uint32_t min_bitrate_bps;
+    uint32_t max_bitrate_bps;
+    uint32_t start_bitrate_bps;
+} media_governor_transport_bitrate_range_t;
+
 esp_err_t media_governor_init(void);
 void media_governor_set_profile(media_governor_profile_t profile);
 media_governor_profile_t media_governor_get_profile(void);
@@ -62,13 +90,24 @@ void media_governor_build_device_call_video_config(media_governor_video_config_t
 void media_governor_build_camera_policy(const media_governor_video_config_t *config,
                                         media_governor_camera_policy_t *policy);
 esp_err_t media_governor_apply_weak_network_level(media_governor_weak_network_mode_t mode, uint8_t level);
-/* Auto adaptation is for future weak-network callbacks and is disabled by default. */
+/* Only video profiles with a non-OFF adaptation mode participate. */
 bool media_governor_auto_adaptation_enabled(void);
 esp_err_t media_governor_apply_auto_weak_network_level(media_governor_weak_network_mode_t mode, uint8_t level);
+bool media_governor_update_auto_adaptation(const media_governor_network_sample_t *sample);
+void media_governor_get_transport_bitrate_range(
+    media_governor_transport_bitrate_range_t *range);
+esp_err_t media_governor_apply_transport_bitrate_target(uint32_t target_bitrate_bps,
+                                                        bool *changed);
+/* Advances only the slow recovery side; congestion targets are applied immediately. */
+esp_err_t media_governor_step_transport_adaptation(bool *changed);
+esp_err_t media_governor_reset_transport_adaptation(bool restore_base,
+                                                    bool *changed);
+bool media_governor_transport_adaptation_active(void);
 void media_governor_get_rtc_video_config(media_governor_video_config_t *config);
 void media_governor_get_camera_policy(media_governor_camera_policy_t *policy);
 void media_governor_get_rtc_av_camera_policy(media_governor_camera_policy_t *policy);
 void media_governor_get_rtc_policy(media_governor_rtc_policy_t *policy);
 void media_governor_note_network_backpressure(void);
+uint32_t media_governor_get_network_backpressure_count(void);
 bool media_governor_is_network_backpressured(void);
 const char *media_governor_profile_name(media_governor_profile_t profile);

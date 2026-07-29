@@ -21,6 +21,8 @@ static const char *TAG = "rtc_media_bridge";
 
 static tirtc_session_capture_frame_cb_t s_capture_cb;
 static void *s_capture_cb_ctx;
+static camera_video_source_submit_cb_t s_external_video_sink;
+static void *s_external_video_sink_ctx;
 static portMUX_TYPE s_bridge_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_remote_audio_first_logged;
 static bool s_remote_audio_unsupported_logged;
@@ -138,6 +140,16 @@ static esp_err_t rtc_media_bridge_set_video_capture_enabled(bool enabled, void *
 {
     (void)ctx;
 
+    if (!enabled) {
+        bool external_video_active = false;
+
+        taskENTER_CRITICAL(&s_bridge_lock);
+        external_video_active = s_external_video_sink != NULL;
+        taskEXIT_CRITICAL(&s_bridge_lock);
+        if (external_video_active) {
+            return ESP_OK;
+        }
+    }
     return camera_video_source_set_enabled(enabled);
 }
 
@@ -146,6 +158,13 @@ static void rtc_media_bridge_request_video_key_frame(void *ctx)
     (void)ctx;
 
     camera_video_source_request_key_frame();
+}
+
+static void rtc_media_bridge_request_video_stream_start_key_frame(void *ctx)
+{
+    (void)ctx;
+
+    camera_video_source_request_stream_start_key_frame();
 }
 
 static esp_err_t rtc_media_bridge_prepare_playback_path(void *ctx)
@@ -191,6 +210,7 @@ static esp_err_t rtc_media_bridge_submit_remote_audio(uint8_t media,
                                                       uint8_t flags,
                                                       const uint8_t *data,
                                                       size_t data_len,
+                                                      uint32_t pts,
                                                       size_t *playback_data_len,
                                                       void *ctx)
 {
@@ -264,12 +284,18 @@ static esp_err_t rtc_media_bridge_submit_remote_audio(uint8_t media,
     }
 
     if (decoded_data != NULL) {
-        submit_ret = media_sink_submit_remote_audio_owned(decoded_data, pcm_data_len, &format);
+        submit_ret = media_sink_submit_remote_audio_owned(decoded_data,
+                                                          pcm_data_len,
+                                                          &format,
+                                                          pts);
         if (submit_ret == ESP_OK) {
             decoded_data = NULL;
         }
     } else {
-        submit_ret = media_sink_submit_remote_audio(data, data_len, &format);
+        submit_ret = media_sink_submit_remote_audio(data,
+                                                    data_len,
+                                                    &format,
+                                                    pts);
     }
 
     if (submit_ret == ESP_OK) {
@@ -316,9 +342,16 @@ static esp_err_t rtc_media_bridge_submit_remote_video(uint8_t media,
                                                pts);
     }
     if (media == TIRTC_VIDEO_JPEG) {
-        return media_sink_submit_remote_video_jpeg(data, data_len);
+        return call_video_renderer_submit_mjpeg(data, data_len, pts);
     }
     return ESP_ERR_NOT_SUPPORTED;
+}
+
+static bool rtc_media_bridge_remote_video_requires_key_frame(void *ctx)
+{
+    (void)ctx;
+
+    return call_video_renderer_requires_key_frame();
 }
 
 static esp_err_t rtc_media_bridge_submit_local_video(const uint8_t *data,
@@ -331,6 +364,24 @@ static esp_err_t rtc_media_bridge_submit_local_video(const uint8_t *data,
                                                      void *ctx)
 {
     (void)ctx;
+
+    camera_video_source_submit_cb_t external_sink = NULL;
+    void *external_ctx = NULL;
+
+    taskENTER_CRITICAL(&s_bridge_lock);
+    external_sink = s_external_video_sink;
+    external_ctx = s_external_video_sink_ctx;
+    taskEXIT_CRITICAL(&s_bridge_lock);
+    if (external_sink != NULL) {
+        return external_sink(data,
+                             data_len,
+                             width,
+                             height,
+                             pts_us,
+                             media,
+                             key_frame,
+                             external_ctx);
+    }
 
     return tirtc_session_send_local_video_frame(data,
                                                 data_len,
@@ -361,15 +412,51 @@ static const tirtc_session_media_ops_t s_rtc_media_bridge_ops = {
     .set_capture_enabled = rtc_media_bridge_set_capture_enabled,
     .set_video_capture_enabled = rtc_media_bridge_set_video_capture_enabled,
     .request_video_key_frame = rtc_media_bridge_request_video_key_frame,
+    .request_video_stream_start_key_frame =
+        rtc_media_bridge_request_video_stream_start_key_frame,
     .prepare_playback_path = rtc_media_bridge_prepare_playback_path,
     .submit_remote_audio = rtc_media_bridge_submit_remote_audio,
     .submit_remote_video = rtc_media_bridge_submit_remote_video,
+    .remote_video_requires_key_frame =
+        rtc_media_bridge_remote_video_requires_key_frame,
     .flush = rtc_media_bridge_flush,
 };
 
 const tirtc_session_media_ops_t *rtc_media_bridge_get_ops(void)
 {
     return &s_rtc_media_bridge_ops;
+}
+
+esp_err_t rtc_media_bridge_register_external_video_sink(camera_video_source_submit_cb_t cb,
+                                                        void *ctx)
+{
+    ESP_RETURN_ON_FALSE(cb != NULL,
+                        ESP_ERR_INVALID_ARG,
+                        TAG,
+                        "external video sink is null");
+
+    esp_err_t ret = ESP_OK;
+    taskENTER_CRITICAL(&s_bridge_lock);
+    if (s_external_video_sink != NULL &&
+        (s_external_video_sink != cb || s_external_video_sink_ctx != ctx)) {
+        ret = ESP_ERR_INVALID_STATE;
+    } else {
+        s_external_video_sink = cb;
+        s_external_video_sink_ctx = ctx;
+    }
+    taskEXIT_CRITICAL(&s_bridge_lock);
+    return ret;
+}
+
+void rtc_media_bridge_unregister_external_video_sink(camera_video_source_submit_cb_t cb,
+                                                     void *ctx)
+{
+    taskENTER_CRITICAL(&s_bridge_lock);
+    if (s_external_video_sink == cb && s_external_video_sink_ctx == ctx) {
+        s_external_video_sink = NULL;
+        s_external_video_sink_ctx = NULL;
+    }
+    taskEXIT_CRITICAL(&s_bridge_lock);
 }
 
 void *rtc_media_bridge_get_context(void)

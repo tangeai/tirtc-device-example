@@ -40,6 +40,7 @@ typedef struct {
     SemaphoreHandle_t token_refresh_lock;
     TaskHandle_t task;
     bool stopping;
+    bool restart_requested;
     bool owns_mqtt_client;
     bool token_reauth_requested;
     bool report_requested;
@@ -53,6 +54,7 @@ typedef struct {
     device_auth_token_t token;
     int64_t token_expires_us;
     char reason[32];
+    char restart_reason[32];
     char report_reason[DEVICE_ONLINE_STATUS_REASON_MAX];
 } device_online_runtime_t;
 
@@ -253,6 +255,8 @@ static void device_online_set_device_id(const char *device_id)
 static bool device_online_set_mqtt_connected(bool connected)
 {
     bool changed = false;
+    device_online_ready_cb_t on_online_ready = NULL;
+    void *online_ready_ctx = NULL;
 
     if (s_online.lock == NULL) {
         return false;
@@ -269,7 +273,15 @@ static bool device_online_set_mqtt_connected(bool connected)
     if (changed) {
         device_online_request_report_locked(connected ? "mqtt-connected" : "mqtt-disconnected");
     }
+    if (changed && connected) {
+        on_online_ready = s_online.config.on_online_ready;
+        online_ready_ctx = s_online.config.online_ready_ctx;
+    }
     xSemaphoreGive(s_online.lock);
+
+    if (on_online_ready != NULL) {
+        on_online_ready(online_ready_ctx);
+    }
     return changed;
 }
 
@@ -819,6 +831,8 @@ static void device_online_task(void *arg)
     device_online_credentials_t *credentials = app_memory_calloc_psram(1, sizeof(*credentials));
     esp_err_t ret = ESP_OK;
     bool mqtt_started = false;
+    bool restart_requested = false;
+    char restart_reason[sizeof(s_online.restart_reason)] = {0};
 
     if (credentials == NULL) {
         device_online_set_state(DEVICE_ONLINE_STATE_ERROR, ESP_ERR_NO_MEM, "online workspace allocation failed");
@@ -875,10 +889,33 @@ static void device_online_task(void *arg)
 done:
     free(credentials);
     xSemaphoreTake(s_online.lock, portMAX_DELAY);
+    restart_requested = s_online.restart_requested &&
+                        s_online.config.enabled &&
+                        s_online.snapshot.network_ready &&
+                        !s_online.realtime_media_active;
+    if (restart_requested) {
+        strlcpy(restart_reason,
+                s_online.restart_reason[0] != '\0' ?
+                    s_online.restart_reason : "network-recovered",
+                sizeof(restart_reason));
+    }
+    s_online.restart_requested = false;
+    s_online.restart_reason[0] = '\0';
     s_online.task = NULL;
     s_online.stopping = false;
     s_online.snapshot.running = false;
     xSemaphoreGive(s_online.lock);
+
+    if (restart_requested) {
+        ESP_LOGI(TAG, "online service restart queued: reason=%s", restart_reason);
+        esp_err_t restart_ret = device_online_start_async(restart_reason);
+        if (restart_ret != ESP_OK && restart_ret != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG,
+                     "online service restart failed: reason=%s ret=%s",
+                     restart_reason,
+                     esp_err_to_name(restart_ret));
+        }
+    }
     vTaskDeleteWithCaps(NULL);
 }
 
@@ -905,6 +942,7 @@ esp_err_t device_online_init(const device_online_config_t *config)
     s_online.config = *config;
     s_online.task = NULL;
     s_online.stopping = false;
+    s_online.restart_requested = false;
     s_online.owns_mqtt_client = false;
     s_online.mqtt_listener = -1;
     s_online.credentials_valid = false;
@@ -914,6 +952,7 @@ esp_err_t device_online_init(const device_online_config_t *config)
     s_online.report_requested = false;
     s_online.realtime_media_active = false;
     s_online.status_seq = 0;
+    s_online.restart_reason[0] = '\0';
     s_online.report_reason[0] = '\0';
     memset(&s_online.credentials, 0, sizeof(s_online.credentials));
     memset(&s_online.token, 0, sizeof(s_online.token));
@@ -1039,11 +1078,22 @@ esp_err_t device_online_start_async(const char *reason)
         return ESP_ERR_INVALID_STATE;
     }
     if (s_online.task != NULL) {
+        if (s_online.stopping) {
+            s_online.restart_requested = true;
+            strlcpy(s_online.restart_reason,
+                    reason != NULL && reason[0] != '\0' ? reason : "network-recovered",
+                    sizeof(s_online.restart_reason));
+            ESP_LOGI(TAG,
+                     "online service restart requested while stopping: reason=%s",
+                     s_online.restart_reason);
+        }
         xSemaphoreGive(s_online.lock);
         return ESP_OK;
     }
 
     s_online.stopping = false;
+    s_online.restart_requested = false;
+    s_online.restart_reason[0] = '\0';
     s_online.snapshot.running = true;
     strlcpy(s_online.reason, reason != NULL ? reason : "manual", sizeof(s_online.reason));
     /* This worker owns network state only; credential persistence is handled by
@@ -1075,6 +1125,8 @@ void device_online_stop(void)
 
     xSemaphoreTake(s_online.lock, portMAX_DELAY);
     s_online.stopping = true;
+    s_online.restart_requested = false;
+    s_online.restart_reason[0] = '\0';
     task = s_online.task;
     xSemaphoreGive(s_online.lock);
 

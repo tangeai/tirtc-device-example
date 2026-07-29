@@ -6,6 +6,7 @@
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
@@ -18,8 +19,8 @@ static const char *TAG = "tirtc_connect";
 #define TIRTC_CONNECT_TASK_STACK            (24 * 1024)
 #define TIRTC_CONNECT_TIMEOUT_TASK_STACK    (6 * 1024)
 #define TIRTC_CONNECT_TASK_PRIORITY         5
+/* Rapid redial may overlap the previous transport teardown; preserve the SDK's full negotiation window. */
 #define TIRTC_CONNECT_RESULT_TIMEOUT_MS     38000U
-#define TIRTC_CONNECT_PROVIDED_TOKEN_RETRIES 2U
 
 static portMUX_TYPE s_connect_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_tirtc_online;
@@ -29,7 +30,6 @@ static EXT_RAM_BSS_ATTR tirtc_session_config_t s_connect_config;
 static TIRTCCONNECTCALLBACK s_connect_callback;
 static void *s_connect_user_data;
 static bool s_connect_has_provided_token;
-static uint32_t s_connect_retry_count;
 static EXT_RAM_BSS_ATTR char s_connect_provided_token[TIRTC_CONNECT_TOKEN_MAX_LEN];
 
 static void tirtc_connect_task(void *arg);
@@ -77,9 +77,35 @@ void tirtc_connect_cancel(void)
     s_connect_user_data = NULL;
     memset(&s_connect_config, 0, sizeof(s_connect_config));
     s_connect_has_provided_token = false;
-    s_connect_retry_count = 0;
     s_connect_provided_token[0] = '\0';
     taskEXIT_CRITICAL(&s_connect_lock);
+}
+
+bool tirtc_connect_abort_attempt(void)
+{
+    bool aborted = false;
+    uint32_t generation = 0;
+
+    taskENTER_CRITICAL(&s_connect_lock);
+    if (s_tirtc_online && s_connecting) {
+        generation = s_connect_generation;
+        s_connecting = false;
+        tirtc_connect_next_generation_locked();
+        s_connect_callback = NULL;
+        s_connect_user_data = NULL;
+        memset(&s_connect_config, 0, sizeof(s_connect_config));
+        s_connect_has_provided_token = false;
+        s_connect_provided_token[0] = '\0';
+        aborted = true;
+    }
+    taskEXIT_CRITICAL(&s_connect_lock);
+
+    if (aborted) {
+        ESP_LOGI(TAG,
+                 "TiRTC active connect aborted: gen=%lu runtime_online=1",
+                 (unsigned long)generation);
+    }
+    return aborted;
 }
 
 static void tirtc_connect_finish_attempt(uint32_t generation, int error)
@@ -97,7 +123,6 @@ static void tirtc_connect_finish_attempt(uint32_t generation, int error)
         s_connect_callback = NULL;
         s_connect_user_data = NULL;
         s_connect_has_provided_token = false;
-        s_connect_retry_count = 0;
         s_connect_provided_token[0] = '\0';
         online = s_tirtc_online;
         notify = online;
@@ -125,8 +150,6 @@ static void tirtc_connect_result_cb(int error, tirtc_conn_t hconn, void *user_da
     bool release_connection = false;
     bool online = false;
     bool connecting = false;
-    bool retry = false;
-    uint32_t retry_count = 0;
     uint32_t current_generation = 0;
 
     ESP_LOGI(TAG,
@@ -140,22 +163,13 @@ static void tirtc_connect_result_cb(int error, tirtc_conn_t hconn, void *user_da
     online = s_tirtc_online;
     connecting = s_connecting;
     current_generation = s_connect_generation;
-    if (tirtc_connect_is_current_locked(generation) &&
-        error != 0 &&
-        s_connect_has_provided_token &&
-        error != TIRTC_E_CACHE_EXPIRED &&
-        s_connect_retry_count < TIRTC_CONNECT_PROVIDED_TOKEN_RETRIES) {
-        s_connect_retry_count++;
-        retry_count = s_connect_retry_count;
-        retry = true;
-    } else if (tirtc_connect_is_current_locked(generation)) {
+    if (tirtc_connect_is_current_locked(generation)) {
         s_connecting = false;
         callback = s_connect_callback;
         callback_user_data = s_connect_user_data;
         s_connect_callback = NULL;
         s_connect_user_data = NULL;
         s_connect_has_provided_token = false;
-        s_connect_retry_count = 0;
         s_connect_provided_token[0] = '\0';
         notify = s_tirtc_online;
     } else {
@@ -172,27 +186,6 @@ static void tirtc_connect_result_cb(int error, tirtc_conn_t hconn, void *user_da
                  online ? 1 : 0,
                  connecting ? 1 : 0);
         (void)tirtc_session_disconnect_connection(hconn);
-        return;
-    }
-
-    if (retry) {
-        ESP_LOGW(TAG,
-                 "TiRTC active connect retry: gen=%lu retry=%lu/%lu error=%d %s",
-                 (unsigned long)generation,
-                 (unsigned long)retry_count,
-                 (unsigned long)TIRTC_CONNECT_PROVIDED_TOKEN_RETRIES,
-                 error,
-                 TiRtcGetErrorStr(error));
-        BaseType_t task_ret = xTaskCreateWithCaps(tirtc_connect_task,
-                                                  "tirtc_connect",
-                                                  TIRTC_CONNECT_TASK_STACK,
-                                                  (void *)(uintptr_t)generation,
-                                                  TIRTC_CONNECT_TASK_PRIORITY,
-                                                  NULL,
-                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (task_ret != pdPASS) {
-            tirtc_connect_finish_attempt(generation, TIRTC_E_LACK_OF_RESOURCE);
-        }
         return;
     }
 
@@ -232,19 +225,18 @@ static void tirtc_connect_timeout_task(void *arg)
 static void tirtc_connect_task(void *arg)
 {
     uint32_t generation = (uint32_t)(uintptr_t)arg;
+    int64_t task_started_at_us = esp_timer_get_time();
     tirtc_session_config_t config = {0};
-    char connect_token[TIRTC_CONNECT_TOKEN_MAX_LEN];
+    char connect_token[TIRTC_CONNECT_TOKEN_MAX_LEN] = {0};
     bool current = false;
     bool use_provided_token = false;
-    uint32_t retry_count = 0;
 
     taskENTER_CRITICAL(&s_connect_lock);
     current = tirtc_connect_is_current_locked(generation);
     if (current) {
         config = s_connect_config;
         use_provided_token = s_connect_has_provided_token;
-        retry_count = s_connect_retry_count;
-        if (use_provided_token && retry_count == 0U) {
+        if (use_provided_token) {
             strlcpy(connect_token, s_connect_provided_token, sizeof(connect_token));
         }
     }
@@ -259,12 +251,10 @@ static void tirtc_connect_task(void *arg)
     esp_err_t token_ret = ESP_OK;
     if (use_provided_token) {
         ESP_LOGI(TAG,
-                 "TiRTC active connect using %s token: gen=%lu retry=%lu remote_id_len=%u token_len=%u",
-                 retry_count == 0U ? "provided" : "cached",
-                 (unsigned long)generation,
-                 (unsigned long)retry_count,
-                 (unsigned)strlen(config.remote_device_id),
-                 retry_count == 0U ? (unsigned)strlen(connect_token) : 0U);
+                  "TiRTC active connect parameters: source=provided-token gen=%lu remote_id_len=%u token_len=%u",
+                  (unsigned long)generation,
+                  (unsigned)strlen(config.remote_device_id),
+                  (unsigned)strlen(connect_token));
     } else {
         ESP_LOGI(TAG,
                  "TiRTC active connect token request: gen=%lu local_id_len=%u remote_id_len=%u subject_len=%u",
@@ -302,20 +292,24 @@ static void tirtc_connect_task(void *arg)
         taskEXIT_CRITICAL(&s_connect_lock);
 
         if (current) {
+            int64_t connect_started_at_us = esp_timer_get_time();
             ESP_LOGI(TAG,
-                     "TiRTC active connect start: gen=%lu retry=%lu remote_id_len=%u",
-                     (unsigned long)generation,
-                     (unsigned long)retry_count,
-                     (unsigned)strlen(config.remote_device_id));
+                      "TiRTC active connect start: gen=%lu source=%s remote_id_len=%u queued_ms=%llu",
+                      (unsigned long)generation,
+                      use_provided_token ? "provided-token" : "issued-token",
+                      (unsigned)strlen(config.remote_device_id),
+                      (unsigned long long)((connect_started_at_us - task_started_at_us) / 1000LL));
             connect_ret = TiRtcConnect(config.remote_device_id,
-                                       use_provided_token && retry_count > 0U ? NULL : connect_token,
+                                       connect_token,
                                        tirtc_connect_result_cb,
                                        (void *)(uintptr_t)generation);
             ESP_LOGI(TAG,
-                     "TiRtcConnect returned: gen=%lu ret=%d %s",
-                     (unsigned long)generation,
-                     connect_ret,
-                     connect_ret == 0 ? "OK" : TiRtcGetErrorStr(connect_ret));
+                      "TiRtcConnect returned: gen=%lu source=%s ret=%d %s elapsed_ms=%llu",
+                      (unsigned long)generation,
+                      use_provided_token ? "provided-token" : "issued-token",
+                      connect_ret,
+                      connect_ret == 0 ? "OK" : TiRtcGetErrorStr(connect_ret),
+                      (unsigned long long)((esp_timer_get_time() - connect_started_at_us) / 1000LL));
         }
         tirtc_session_give_sdk_api_lock();
     }
@@ -388,7 +382,6 @@ esp_err_t tirtc_connect_start(const tirtc_session_config_t *config,
     s_connect_callback = callback;
     s_connect_user_data = user_data;
     s_connect_has_provided_token = false;
-    s_connect_retry_count = 0;
     s_connect_provided_token[0] = '\0';
     taskEXIT_CRITICAL(&s_connect_lock);
 
@@ -434,7 +427,6 @@ esp_err_t tirtc_connect_start_with_token(const char *remote_device_id,
     strlcpy(s_connect_config.remote_device_id, remote_device_id, sizeof(s_connect_config.remote_device_id));
     strlcpy(s_connect_provided_token, connect_token, sizeof(s_connect_provided_token));
     s_connect_has_provided_token = true;
-    s_connect_retry_count = 0;
     s_connect_callback = callback;
     s_connect_user_data = user_data;
     taskEXIT_CRITICAL(&s_connect_lock);

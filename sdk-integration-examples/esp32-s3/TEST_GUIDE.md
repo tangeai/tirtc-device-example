@@ -1,276 +1,294 @@
-# TiRTC ESP32-S3 Demo 测试说明
+# TiRTC ESP32-S3 Demo 1.2.0 测试说明
 
-本文档用于指导客户验证 ESP32-S3 设备接入 TiRTC 后的基础联网、上线、主动连接、音视频发送和断开流程。
+本指南把 SDK 身份、编译、烧录、上线、连接、音视频和资源稳定性分开取证。
+任一前置阶段通过，都不能替代后续阶段。
 
 ## 1. 前置条件
 
-测试前请先确认：
+- ESP32-S3 开发板，带 PSRAM。
+- Windows ESP-IDF 5.5.4 环境。
+- 可访问公网的 2.4 GHz Wi-Fi。
+- 本机 `device_id`、device secret 和首次绑定的稳定 `client_id`。
+- 主动连接时需要目标 `device_id`，以及业务服务端或 TiRTC DevTools 签发的短时
+  一次性 token。
+- Web 播放端、官方客户端或第二台设备，用于验证真实收流。
 
-- 已准备 1 到 2 块 ESP32-S3 开发板，且板卡带 PSRAM。
-- Windows 电脑已安装 ESP-IDF 5.5.4，并可在 ESP-IDF PowerShell 中正常执行 `idf.py`。
-- 测试 Wi-Fi 为 2.4GHz 网络，开发板可以访问公网。
-- 已获取每块设备的 `device_id` 和 `device_secret`。
-- 如需板对板测试，A 设备需要知道 B 设备的 `device_id/device_secret`，B 设备也需要知道 A 设备的 `device_id/device_secret`。
-- 已获取测试用 `access_id` 和 `secret_key`。
-- 工程自带 `send_video.h264` 和 `send_audio.pcma`，烧录时会作为 SPIFFS 分区一起写入设备。
+应用级 `AccessKeyId/SecretKeyId` 不得下发到设备。两台板也不需要互存对端 device
+secret；主动连接设备只消费最终 token。
 
-本 demo 中的本地 token 签发机制仅用于联调。正式产品不建议把 `access_id`、`secret_key` 或对端设备密钥固化在固件中，应改为由业务服务端签发 token。
+## 2. SDK 身份
 
-## 2. 参数配置
+在工程根目录执行：
 
-### 2.1 Wi-Fi 配置
-
-修改 `main/app_config.h`：
-
-```c
-#define APP_WIFI_SSID "your_wifi_ssid"
-#define APP_WIFI_PASSWORD "your_wifi_password"
+```powershell
+Get-FileHash -Algorithm SHA256 components\tirtc_sdk\lib\esp32s3\libTiRTC.a
+Get-Content components\tirtc_sdk\manifest\build-info.json
+Get-Content components\tirtc_sdk\manifest\build-contract.env
 ```
 
-### 2.2 TiRTC 配置
+预期：
 
-修改 `main/tirtc/tirtc_config.h`：
-
-```c
-#define TIRTC_DEVICE_ID "your_device_id"
-#define TIRTC_DEVICE_SECRET_KEY "your_device_secret"
-#define TIRTC_CLIENT_ID TIRTC_DEVICE_ID
-
-#define TIRTC_REMOTE_DEVICE_ID "peer_device_id"
-#define TIRTC_REMOTE_DEVICE_SECRET_KEY "peer_device_secret_key"
-
-#define TIRTC_TOKEN_ACCESS_ID "your_token_access_id"
-#define TIRTC_TOKEN_SECRET_KEY "your_token_secret_key"
+```text
+SDK version: 2.2.1
+commit: 3a33bf4ae51b3ab9eb246648adb274d0fae32ebf
+lib size: 4,908,112 bytes
+SHA256: dc9f869194584fd43fe091f887342d170a1422e657ce1fc2a144c90a3ade1f8e
+ESP-IDF: 5.5.4
+toolchain: xtensa-esp32s3-elf-gcc-14.2.0_20260121
+FreeRTOS tick: 1000 Hz
+transport: KCP / noSCTP
+TLS: disabled, HTTP-only
 ```
 
-板对板测试时，两块板需要互相配置为对端：
+哈希不一致时停止测试，不要继续用文档版本号推断库身份。
 
-| 设备 | 本机配置 | 对端配置 |
-|---|---|---|
-| A 设备 | A 的 `device_id/device_secret` | B 的 `device_id/device_secret` |
-| B 设备 | B 的 `device_id/device_secret` | A 的 `device_id/device_secret` |
+## 3. 本地配置
 
-这样 A 按 BOOT 可以主动连接 B，B 按 BOOT 也可以主动连接 A。测试时建议只按其中一侧，避免两边同时发起连接。
+```powershell
+Copy-Item main\local_config.example.h main\local_config.h
+```
 
-## 3. 编译和烧录
+在 `main/local_config.h` 中填写 Wi-Fi、本机设备身份和稳定 `client_id`。需要主动
+连接时，再写入目标设备 ID 和当次一次性 token。
 
-在 ESP-IDF PowerShell 中进入工程目录后执行：
+规则：
+
+- `client_id` 为 1..64 个可打印 ASCII 字符。
+- 同一 `device_id` 必须复用首次成功绑定的 `client_id`。
+- `TIRTC_SERVICE_ENDPOINT` 正常情况下留空。
+- 本 SDK 是 HTTP-only，不能设置 `https://`。
+- `main/local_config.h` 必须保持 Git ignored。
+- 串口日志不得出现 device secret、应用签名密钥或 token。
+
+`main/local_config.h` 只用于开发联调，其中的值会进入固件二进制，不是量产安全
+存储。当前 token 是编译期配置；示例会在 SPIFFS 双槽持久化已预留 token 的
+SHA-256 指纹、序号和 CRC，拒绝最近两个有效槽中已记录的值，一次写入中断也
+不会破坏上一份有效记录。这是开发联调防误用，服务端的一次性 token 校验仍是
+权威边界。重新签发后需要替换该值并重新编译烧录。擦除或重刷 `storage` 分区会
+清除本地指纹，之后仍必须使用新 token。量产接入应使用受控凭证注入和运行时
+token provider。
+
+双槽标记在调用 `TiRtcConnect()` 前写入，因此“本地预留成功”“SDK 同步返回 0”
+和“异步连接成功”是三层独立证据，不能互相替代。
+
+确认忽略状态：
+
+```powershell
+git check-ignore -v main\local_config.h
+```
+
+## 4. 全新构建
+
+不要复用指向旧 checkout 的 `build/`：
 
 ```powershell
 . "$env:IDF_PATH\export.ps1"
-idf.py build
+idf.py -B build-verify reconfigure
+idf.py -B build-verify build
 ```
 
-烧录并打开串口日志：
+核对生成配置：
 
 ```powershell
-idf.py -p COMx flash monitor
+Select-String -Path build-verify\config\sdkconfig.h -Pattern `
+  'CONFIG_FREERTOS_HZ|CONFIG_LWIP_TCPIP_TASK_STACK_SIZE|CONFIG_SPIRAM'
 ```
 
-将 `COMx` 替换为实际串口号。建议使用 `idf.py flash`，这样会同时烧录应用固件和 `storage` SPIFFS 分区。
+预期至少为：
 
-## 4. 测试步骤
+```text
+CONFIG_FREERTOS_HZ=1000
+CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=4096
+CONFIG_SPIRAM=y
+```
 
-### 4.1 启动上线测试
+并确认 trace、stats、runtime stats 均未启用。记录：
 
-1. 烧录固件后重启设备。
-2. 打开串口 monitor。
-3. 等待设备连接 Wi-Fi。
-4. 等待 SNTP 时间同步完成。
-5. 等待 TiRTC 上线成功。
+```powershell
+Get-Item build-verify\tirtc_esp32s3_wifi_link_demo.bin
+Get-FileHash -Algorithm SHA256 build-verify\tirtc_esp32s3_wifi_link_demo.bin
+```
 
-预期结果：
+## 5. 烧录与上线
 
-- Wi-Fi 能获取 IP。
-- 系统时间同步成功。
-- TiRTC SDK 版本打印为 `2.2.1`。
-- 日志确认设备密钥 option 已在 `TiRtcStart()` 前设置成功。
-- 设备进入在线状态。
+```powershell
+idf.py -B build-verify -p COMx flash monitor
+```
 
-预期日志示例：
+必须使用完整 flash 流程，确保应用、分区表和 `storage` SPIFFS 测试媒体来自同一次
+构建。完整 flash 会重写 `storage`，因此也会清空本地 token 标记；烧录后的首次
+主动连接必须使用新签发的 token。
+
+启动检查点：
 
 ```text
 Wi-Fi 已连接
 系统时间同步完成
 TiRTC 版本: 2.2.1
-本地测试媒体已就绪: H264=... bytes PCMA=... bytes
-TiRTC 启动配置: device_id=... client_id=... secret_len=32
-TiRTC 启动选项已设置: device_secret_key length=...
-TiRTC 启动选项已设置: client_id length=...
-TiRTC 启动请求已提交 device_id=...
-TiRTC 已上线，可接收入站连接，也可主动连接远端设备
+TiRTC BuildInfo: {"tirtc":"v2.2.1","commit":"3a33bf4ae51b",...}
+本地测试媒体已就绪
+TiRTC 运行策略: max_connections=1 network=Wi-Fi connect_cache=1
+TiRTC 启动请求已提交
+TiRTC 已上线
 ```
 
-### 4.2 板对板连接和收流测试
+`TiRtcStart()` 返回 0 之后，只有收到 `TIRTC_EVENT_SYS_STARTED` 才算上线。
 
-以下以 A 设备主动连接 B 设备为例。
+## 6. 主动连接
 
-1. 确认 A、B 两台设备都已上线。
-2. 按下 A 设备的 BOOT 键。
-3. A 设备会本地生成测试 token，并主动连接 `TIRTC_REMOTE_DEVICE_ID`。
-4. 连接成功后，A 自动订阅 B 的视频 `stream=11` 和音频 `stream=10`。
-5. B 收到订阅后，开始发送本地 H264 视频和 PCMA 音频。
-6. A 开始收到 B 发来的音视频数据。
+1. 确认目标设备已经上线。
+2. 给本机配置与目标 `remote_id` 匹配的一次性 token。
+3. 按 BOOT。
+4. 首次连接预期缓存返回 `TIRTC_E_CACHE_EXPIRED`，随后使用新 token。
+5. 成功连接同一目标后断开，再按 BOOT，检查缓存连接。
 
-A 侧预期日志：
+首次连接预期：
 
 ```text
-收到 BOOT 键触发，切换 TiRTC 连接状态
-BOOT 按键触发：当前无连接，主动连接目标设备
-准备创建主动连接任务 remote_id=...
-主动连接任务已创建
-开始本地生成本次主动连接 token
-本地 token 已生成 remote_id=... subject=... ttl=...
-主动连接开始 remote_id=... token=local
-TiRTC 状态：已上线=1，连接=主动连接中
-主动连接成功 hconn=...
-当前连接已建立 hconn=...
-主动连接侧作为观看端，只订阅对端音视频，不发送本地测试媒体
-[CTRL][TX] 订阅对端视频 stream=11 ret=0
-[CTRL][TX] 订阅对端音频 stream=10 ret=0
-[RX][video] 接收统计：视频帧=25，流ID=11，长度=...字节，时间戳=...，关键帧=...
-[RX][audio] 接收统计：音频包=50，流ID=10，长度=...字节，时间戳=...
+主动连接先尝试复用 SDK 连接参数缓存
+连接参数缓存未命中或已过期，改用新的一次性 token
+使用一次性 token 发起主动连接
+主动连接成功
 ```
 
-B 侧预期日志：
+缓存有效时预期：
 
 ```text
-TiRTC 收到远端连接 hconn=...
-当前连接已建立 hconn=...
-等待对端订阅本机音视频后再开始发送测试媒体
+主动连接先尝试复用 SDK 连接参数缓存
+缓存连接请求已提交，最终结果以异步回调为准
+主动连接成功
+```
+
+不要重复使用已消费的一次性 token。缓存失效后必须重新签发。
+
+若要验证本地双槽防误用，需要保留 `storage`，制造缓存失效条件后分别检查：
+
+1. 最近两个已预留 token 都会在调用 SDK 前被本地拒绝。
+2. 第三个新 token 可写入较旧槽，并进入 SDK 同步提交阶段。
+3. 写入中断故障注入后，至少一个旧槽仍可通过 magic、序号和 CRC 校验。
+
+本地双槽只保存最近两项，也不防止分区被擦除或篡改；服务端一次性校验始终是
+权威边界。
+
+DevTools 最小命令和登录流程见
+[官方设备实时音视频示例](https://docs.tange.ai/products/tirtc/get-started/view-device-live-av.html)：
+
+```text
+tirtc-devtools-cli token issue <remote_id>
+```
+
+## 7. 入站连接与音视频
+
+远端连接本机并订阅：
+
+- 视频 stream `11`，首个可发送帧必须为 H264 关键帧。
+- 音频 stream `10`，PCMA 8 kHz A-law。
+
+预期：
+
+```text
+TiRTC 收到远端连接
 [CTRL][RX] 对端订阅本机视频 stream=11
-[TX][video] 视频发送准备完成：格式=H264，流ID=11
-[TX][video] 发流开始：视频=H264，目标帧率=25 fps，流ID=11
+[TX][video] 发流开始
 [CTRL][RX] 对端订阅本机音频 stream=10
-[TX][audio] 音频发送准备完成：格式=PCMA，流ID=10
-[TX][audio] 发流开始：音频=PCMA，采样=8k A-law，流ID=10
-[TX][video] 发送统计：视频帧=25，流ID=11，发送缓冲=...字节
-[TX][audio] 发送统计：音频包=50，流ID=10，发送缓冲=...字节
+[TX][audio] 发流开始
 ```
 
-连接稳定后，A 侧状态日志中的“接收视频帧”和“接收音频包”应持续增加。B 侧“发送缓冲”不应长期持续升高；如果持续升高，说明发送侧可能遇到网络拥塞或对端接收异常。
+需要在远端实际看到视频并听到或分析到音频。仅有 `[TX]` 日志不能证明远端播放。
 
-### 4.3 BOOT 断开测试
+发送缓冲繁忙时允许丢帧，但应看到示例恢复关键帧，缓冲不能长期单调增长。
 
-连接状态下，再次按下当前连接设备上的 BOOT 键。
+## 8. 分流退订与重订
 
-预期结果：
+1. 同时订阅音频和视频。
+2. 只取消视频 stream `11`。
+3. 确认 H264 任务停止，PCMA 继续发送。
+4. 重订视频，确认第一段有效视频从关键帧恢复。
+5. 只取消音频 stream `10`。
+6. 确认 PCMA 任务停止，视频继续发送。
+7. 重订音频，确认发送恢复。
 
-- 本机主动断开当前 TiRTC 连接。
-- 对端收到断开事件。
-- 发送侧停止本地 H264/PCMA 测试媒体任务。
-- 后续状态日志显示 `connection=idle`。
-
-本机预期日志：
-
-```text
-收到 BOOT 键触发，切换 TiRTC 连接状态
-BOOT 按键触发：当前已有连接，主动断开两端连接
-主动断开当前连接 ret=0 OK
-```
-
-对端预期日志：
+对应日志：
 
 ```text
-TiRTC 连接断开 hconn=...
-当前连接已清理 hconn=...
+[CTRL][RX] 对端取消订阅本机视频 stream=11
 [TX][video] 本机 H264 发送任务已停止
+[CTRL][RX] 对端取消订阅本机音频 stream=10
 [TX][audio] 本机 PCMA 发送任务已停止
 ```
 
-## 5. 常见异常判断
+## 9. 断开、停止与资源
 
-### 5.1 Wi-Fi 连接失败
+连接状态下按 BOOT，确认两端进入断开回调，音视频任务都停止。至少执行 20 次
+连接/断开循环。
 
-重点检查：
+连接仍在发送媒体时再发起第二条入站或主动连接，确认单连接策略拒绝新句柄，原
+连接不会被强行替换；同时触发连接错误与 BOOT 断开，确认日志中每个句柄最多只有
+一次应用侧 `TiRtcDisconnect()`，且没有失效句柄调用。
 
-- `APP_WIFI_SSID` 和 `APP_WIFI_PASSWORD` 是否正确。
-- 路由器是否为 2.4GHz Wi-Fi。
-- 设备所在网络是否可以访问公网。
-
-### 5.2 时间同步失败
-
-token 中包含 `iat/exp` 时间戳，因此系统时间必须先同步成功。若 SNTP 失败，主动连接前的本地 token 生成会失败。
-
-重点检查：
-
-- Wi-Fi 是否已拿到 IP。
-- 网络是否能访问 NTP 服务。
-- 串口是否出现 `系统时间未同步`、`SNTP` 超时等日志。
-
-### 5.3 TiRTC 未上线
-
-重点检查：
-
-- `TIRTC_DEVICE_ID` 是否为空或写错。
-- `TIRTC_DEVICE_SECRET_KEY` 是否为空或写错。
-- `TIRTC_CLIENT_ID` 是否为空；已绑定设备应与 `TIRTC_DEVICE_ID` 保持一致。
-- 是否在 `TiRtcStart()` 前成功调用 `TiRtcSetOption(TIRTC_OPT_DEVICE_SECRET_KEY, ...)`；缺少该调用会返回 `-40014 TIRTC_E_NO_SECRET_KEY`。
-- 是否在 `TiRtcStart()` 前成功调用 `TiRtcSetOption(TIRTC_OPT_CLIENT_ID, ...)`；缺少该调用时 `/v1/start` 会返回 `40003(X-Tg-Client-Id is required)`。
-- `TIRTC_SERVICE_ENDPOINT` 是否为当前测试环境可访问的服务地址。
-
-### 5.4 主动连接失败
-
-重点检查：
-
-- `TIRTC_REMOTE_DEVICE_ID` 是否是对端设备 ID。
-- `TIRTC_REMOTE_DEVICE_SECRET_KEY` 是否是对端设备密钥。
-- 对端设备是否已经上线。
-- `TIRTC_TOKEN_ACCESS_ID` 和 `TIRTC_TOKEN_SECRET_KEY` 是否正确。
-- 两边是否同时按下 BOOT 导致互相抢连。
-
-主动连接发起后，状态日志会先显示：
+如业务集成调用 `tirtc_deinit()`，必须看到：
 
 ```text
-TiRTC 状态：已上线=1，连接=主动连接中
+TiRTC 已停止
+TiRTC 资源已释放
 ```
 
-如果 SDK 长时间没有返回连接结果，demo 会在 30 秒后释放“主动连接中”状态：
+出现“尚未收到 `TIRTC_EVENT_SYS_STOPPED`”时，示例会保留 SDK 资源，不会提前
+`TiRtcUninit()`。需要保存完整日志定位，不能把超时当作成功停止。
 
-```text
-主动连接等待结果超时: 30000 ms
-主动连接失败 error=-40005 TIRTC_E_TIMEOUTED
-TiRTC 状态：已上线=1，连接=空闲
-```
+在首轮和第 20 轮记录：
 
-超时回到空闲后，可以再次按 BOOT 重新发起连接。
+- internal RAM free / minimum free / largest block
+- PSRAM free / minimum free / largest block
+- SDK 任务是否残留
+- 再次启动后是否仍能连接和收发
 
-### 5.5 连接成功但没有音视频
-
-重点看日志顺序：
-
-1. A 侧是否打印 `[CTRL][TX] 订阅对端视频` 和 `[CTRL][TX] 订阅对端音频`。
-2. B 侧是否打印 `[CTRL][RX] 对端订阅本机视频` 和 `[CTRL][RX] 对端订阅本机音频`。
-3. B 侧是否打印 `[TX][video] 发流开始` 和 `[TX][audio] 发流开始`。
-4. A 侧是否打印 `[RX][video] 接收统计` 和 `[RX][audio] 接收统计`。
-
-如果 B 侧没有 `[CTRL][RX]`，说明订阅命令没有到达 B。  
-如果 B 侧有 `[TX]` 但 A 侧没有 `[RX]`，需要继续检查网络链路、发送缓冲和 SDK 详细日志。
-
-### 5.6 提示缺少 H264/PCMA 文件
-
-说明 `storage` SPIFFS 分区没有正确烧录，或测试媒体文件没有被打包。
-
-请使用：
+先在正式 manifest 的符号清单中静态确认扩展任务接口：
 
 ```powershell
-idf.py -p COMx flash monitor
+Select-String components\tirtc_sdk\manifest\symbols-undefined-by-object.txt `
+  -Pattern 'xTaskCreatePinnedToCoreWithCaps'
 ```
 
-不要只单独烧录 app bin，否则可能漏掉 `storage.bin`。
+该静态门禁证明库引用了目标接口；板端循环用于进一步证明运行稳定性和内存趋势，
+单次构建不能替代这部分运行证据。
 
-## 6. 需要保留的日志
+## 10. 常见错误
 
-如果测试失败，请保留两端完整串口日志，重点包含：
+`-40014 TIRTC_E_NO_SECRET_KEY`
 
-- 开机版本信息。
-- Wi-Fi 连接结果。
-- SNTP 时间同步结果。
-- TiRTC 启动和上线日志。
-- BOOT 按键触发日志。
-- token 生成日志。
-- 主动连接或远端呼入日志。
-- `[CTRL][TX]`、`[CTRL][RX]` 控制日志。
-- `[TX][video]`、`[TX][audio]` 发送日志。
-- `[RX][video]`、`[RX][audio]` 接收日志。
-- 断开或错误日志。
+检查是否在 `TiRtcStart()` 前设置了 `TIRTC_OPT_DEVICE_SECRET_KEY`。
+
+服务端 `X-Tg-Client-Id is required` 或身份冲突
+
+检查 `client_id` 是否有效，并确认已绑定设备复用了首次值。
+
+`TIRTC_E_CACHE_EXPIRED`
+
+这是缓存未命中/过期，不是最终连接失败；获取与目标 scope 一致的新 token。
+
+HTTPS endpoint 参数错误
+
+本正式包为 HTTP-only。清空 endpoint 使用 SDK 默认入口，或使用正式包明确支持的
+部署地址。
+
+缺少 H264/PCMA 文件
+
+使用完整 `idf.py flash`，不要只烧录 app bin。
+
+异常重定向事件
+
+立即停止信任当前 endpoint，检查 DNS、代理、热点认证页和中间人风险。
+
+## 11. 留存证据
+
+- SDK 文件哈希、manifest 和 BuildInfo。
+- 构建命令、完整成功结尾、固件大小和 SHA256。
+- 烧录命令、串口启动到 `SYS_STARTED` 的完整日志。
+- 主动/入站连接两端日志。
+- 远端实际播放或协议抓取证据。
+- 音视频分别退订与重订日志。
+- 20 次循环及前后内存数据。
+- 脱敏扫描结果。
+
+分享日志前先脱敏；任何 token、device secret 或应用签名密钥都必须删除。

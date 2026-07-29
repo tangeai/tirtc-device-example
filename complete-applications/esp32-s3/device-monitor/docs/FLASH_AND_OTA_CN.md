@@ -1,17 +1,17 @@
 # ESP32-S3 烧录与 OTA
 
-当前版本：`0.7.5`
+当前版本：`1.7.6`
 
 固件下载：
-[ESP32-S3 v0.7.5 GitHub Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-trtc-advanced-v0.7.5)
+[tirtc-device-example Releases](https://github.com/tangeai/tirtc-device-example/releases)
 
 ## 普通用户只下载这个文件
 
 ```text
-esp32s3-tirtc-device-monitor-full-v0.7.5.bin
+esp32s3-tirtc-device-monitor-full-v1.7.6.bin
 ```
 
-这是 16 MB 完整镜像，已经包含 bootloader、分区表、OTA 初始数据、应用和 storage。
+这是完整镜像，已经包含 bootloader、分区表、OTA 初始数据、应用和 storage。
 烧录地址固定填写：
 
 ```text
@@ -20,20 +20,19 @@ esp32s3-tirtc-device-monitor-full-v0.7.5.bin
 
 不要只把 OTA app 写入 `0x0`，也不要把多个文件都填成同一个地址。
 
-## 使用 ESP Launchpad 烧录
+## 使用 Espressif ESP Tool 烧录
 
 推荐 Chrome 或 Edge，使用 Espressif 官方工具：
 
-[https://espressif.github.io/esp-launchpad/](https://espressif.github.io/esp-launchpad/)
+[https://espressif.github.io/esptool-js/](https://espressif.github.io/esptool-js/)
 
 1. 用支持数据传输的 USB 线连接开发板。
-2. 打开 ESP Launchpad，进入 DIY 烧录模式。
-3. 点击连接设备，选择开发板对应串口。
-4. 添加 `esp32s3-tirtc-device-monitor-full-v0.7.5.bin`。
-5. 在地址栏填写 `0x0`。
-6. 首次使用、版本跨度较大或设备状态不确定时，先擦除闪存。
-7. 开始烧录，等待网页明确显示完成。
-8. 按开发板 RESET，等待屏幕进入主页。
+2. 打开 ESP Tool，点击 `Connect` 并选择开发板对应串口。
+3. 点击 `Add File`，添加 `esp32s3-tirtc-device-monitor-full-v1.7.6.bin`。
+4. 在 `Flash Address` 中填写 `0x0`。
+5. 首次使用、版本跨度较大或设备状态不确定时，先擦除闪存。
+6. 点击 `Program`，等待网页明确显示完成。
+7. 按开发板 RESET，等待屏幕进入主页。
 
 ### 找不到串口
 
@@ -52,22 +51,21 @@ esp32s3-tirtc-device-monitor-full-v0.7.5.bin
 
 ## Release 文件怎么选
 
-| 文件 | 用途 | 大小 | SHA-256 |
-| --- | --- | ---: | --- |
-| `esp32s3-tirtc-device-monitor-full-v0.7.5.bin` | 普通用户使用 ESP Launchpad 从 `0x0` 烧录 | `16777216` | `81AA9FE1E1CC0E8A6F428A1D675BE78DA56558F09BD5C45CAD819C46ADA95B46` |
-| `esp32s3-tirtc-device-monitor-webinstall-v0.7.5.zip` | 完整镜像和简明烧录说明 | `5487666` | `83473E73399F5080FAEDEA605A745A73B3F8F52D759EC1FC0EF5511323DE7F79` |
-| `esp32s3-tirtc-device-monitor-webflash-v0.7.5.zip` | 维护者多地址排障包 | `5477614` | `8C6769BDA7BB0EC3BF950F7C4F73B3901C4DA2C6892DD5C7F26D993C52076534` |
-| `esp32s3-tirtc-device-monitor-ota-v0.7.5.bin` | OTA 服务端 app 固件，不用于 `0x0` 烧录 | `7291120` | `E813347914D70D284D82E3AB798E54A6292530CE97A20C30FE4EBA58FE32BFFC` |
-| `SHA256SUMS.txt` | 下载后完整性校验 | - | Release 内提供 |
-| `release-manifest.json` | 版本、来源、Flash 参数和资产清单 | - | Release 内提供 |
+| 文件 | 用途 |
+| --- | --- |
+| `esp32s3-tirtc-device-monitor-full-v1.7.6.bin` | 普通用户使用 ESP Tool 从 `0x0` 烧录 |
+| `esp32s3-tirtc-device-monitor-ota-v1.7.6.bin` | OTA 服务端 app 固件，不用于 `0x0` 烧录 |
+| `SHA256SUMS.txt` | 下载后完整性校验 |
+| `release-manifest.json` | 版本、来源、Flash 参数和资产清单 |
 
 Windows 校验示例：
 
 ```powershell
-Get-FileHash .\esp32s3-tirtc-device-monitor-full-v0.7.5.bin -Algorithm SHA256
+Get-FileHash .\esp32s3-tirtc-device-monitor-full-v1.7.6.bin -Algorithm SHA256
 ```
 
-结果应与上表一致。
+结果应与同一 Release 中 `SHA256SUMS.txt` 记录的值一致；文件大小和完整资产清单
+以 `release-manifest.json` 为准。
 
 ## 开机后的首次体验
 
@@ -81,8 +79,8 @@ Get-FileHash .\esp32s3-tirtc-device-monitor-full-v0.7.5.bin -Algorithm SHA256
 
 ## 维护者多地址烧录
 
-`webflash` zip 只给维护者排障。解压后以包内 `flash_args.txt` 为准，不要凭记忆手写地址。
-本次构建的主要地址为：
+源码构建后的多地址烧录以 `build/flasher_args.json` 为准，不要凭记忆手写地址。本工程
+分区表对应的主要地址为：
 
 | 地址 | 文件 |
 | --- | --- |
@@ -108,21 +106,11 @@ idf.py -p COMx flash monitor
 GET https://tirtc-device-ota.tange365.com/api/ota/manifest?device_id=<设备ID>&chip=s3&version=<当前版本>
 ```
 
-OTA 服务只保存 app 固件，不包含 NVS、storage、bootloader 或分区表。线上 manifest 的
-`version`、`size` 和 `sha256` 必须与本次构建的 OTA app 完全一致：
+OTA 服务只保存 app 固件，不包含 NVS、storage、bootloader 或分区表。线上
+manifest 的 `version` 必须为 `1.7.6`，`size` 和 `sha256` 必须分别与同一
+Release 的 `release-manifest.json`、`SHA256SUMS.txt` 中 OTA app 记录一致。
 
-```json
-{
-  "version": "0.7.5",
-  "update": true,
-  "firmware": {
-    "size": 7291120,
-    "sha256": "E813347914D70D284D82E3AB798E54A6292530CE97A20C30FE4EBA58FE32BFFC"
-  }
-}
-```
-
-设备已经运行 `0.7.5` 时，服务端应返回 `update=false` 和 `reason=up_to_date`。
+设备已经运行 `1.7.6` 时，服务端应返回 `update=false` 和 `reason=up_to_date`。
 
 ## 发布边界
 

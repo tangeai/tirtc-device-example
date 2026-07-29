@@ -2,6 +2,7 @@ build*/
 .vscode/
 .agents/
 firmware/
+release_assets/
 managed_components/
 *.pyc
 __pycache__/

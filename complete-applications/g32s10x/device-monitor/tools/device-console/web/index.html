@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>G32S10X Device Console</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="identity">
+      <strong>G32S10X Device Console</strong>
+      <span id="device-address">Waiting for device</span>
+    </div>
+    <div class="status-strip" aria-label="运行状态">
+      <span class="status"><i id="device-dot"></i><b id="device-state">Offline</b></span>
+      <span id="device-resolution">480 x 854</span>
+      <span id="clock">--:--:--</span>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <section class="screen-pane" aria-labelledby="screen-title">
+      <div class="pane-header">
+        <h1 id="screen-title">Device Screen</h1>
+        <button id="screen-toggle" type="button">Pause</button>
+      </div>
+      <div class="screen-stage">
+        <img id="device-screen" alt="G32S10X device screen">
+        <div id="screen-error" role="status">Waiting for frame</div>
+      </div>
+    </section>
+
+    <section class="log-pane" aria-labelledby="log-title">
+      <div class="pane-header log-toolbar">
+        <div>
+          <h1 id="log-title">COM39 Logs</h1>
+          <span id="log-file">No log file</span>
+        </div>
+        <label><input id="auto-scroll" type="checkbox" checked> Auto-scroll</label>
+        <button id="log-refresh" type="button">Refresh</button>
+      </div>
+      <pre id="log-output" aria-live="polite"></pre>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>Read-only monitor</span>
+    <span id="last-update">No data</span>
+  </footer>
+  <script src="/app.js"></script>
+</body>
+</html>

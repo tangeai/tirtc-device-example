@@ -15,9 +15,10 @@
 
 static const char *TAG = "display_driver";
 
-#define DISPLAY_DRIVER_ROTATION   LV_DISP_ROT_270
+#define DISPLAY_DRIVER_LANDSCAPE_ROTATION LV_DISP_ROT_270
+#define DISPLAY_DRIVER_PORTRAIT_ROTATION  LV_DISP_ROT_NONE
 #define DISPLAY_DRIVER_DRAW_LINES 32
-#define DISPLAY_DRIVER_TRANSFER_LINES 4
+#define DISPLAY_DRIVER_TRANSFER_LINES 16
 #define DISPLAY_DRIVER_LVGL_TASK_PRIORITY 15
 #define DISPLAY_DRIVER_TOUCH_SCROLL_LIMIT_PX  18
 #define DISPLAY_DRIVER_TOUCH_SCROLL_THROW     0
@@ -26,6 +27,7 @@ static const char *TAG = "display_driver";
 static lv_disp_t *s_display;
 static lv_indev_t *s_touch_indev;
 static bool s_initialized;
+static display_driver_orientation_t s_orientation = DISPLAY_DRIVER_ORIENTATION_LANDSCAPE;
 
 _Static_assert(LV_COLOR_DEPTH == 16, "direct LCD video requires RGB565 LVGL color depth");
 
@@ -61,9 +63,14 @@ esp_err_t display_driver_init(display_driver_handles_t *handles)
 		.trans_size = BSP_LCD_V_RES * DISPLAY_DRIVER_TRANSFER_LINES,
 		.double_buffer = true,
 		.flags = {
-			/* Draw in PSRAM and copy normal UI traffic through one small internal
-			 * DMA transport buffer. Call video uses P4 PSRAM-direct SPI DMA and
-			 * does not consume this staging memory. */
+			/*
+			 * Draw in PSRAM and reserve one 16-line internal DMA transport
+			 * buffer at display startup. LVGL uses this path for normal pages
+			 * and while call controls are visible; 16 lines reduce a 480x320
+			 * refresh from 80 synchronous SPI chunks to 20. Once controls
+			 * auto-hide, call video switches to one frame-sized PSRAM DMA
+			 * transaction. ESP-Hosted RX keeps its own fixed DMA buffers.
+			 */
 			.buff_dma = false,
 			.buff_spiram = true,
 		},
@@ -75,7 +82,8 @@ esp_err_t display_driver_init(display_driver_handles_t *handles)
 
 	s_display = bsp_display_start_with_config(&cfg);
 	ESP_RETURN_ON_FALSE(s_display != NULL, ESP_FAIL, TAG, "bsp display start failed");
-	lv_disp_set_rotation(s_display, DISPLAY_DRIVER_ROTATION);
+	lv_disp_set_rotation(s_display, DISPLAY_DRIVER_LANDSCAPE_ROTATION);
+	s_orientation = DISPLAY_DRIVER_ORIENTATION_LANDSCAPE;
 
 	s_touch_indev = bsp_display_get_input_dev();
 	ESP_RETURN_ON_FALSE(s_touch_indev != NULL, ESP_FAIL, TAG, "bsp touch init failed");
@@ -94,7 +102,7 @@ esp_err_t display_driver_init(display_driver_handles_t *handles)
 		 BSP_LCD_V_RES,
 		 display_driver_width(),
 		 display_driver_height(),
-		 (unsigned)DISPLAY_DRIVER_ROTATION,
+		 (unsigned)DISPLAY_DRIVER_LANDSCAPE_ROTATION,
 		 (unsigned)(BSP_LCD_V_RES * DISPLAY_DRIVER_DRAW_LINES * sizeof(lv_color_t)),
 		 (unsigned)(BSP_LCD_V_RES * DISPLAY_DRIVER_TRANSFER_LINES * sizeof(lv_color_t)));
 	return ESP_OK;
@@ -119,6 +127,41 @@ uint16_t display_driver_height(void)
 		return (uint16_t)lv_disp_get_ver_res(s_display);
 	}
 	return hardware_board_get_display_config()->height;
+}
+
+display_driver_orientation_t display_driver_get_orientation(void)
+{
+	return s_orientation;
+}
+
+esp_err_t display_driver_set_orientation(display_driver_orientation_t orientation)
+{
+	ESP_RETURN_ON_FALSE(s_initialized && s_display != NULL,
+			    ESP_ERR_INVALID_STATE,
+			    TAG,
+			    "display is not initialized");
+	ESP_RETURN_ON_FALSE(orientation == DISPLAY_DRIVER_ORIENTATION_PORTRAIT ||
+				orientation == DISPLAY_DRIVER_ORIENTATION_LANDSCAPE,
+			    ESP_ERR_INVALID_ARG,
+			    TAG,
+			    "invalid display orientation");
+	if (orientation == s_orientation) {
+		return ESP_OK;
+	}
+
+	lv_disp_rot_t rotation =
+		orientation == DISPLAY_DRIVER_ORIENTATION_PORTRAIT ?
+			DISPLAY_DRIVER_PORTRAIT_ROTATION :
+			DISPLAY_DRIVER_LANDSCAPE_ROTATION;
+	lv_disp_set_rotation(s_display, rotation);
+	s_orientation = orientation;
+	ESP_LOGI(TAG,
+		 "display orientation: mode=%s ui=%ux%u rotation=%u",
+		 orientation == DISPLAY_DRIVER_ORIENTATION_PORTRAIT ? "portrait" : "landscape",
+		 display_driver_width(),
+		 display_driver_height(),
+		 (unsigned)rotation);
+	return ESP_OK;
 }
 
 esp_err_t display_driver_blit_rgb565(uint16_t x,

@@ -7,13 +7,15 @@
 - 设备绑定、在线状态和业务会话。
 - 摄像头、麦克风、扬声器、显示和触摸。
 - H5 实时查看、AI 对讲、微信 VoIP、设备互呼和 OTA。
-- 构建、烧录、测试和 Release 资产生成说明。
+- 面向开发者的配置、构建、烧录和验证说明。
 
 当前项目：
 
 | 平台 | 项目 | 版本 | 入口 |
 | --- | --- | --- | --- |
-| ESP32-S3 | 设备监控与对讲 | `0.7.5` | [README](esp32-s3/device-monitor/README.md) |
-| ESP32-P4 | 设备监控与对讲 | `1.1.0` | [README](esp32-p4/device-monitor/README.md) |
+| ESP32-S3 | Device Monitor | `1.7.6` | [README](esp32-s3/device-monitor/README.md) |
+| ESP32-P4 | Device App | `1.2.3` | [README](esp32-p4/device-monitor/README.md) |
+| G32S10X | Device Monitor | `0.1.1` | [README](g32s10x/device-monitor/README.md) |
 
-G32S10X/S10 完整应用仍处于来源、许可证、补丁收口和真机验证整理阶段，本次没有复制进仓库。
+ESP32-P4 Device App `1.2.3` 本次提供源码。其余项目的正式构建产物只通过
+[GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases) 分发，不进入 Git 历史。

@@ -1,0 +1,9 @@
+building/
+.sdk-work/
+.playwright-cli/
+cloner-*/
+*.log
+*.bin
+*.elf
+*.yaffs2
+config/local_config.h

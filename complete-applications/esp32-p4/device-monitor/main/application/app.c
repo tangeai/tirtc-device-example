@@ -1,4 +1,4 @@
-﻿#include "app.h"
+#include "app.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,12 +23,13 @@
 #include "app_audio_policy.h"
 #include "app_config.h"
 #include "app_internal.h"
+#include "app_log_policy.h"
 #include "app_rtc_config.h"
 #include "app_ui.h"
 #include "app_task_affinity.h"
 #include "ai_chat.h"
+#include "ai_chat_token.h"
 #include "audio_device.h"
-#include "camera_driver.h"
 #include "camera_pipeline.h"
 #include "call_video_renderer.h"
 #include "device.h"
@@ -56,6 +57,9 @@
 #endif
 
 static const char *TAG = "app";
+#if CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG
+static const char *MEDIA_HEALTH_TAG = "MEDIA";
+#endif
 
 static void app_log_performance_profile(void)
 {
@@ -85,18 +89,24 @@ static void *app_calloc_psram(size_t count, size_t size)
 #define APP_CONTROL_TASK_PRIORITY   2
 #define APP_CONTROL_QUEUE_LENGTH    4
 #define APP_RTC_RECONFIGURE_REASON_MAX 32
-#define APP_RTC_PREPARE_WAIT_ONLINE_MS 12000U
 #define APP_RTC_PREPARE_WAIT_BINDING_MS 5000U
 #define APP_RTC_PREPARE_POLL_MS        100U
 #define APP_LIFECYCLE_TASK_STACK_SIZE 6144
 #define APP_LIFECYCLE_TASK_PRIORITY   4
 #define APP_LIFECYCLE_QUEUE_LENGTH    4
+#define APP_MEDIA_HEALTH_INTERVAL_MS  5000U
+#define APP_RTC_VIDEO_ADAPT_INTERVAL_MS 1000U
 #define APP_RUNTIME_SNAPSHOT_INTERVAL_MS 10000U
 #define APP_RUNTIME_MONITOR_TASK_STACK_SIZE 4096
 #define APP_RUNTIME_MONITOR_TASK_PRIORITY   1
+#define APP_RTC_VIDEO_TGMP_FEEDBACK_WAIT_MS 3000U
 #define APP_DEVICE_UNBIND_ACK_WAIT_MS       2000U
 #define APP_THING_BOOTSTRAP_TASK_STACK_SIZE (12U * 1024U)
 #define APP_THING_BOOTSTRAP_TASK_PRIORITY   2
+#define APP_AI_CHAT_TOKEN_PREFETCH_DELAY_MS 200U
+#define APP_AI_CHAT_TOKEN_PREFETCH_MIN_INTERVAL_MS 60000U
+#define APP_AI_CHAT_TOKEN_PREFETCH_TASK_STACK_SIZE (8U * 1024U)
+#define APP_AI_CHAT_TOKEN_PREFETCH_TASK_PRIORITY   1
 
 typedef enum {
 	APP_CONTROL_EVENT_SPEAKER_VOLUME = 1,
@@ -105,7 +115,9 @@ typedef enum {
 	APP_CONTROL_EVENT_RTC_PREPARE_AFTER_IDENTITY,
 	APP_CONTROL_EVENT_RTC_IDENTITY_CONFLICT,
 	APP_CONTROL_EVENT_DEVICE_UNBIND,
+	APP_CONTROL_EVENT_DEVICE_ONLINE_READY,
 	APP_CONTROL_EVENT_CALL_SESSION_ENDED,
+	APP_CONTROL_EVENT_RTC_VIDEO_BITRATE_REQUIRED,
 } app_control_event_type_t;
 
 typedef enum {
@@ -133,11 +145,13 @@ typedef struct {
 } app_thing_bootstrap_context_t;
 
 static portMUX_TYPE s_app_lifecycle_lock = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE s_rtc_video_bitrate_lock = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t s_app_control_queue;
 static TaskHandle_t s_app_control_task;
 static QueueHandle_t s_app_lifecycle_queue;
 static TaskHandle_t s_app_lifecycle_task;
-#if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
+#if CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG || CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS || \
+	CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE || CONFIG_APP_RTC_SDK_VIDEO_ADAPT_ENABLE
 static TaskHandle_t s_app_runtime_monitor_task;
 #endif
 static app_id_t s_active_app = APP_ID_HOME;
@@ -150,8 +164,23 @@ static bool s_rtc_identity_conflict_handled;
 static char s_rtc_identity_conflict_device_id[APP_RTC_CONFIG_TEXT_MAX];
 static char s_rtc_identity_conflict_client_id[APP_RTC_CONFIG_TEXT_MAX];
 static bool s_thing_bootstrap_running;
+static bool s_thing_bootstrap_rerun_pending;
+static char s_thing_bootstrap_rerun_reason[APP_RTC_RECONFIGURE_REASON_MAX];
+static TaskHandle_t s_ai_chat_token_prefetch_task;
+static int64_t s_ai_chat_token_last_prefetch_us;
+static bool s_rtc_video_bitrate_pending;
+static bool s_rtc_video_bitrate_event_queued;
+static uint8_t s_rtc_video_bitrate_stream_id;
+static uint32_t s_rtc_video_bitrate_target_bps;
+static uint32_t s_rtc_video_bitrate_epoch = 1U;
+static uint32_t s_rtc_video_bitrate_event_epoch;
+static uint32_t s_rtc_video_bitrate_logged_epoch;
+static TickType_t s_rtc_video_bitrate_wait_started_tick;
+static bool s_rtc_video_bitrate_feedback_seen;
+static bool s_rtc_video_bitrate_fallback_logged;
 
 static void app_ai_chat_media_active_changed(bool active, void *ctx);
+static esp_err_t app_sync_rtc_video_bitrate_control(void);
 
 typedef struct {
 	bool video_renderer_started;
@@ -160,6 +189,7 @@ typedef struct {
 } app_call_resource_context_t;
 
 static app_call_resource_context_t s_call_resources;
+static app_call_resource_context_t s_wechat_call_resources;
 
 static esp_err_t app_configure_thing_service_registry(void)
 {
@@ -205,6 +235,294 @@ static void app_log_heap_snapshot(const char *stage)
 	(void)stage;
 #endif
 }
+
+#if CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG || CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE
+typedef struct {
+	bool valid;
+	int64_t sample_us;
+	uint32_t camera_dropped_frames;
+	uint32_t backpressure_events;
+	uint32_t tx_video_frames;
+	size_t tx_video_bytes;
+	uint32_t tx_failures;
+	uint32_t rx_video_frames;
+	uint64_t rx_video_bytes;
+	uint32_t decoded_video_frames;
+	uint32_t converted_video_frames;
+	uint32_t presented_video_frames;
+	uint32_t dropped_video_frames;
+	uint32_t conversion_dropped_video_frames;
+	uint32_t decode_failures;
+	uint32_t conversion_failures;
+	uint64_t conversion_time_us;
+	uint64_t conversion_pack_time_us;
+	uint64_t conversion_ppa_time_us;
+	uint64_t conversion_swap_time_us;
+	uint32_t video_discontinuities;
+	uint32_t video_input_overflows;
+	uint32_t aec_process_frames;
+	uint64_t aec_process_us_total;
+} app_media_health_baseline_t;
+
+static app_media_health_baseline_t s_media_health_baseline;
+
+static void app_media_health_update_baseline(const camera_pipeline_metrics_t *camera,
+					      const rtc_transport_stats_t *rtc,
+					      const call_video_renderer_stats_t *renderer,
+					      const audio_stats_t *audio,
+					      uint32_t backpressure_events,
+					      int64_t sample_us)
+{
+	s_media_health_baseline.valid = true;
+	s_media_health_baseline.sample_us = sample_us;
+	s_media_health_baseline.camera_dropped_frames = camera->dropped_frames;
+	s_media_health_baseline.backpressure_events = backpressure_events;
+	s_media_health_baseline.tx_video_frames = rtc->tx_video_frames;
+	s_media_health_baseline.tx_video_bytes = rtc->tx_video_bytes;
+	s_media_health_baseline.tx_failures = rtc->tx_failures;
+	s_media_health_baseline.rx_video_frames = renderer->received_frames;
+	s_media_health_baseline.rx_video_bytes = renderer->received_bytes;
+	s_media_health_baseline.decoded_video_frames = renderer->decoded_frames;
+	s_media_health_baseline.converted_video_frames = renderer->converted_frames;
+	s_media_health_baseline.presented_video_frames = renderer->presented_frames;
+	s_media_health_baseline.dropped_video_frames = renderer->dropped_frames;
+	s_media_health_baseline.conversion_dropped_video_frames =
+		renderer->conversion_dropped_frames;
+	s_media_health_baseline.decode_failures = renderer->decode_failures;
+	s_media_health_baseline.conversion_failures = renderer->conversion_failures;
+	s_media_health_baseline.conversion_time_us = renderer->conversion_time_us;
+	s_media_health_baseline.conversion_pack_time_us =
+		renderer->conversion_pack_time_us;
+	s_media_health_baseline.conversion_ppa_time_us =
+		renderer->conversion_ppa_time_us;
+	s_media_health_baseline.conversion_swap_time_us =
+		renderer->conversion_swap_time_us;
+	s_media_health_baseline.video_discontinuities = renderer->discontinuities;
+	s_media_health_baseline.video_input_overflows = renderer->input_overflows;
+	s_media_health_baseline.aec_process_frames = audio->aec_process_frames;
+	s_media_health_baseline.aec_process_us_total = audio->aec_process_us_total;
+}
+
+static void app_monitor_media_health(void)
+{
+	rtc_transport_stats_t rtc = {0};
+	camera_pipeline_metrics_t camera = {0};
+	call_video_renderer_stats_t renderer = {0};
+	media_sink_stats_t sink = {0};
+	audio_stats_t audio = {0};
+	network_state_t network = {0};
+	const int64_t now_us = esp_timer_get_time();
+	const uint32_t backpressure_events =
+		media_governor_get_network_backpressure_count();
+
+	rtc_transport_get_stats(&rtc);
+	camera_pipeline_get_metrics(&camera);
+	call_video_renderer_get_stats(&renderer);
+	media_sink_get_stats(&sink);
+	audio_device_get_stats(&audio);
+	network_get_state(&network);
+
+	const bool media_active =
+		rtc.active_connection &&
+		(rtc.call_active || camera.rtc_enabled ||
+		 renderer.running || audio.capture_enabled || audio.speaker_enabled);
+	if (!media_active) {
+		memset(&s_media_health_baseline, 0, sizeof(s_media_health_baseline));
+		const media_governor_network_sample_t inactive_sample = {0};
+		(void)media_governor_update_auto_adaptation(&inactive_sample);
+		return;
+	}
+
+	const bool counters_restarted =
+		s_media_health_baseline.valid &&
+		(camera.dropped_frames < s_media_health_baseline.camera_dropped_frames ||
+		 backpressure_events < s_media_health_baseline.backpressure_events ||
+		 rtc.tx_video_frames < s_media_health_baseline.tx_video_frames ||
+		 rtc.tx_video_bytes < s_media_health_baseline.tx_video_bytes ||
+		 rtc.tx_failures < s_media_health_baseline.tx_failures ||
+		 renderer.received_frames < s_media_health_baseline.rx_video_frames ||
+		 renderer.received_bytes < s_media_health_baseline.rx_video_bytes ||
+		 renderer.decoded_frames < s_media_health_baseline.decoded_video_frames ||
+		 renderer.converted_frames < s_media_health_baseline.converted_video_frames ||
+		 renderer.presented_frames < s_media_health_baseline.presented_video_frames ||
+		 renderer.dropped_frames < s_media_health_baseline.dropped_video_frames ||
+		 renderer.conversion_dropped_frames <
+			 s_media_health_baseline.conversion_dropped_video_frames ||
+		 renderer.decode_failures < s_media_health_baseline.decode_failures ||
+		 renderer.conversion_failures < s_media_health_baseline.conversion_failures ||
+		 renderer.conversion_time_us < s_media_health_baseline.conversion_time_us ||
+		 renderer.conversion_pack_time_us <
+			 s_media_health_baseline.conversion_pack_time_us ||
+		 renderer.conversion_ppa_time_us <
+			 s_media_health_baseline.conversion_ppa_time_us ||
+		 renderer.conversion_swap_time_us <
+			 s_media_health_baseline.conversion_swap_time_us ||
+		 renderer.discontinuities < s_media_health_baseline.video_discontinuities ||
+		 renderer.input_overflows < s_media_health_baseline.video_input_overflows ||
+		 audio.aec_process_frames < s_media_health_baseline.aec_process_frames ||
+		 audio.aec_process_us_total < s_media_health_baseline.aec_process_us_total);
+	if (!s_media_health_baseline.valid || counters_restarted) {
+		app_media_health_update_baseline(&camera,
+					       &rtc,
+					       &renderer,
+					       &audio,
+					       backpressure_events,
+					       now_us);
+#if CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG
+		ESP_LOGI(MEDIA_HEALTH_TAG,
+			 "M0 %ux%u@%u a=%d/%d r=%d",
+			 (unsigned)camera.width,
+			 (unsigned)camera.height,
+			 (unsigned)camera.target_fps,
+			 audio.aec_active ? 1 : 0,
+			 audio.aec_reference_active ? 1 : 0,
+			 (int)network.rssi);
+#endif
+		return;
+	}
+
+	uint32_t elapsed_ms =
+		(uint32_t)((now_us - s_media_health_baseline.sample_us) / 1000LL);
+	if (elapsed_ms == 0U) {
+		elapsed_ms = 1U;
+	}
+
+	const uint32_t tx_frames =
+		rtc.tx_video_frames - s_media_health_baseline.tx_video_frames;
+	const size_t tx_bytes =
+		rtc.tx_video_bytes - s_media_health_baseline.tx_video_bytes;
+	const uint32_t camera_dropped_frames =
+		camera.dropped_frames - s_media_health_baseline.camera_dropped_frames;
+	const uint32_t backpressure_event_delta =
+		backpressure_events - s_media_health_baseline.backpressure_events;
+	const uint32_t tx_failures =
+		rtc.tx_failures - s_media_health_baseline.tx_failures;
+	const uint32_t rx_video_frames =
+		renderer.received_frames - s_media_health_baseline.rx_video_frames;
+	const uint64_t rx_video_bytes =
+		renderer.received_bytes - s_media_health_baseline.rx_video_bytes;
+	const uint32_t decoded_video_frames =
+		renderer.decoded_frames - s_media_health_baseline.decoded_video_frames;
+	const uint32_t converted_video_frames =
+		renderer.converted_frames - s_media_health_baseline.converted_video_frames;
+	const uint32_t presented_video_frames =
+		renderer.presented_frames - s_media_health_baseline.presented_video_frames;
+	const uint32_t dropped_video_frames =
+		renderer.dropped_frames - s_media_health_baseline.dropped_video_frames;
+	const uint32_t conversion_dropped_video_frames =
+		renderer.conversion_dropped_frames -
+		s_media_health_baseline.conversion_dropped_video_frames;
+	const uint32_t decode_failures =
+		renderer.decode_failures - s_media_health_baseline.decode_failures;
+	const uint32_t conversion_failures =
+		renderer.conversion_failures - s_media_health_baseline.conversion_failures;
+	const uint64_t conversion_time_us =
+		renderer.conversion_time_us - s_media_health_baseline.conversion_time_us;
+	const uint32_t video_discontinuities =
+		renderer.discontinuities - s_media_health_baseline.video_discontinuities;
+	const uint32_t video_input_overflows =
+		renderer.input_overflows - s_media_health_baseline.video_input_overflows;
+	const uint32_t aec_frames =
+		audio.aec_process_frames - s_media_health_baseline.aec_process_frames;
+	const uint64_t aec_process_us =
+		audio.aec_process_us_total - s_media_health_baseline.aec_process_us_total;
+	const uint32_t tx_fps_x10 =
+		(uint32_t)(((uint64_t)tx_frames * 10000ULL) / elapsed_ms);
+	const uint32_t tx_bitrate_kbps =
+		(uint32_t)(((uint64_t)tx_bytes * 8ULL) / elapsed_ms);
+	const uint32_t rx_fps_x10 =
+		(uint32_t)(((uint64_t)rx_video_frames * 10000ULL) / elapsed_ms);
+	const uint32_t rx_bitrate_kbps =
+		(uint32_t)((rx_video_bytes * 8ULL) / elapsed_ms);
+	const uint32_t decoded_fps_x10 =
+		(uint32_t)(((uint64_t)decoded_video_frames * 10000ULL) / elapsed_ms);
+	const uint32_t converted_fps_x10 =
+		(uint32_t)(((uint64_t)converted_video_frames * 10000ULL) / elapsed_ms);
+	const uint32_t conversion_avg_us =
+		converted_video_frames > 0U ?
+			(uint32_t)(conversion_time_us / converted_video_frames) : 0U;
+	const uint32_t presented_fps_x10 =
+		(uint32_t)(((uint64_t)presented_video_frames * 10000ULL) / elapsed_ms);
+	const uint32_t aec_avg_us =
+		aec_frames > 0U ? (uint32_t)(aec_process_us / aec_frames) : 0U;
+
+	const media_governor_network_sample_t network_sample = {
+		.active = rtc.call_active &&
+			  rtc.local_video_send_enabled &&
+			  camera.rtc_enabled,
+		.backpressure_active = media_governor_is_network_backpressured(),
+		.backpressure_events = backpressure_event_delta,
+		.target_fps = camera.target_fps,
+		.camera_fps_x10 = camera.measured_fps_x10,
+		.tx_fps_x10 = tx_fps_x10,
+		.tx_failures = tx_failures,
+		.tx_queue_depth = rtc.local_video_tx_queue_len,
+		.send_buffer_used = rtc.send_buffer_used,
+		.send_buffer_limit = rtc.send_buffer_limit,
+		.wifi_rssi = network.rssi,
+	};
+	if (media_governor_update_auto_adaptation(&network_sample)) {
+		camera_pipeline_on_rtc_video_config_changed();
+	}
+
+#if CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG
+	ESP_LOGI(MEDIA_HEALTH_TAG,
+		 "M u=%u.%u/%uk d=%u.%u/%uk x=%u.%u c=%u.%u/%ums p=%u.%u "
+		 "q=%u+%u dr=%u+%u+%u er=%u+%u rs=%u/%u aq=%u/%ums a=%d/%d/%ums r=%d",
+		 (unsigned)(tx_fps_x10 / 10U),
+		 (unsigned)(tx_fps_x10 % 10U),
+		 (unsigned)tx_bitrate_kbps,
+		 (unsigned)(rx_fps_x10 / 10U),
+		 (unsigned)(rx_fps_x10 % 10U),
+		 (unsigned)rx_bitrate_kbps,
+		 (unsigned)(decoded_fps_x10 / 10U),
+		 (unsigned)(decoded_fps_x10 % 10U),
+		 (unsigned)(converted_fps_x10 / 10U),
+		 (unsigned)(converted_fps_x10 % 10U),
+		 (unsigned)((conversion_avg_us + 500U) / 1000U),
+		 (unsigned)(presented_fps_x10 / 10U),
+		 (unsigned)(presented_fps_x10 % 10U),
+		 (unsigned)renderer.queue_depth,
+		 (unsigned)renderer.conversion_queue_depth,
+		 (unsigned)camera_dropped_frames,
+		 (unsigned)dropped_video_frames,
+		 (unsigned)conversion_dropped_video_frames,
+		 (unsigned)decode_failures,
+		 (unsigned)conversion_failures,
+		 (unsigned)video_discontinuities,
+		 (unsigned)video_input_overflows,
+		 (unsigned)sink.audio_queue_len,
+		 (unsigned)sink.audio_buffered_ms,
+		 audio.aec_active ? 1 : 0,
+		 audio.aec_reference_active ? 1 : 0,
+		 (unsigned)((aec_avg_us + 500U) / 1000U),
+		 (int)network.rssi);
+#else
+	(void)camera_dropped_frames;
+	(void)tx_bitrate_kbps;
+	(void)rx_fps_x10;
+	(void)rx_bitrate_kbps;
+	(void)decoded_fps_x10;
+	(void)converted_fps_x10;
+	(void)conversion_avg_us;
+	(void)presented_fps_x10;
+	(void)dropped_video_frames;
+	(void)conversion_dropped_video_frames;
+	(void)decode_failures;
+	(void)conversion_failures;
+	(void)video_discontinuities;
+	(void)video_input_overflows;
+	(void)aec_avg_us;
+#endif
+
+	app_media_health_update_baseline(&camera,
+				       &rtc,
+				       &renderer,
+				       &audio,
+				       backpressure_events,
+				       now_us);
+}
+#endif
 
 #if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
 static void app_log_runtime_snapshot(void)
@@ -300,6 +618,7 @@ static esp_err_t app_set_speaker_volume_internal(uint8_t percent, bool persist);
 static esp_err_t app_enter_app_sync(app_id_t app_id);
 static esp_err_t app_return_home_sync(void);
 static esp_err_t app_start_app_services(app_id_t app_id);
+static esp_err_t app_enqueue_lifecycle_event(app_lifecycle_event_type_t type, app_id_t app_id);
 static esp_err_t app_prepare_rtc_after_time_sync(const char *reason);
 static esp_err_t app_prepare_rtc_after_config_if_ready(const char *reason);
 static esp_err_t app_reconfigure_tirtc_after_settings_change(const char *reason);
@@ -316,17 +635,28 @@ static void app_wait_identity_before_rtc_prepare(const char *reason);
 static esp_err_t app_start_device_binding_reconcile_if_needed(const char *reason);
 static esp_err_t app_start_device_identity_services(const char *reason);
 static esp_err_t app_start_device_online_if_ready(const char *reason);
-static void app_start_device_call_ingress(void);
+static void app_start_device_identity_ingress(void);
 static esp_err_t app_configure_device_call(void);
+static bool app_incoming_session_allowed(app_id_t incoming_app);
 static bool app_device_call_can_accept_incoming(void *ctx);
+static bool app_wechat_incoming_allowed(void *ctx);
 static void app_device_call_session_ended(void *ctx);
 static void app_release_call_session_resources_if_idle(void);
 static void app_release_call_session_resources_internal(bool restore_video_profile);
+static esp_err_t app_prepare_wechat_call_resources(bool local_video_enabled,
+						   bool remote_video_enabled,
+						   void *ctx);
+static void app_release_wechat_call_resources(void *ctx);
+static void app_release_wechat_call_resources_internal(bool leave_wechat_page);
 static esp_err_t app_handle_device_unbind(const char *reason);
 static void app_request_device_unbind(const char *reason);
+static void app_device_online_ready_cb(void *ctx);
 static void app_schedule_thing_bootstrap(const char *reason);
 static void app_time_sync_cb(esp_err_t result, bool time_valid, void *ctx);
 static esp_err_t app_reset_device_binding_internal(const char *reason);
+static void app_request_ai_chat_start_if_idle(const char *reason);
+static void app_schedule_ai_chat_token_prefetch(const char *reason);
+static void app_reset_ai_chat_token_prefetch_throttle(void);
 
 enum {
 	APP_RESOURCE_RTC = 1U << 0,
@@ -343,12 +673,16 @@ typedef struct {
 	(APP_RESOURCE_RTC | APP_RESOURCE_AUDIO | \
 	 ((APP_CONFIG_WECHAT_VOIP_LOCAL_VIDEO_ENABLE != 0) ? APP_RESOURCE_CAMERA : 0U))
 
+#define APP_AI_CHAT_RESOURCE_MASK \
+	(APP_RESOURCE_RTC | APP_RESOURCE_AUDIO | \
+	 ((APP_CONFIG_AI_CHAT_VIDEO_ENABLE != 0) ? APP_RESOURCE_CAMERA : 0U))
+
 static const app_resource_profile_t s_app_resource_profiles[] = {
 	{ APP_ID_HOME, 0 },
 	{ APP_ID_DEVICE, 0 },
 	{ APP_ID_CALL, 0 },
 	{ APP_ID_WECHAT, APP_WECHAT_RESOURCE_MASK },
-	{ APP_ID_AI_CHAT, APP_RESOURCE_RTC },
+	{ APP_ID_AI_CHAT, APP_AI_CHAT_RESOURCE_MASK },
 	{ APP_ID_SYSTEM, 0 },
 };
 
@@ -453,6 +787,7 @@ static esp_err_t app_build_ai_chat_config(ai_chat_config_t *config)
 	app_get_rtc_config_snapshot(&rtc_settings);
 	memset(config, 0, sizeof(*config));
 	config->enabled = APP_CONFIG_AI_CHAT_ENABLE != 0;
+	config->video_enabled = APP_CONFIG_AI_CHAT_VIDEO_ENABLE != 0;
 	config->media_active_cb = app_ai_chat_media_active_changed;
 	config->media_active_ctx = NULL;
 	strlcpy(config->device_id, rtc_settings.device_id, sizeof(config->device_id));
@@ -482,6 +817,91 @@ static bool app_rtc_device_credentials_available(void)
 
 	app_get_rtc_config_snapshot(&settings);
 	return settings.device_id[0] != '\0' && settings.device_secret[0] != '\0';
+}
+
+static void app_ai_chat_token_prefetch_task(void *ctx)
+{
+	(void)ctx;
+	vTaskDelay(pdMS_TO_TICKS(APP_AI_CHAT_TOKEN_PREFETCH_DELAY_MS));
+
+	esp_err_t ret = ESP_ERR_INVALID_STATE;
+	bool attempted = false;
+
+	if (app_get_active_app() == APP_ID_HOME &&
+	    network_is_connected() &&
+	    system_time_has_valid_time() &&
+	    app_rtc_device_credentials_available()) {
+		ai_chat_config_t config = {0};
+		ret = app_build_ai_chat_config(&config);
+		if (ret == ESP_OK && config.enabled) {
+			attempted = true;
+			ret = ai_chat_token_prefetch_join(&config);
+		}
+		if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE && ret != ESP_ERR_NOT_FOUND) {
+			ESP_LOGD(TAG, "AI Chat token prefetch skipped: %s", esp_err_to_name(ret));
+		}
+	}
+
+	taskENTER_CRITICAL(&s_app_lifecycle_lock);
+	if (attempted && ret != ESP_OK) {
+		s_ai_chat_token_last_prefetch_us = 0;
+	}
+	s_ai_chat_token_prefetch_task = NULL;
+	taskEXIT_CRITICAL(&s_app_lifecycle_lock);
+	vTaskDeleteWithCaps(NULL);
+}
+
+static void app_reset_ai_chat_token_prefetch_throttle(void)
+{
+	taskENTER_CRITICAL(&s_app_lifecycle_lock);
+	s_ai_chat_token_last_prefetch_us = 0;
+	taskEXIT_CRITICAL(&s_app_lifecycle_lock);
+}
+
+static void app_schedule_ai_chat_token_prefetch(const char *reason)
+{
+	(void)reason;
+
+	if (!network_is_connected() ||
+	    !system_time_has_valid_time() ||
+	    !app_rtc_device_credentials_available() ||
+	    app_get_active_app() != APP_ID_HOME) {
+		return;
+	}
+
+	int64_t now_us = esp_timer_get_time();
+	taskENTER_CRITICAL(&s_app_lifecycle_lock);
+	bool running = s_ai_chat_token_prefetch_task != NULL;
+	bool throttled = s_ai_chat_token_last_prefetch_us > 0 &&
+			 now_us - s_ai_chat_token_last_prefetch_us <
+			     (int64_t)APP_AI_CHAT_TOKEN_PREFETCH_MIN_INTERVAL_MS * 1000LL;
+	if (!running && !throttled) {
+		s_ai_chat_token_last_prefetch_us = now_us;
+	}
+	taskEXIT_CRITICAL(&s_app_lifecycle_lock);
+	if (running || throttled) {
+		return;
+	}
+
+	TaskHandle_t task = NULL;
+	BaseType_t task_ret = xTaskCreatePinnedToCoreWithCaps(app_ai_chat_token_prefetch_task,
+							      "ai_tok_pref",
+							      APP_AI_CHAT_TOKEN_PREFETCH_TASK_STACK_SIZE,
+							      NULL,
+							      APP_AI_CHAT_TOKEN_PREFETCH_TASK_PRIORITY,
+							      &task,
+							      APP_TASK_CORE_BACKGROUND,
+							      APP_TASK_STACK_CAPS_BACKGROUND);
+	if (task_ret != pdPASS) {
+		taskENTER_CRITICAL(&s_app_lifecycle_lock);
+		s_ai_chat_token_last_prefetch_us = 0;
+		taskEXIT_CRITICAL(&s_app_lifecycle_lock);
+		return;
+	}
+
+	taskENTER_CRITICAL(&s_app_lifecycle_lock);
+	s_ai_chat_token_prefetch_task = task;
+	taskEXIT_CRITICAL(&s_app_lifecycle_lock);
 }
 
 static bool app_rtc_identity_conflict_mark_pending(const char *device_id, const char *client_id)
@@ -704,6 +1124,23 @@ static void app_device_online_rebind_required_cb(void *ctx)
 	(void)app_start_binding_with_retained_credentials("token-reset");
 }
 
+static void app_device_online_ready_cb(void *ctx)
+{
+	(void)ctx;
+
+	if (s_app_control_queue == NULL) {
+		ESP_LOGW(TAG, "device online event dropped: control queue not ready");
+		return;
+	}
+
+	const app_control_event_t event = {
+		.type = APP_CONTROL_EVENT_DEVICE_ONLINE_READY,
+	};
+	if (xQueueSendToBack(s_app_control_queue, &event, pdMS_TO_TICKS(200)) != pdTRUE) {
+		ESP_LOGW(TAG, "device online event dropped: control queue full");
+	}
+}
+
 static esp_err_t app_handle_device_unbind(const char *reason)
 {
 	const char *safe_reason = reason != NULL && reason[0] != '\0' ? reason : "mqtt-unbind";
@@ -750,9 +1187,11 @@ static esp_err_t app_configure_device_online(void)
 		.on_message = app_device_online_message_cb,
 		.build_status = app_device_online_build_status,
 		.on_rebind_required = app_device_online_rebind_required_cb,
+		.on_online_ready = app_device_online_ready_cb,
 		.ctx = NULL,
 		.status_ctx = NULL,
 		.rebind_ctx = NULL,
+		.online_ready_ctx = NULL,
 	};
 
 	return device_online_init(&config);
@@ -774,17 +1213,251 @@ static esp_err_t app_configure_device_call(void)
 static bool app_device_call_can_accept_incoming(void *ctx)
 {
 	(void)ctx;
+	return app_incoming_session_allowed(APP_ID_CALL);
+}
 
-	switch (app_get_active_app()) {
-	case APP_ID_HOME:
-	case APP_ID_DEVICE:
-	case APP_ID_CALL:
-	case APP_ID_SYSTEM:
-		return true;
-	case APP_ID_WECHAT:
-	case APP_ID_AI_CHAT:
-	default:
+static bool app_wechat_incoming_allowed(void *ctx)
+{
+	(void)ctx;
+	return app_incoming_session_allowed(APP_ID_WECHAT);
+}
+
+static bool app_incoming_session_allowed(app_id_t incoming_app)
+{
+	app_id_t active_app = app_get_active_app();
+	device_call_snapshot_t call = {0};
+	wechat_voip_call_state_t wechat = wechat_voip_service_get_call_state();
+	rtc_transport_stats_t rtc = {0};
+	bool ai_busy = ai_chat_owns_control_button();
+	bool call_busy = false;
+	bool rtc_busy = false;
+
+	device_call_get_snapshot(&call);
+	rtc_transport_get_stats(&rtc);
+	call_busy = call.pending_incoming ||
+		    call.state == DEVICE_CALL_STATE_OUTGOING ||
+		    call.state == DEVICE_CALL_STATE_INCOMING ||
+		    call.state == DEVICE_CALL_STATE_CONNECTING ||
+		    call.state == DEVICE_CALL_STATE_IN_CALL;
+
+	if ((incoming_app != APP_ID_AI_CHAT && ai_busy) ||
+	    (incoming_app != APP_ID_CALL && call_busy) ||
+	    (incoming_app != APP_ID_WECHAT && wechat != WECHAT_VOIP_CALL_STATE_IDLE)) {
+		ESP_LOGW(TAG,
+			 "incoming session rejected busy: incoming=%s owner=%s ai=%d call=%u pending=%d wechat=%u",
+			 app_id_name(incoming_app),
+			 app_id_name(active_app),
+			 ai_busy ? 1 : 0,
+			 (unsigned)call.state,
+			 call.pending_incoming ? 1 : 0,
+			 (unsigned)wechat);
 		return false;
+	}
+
+	rtc_busy = rtc.active_connection || rtc.call_active || rtc.incoming_call_pending ||
+		   rtc.state == RTC_TRANSPORT_STATE_CONNECTED ||
+		   rtc.state == RTC_TRANSPORT_STATE_MEDIA_BOOTSTRAPPING ||
+		   rtc.state == RTC_TRANSPORT_STATE_DISCONNECTING;
+	if (rtc_busy && active_app != APP_ID_DEVICE && active_app != incoming_app) {
+		ESP_LOGW(TAG,
+			 "incoming session rejected by RTC owner: incoming=%s owner=%s state=%u active=%d call=%d pending=%d",
+			 app_id_name(incoming_app),
+			 app_id_name(active_app),
+			 (unsigned)rtc.state,
+			 rtc.active_connection ? 1 : 0,
+			 rtc.call_active ? 1 : 0,
+			 rtc.incoming_call_pending ? 1 : 0);
+		return false;
+	}
+	return true;
+}
+
+static esp_err_t app_sync_rtc_video_bitrate_control(void)
+{
+#if CONFIG_APP_RTC_SDK_VIDEO_ADAPT_ENABLE
+	media_governor_transport_bitrate_range_t range = {0};
+	media_governor_get_transport_bitrate_range(&range);
+	if (range.min_bitrate_bps == 0U ||
+	    range.max_bitrate_bps < range.min_bitrate_bps) {
+		return ESP_ERR_INVALID_STATE;
+	}
+
+	const rtc_transport_video_bitrate_params_t params = {
+		.stream_id = RTC_TRANSPORT_LOCAL_VIDEO_STREAM_ID,
+		.min_bitrate_bps = range.min_bitrate_bps,
+		.max_bitrate_bps = range.max_bitrate_bps,
+		.start_bitrate_bps = range.start_bitrate_bps,
+	};
+	return rtc_transport_set_video_bitrate_params(&params);
+#else
+	return rtc_transport_set_video_bitrate_params(NULL);
+#endif
+}
+
+static void app_reset_rtc_video_transport_session(bool wait_for_feedback)
+{
+	bool video_config_changed = false;
+
+	taskENTER_CRITICAL(&s_rtc_video_bitrate_lock);
+	s_rtc_video_bitrate_epoch++;
+	if (s_rtc_video_bitrate_epoch == 0U) {
+		s_rtc_video_bitrate_epoch = 1U;
+	}
+	s_rtc_video_bitrate_pending = false;
+	s_rtc_video_bitrate_event_queued = false;
+	s_rtc_video_bitrate_target_bps = 0U;
+	s_rtc_video_bitrate_event_epoch = 0U;
+	s_rtc_video_bitrate_logged_epoch = 0U;
+	s_rtc_video_bitrate_feedback_seen = false;
+	s_rtc_video_bitrate_fallback_logged = false;
+	s_rtc_video_bitrate_wait_started_tick =
+		wait_for_feedback ? xTaskGetTickCount() : 0;
+	taskEXIT_CRITICAL(&s_rtc_video_bitrate_lock);
+
+	/*
+	 * A connection starts from the configured baseline. TGMP becomes active
+	 * only after this connection publishes a bitrate target, so a legacy peer
+	 * cannot inherit the previous connection's reduced encoder rate.
+	 */
+	esp_err_t reset_ret =
+		media_governor_reset_transport_adaptation(true,
+							 &video_config_changed);
+	if (reset_ret != ESP_OK) {
+		ESP_LOGW(TAG,
+			 "reset transport video adaptation failed: %s",
+			 esp_err_to_name(reset_ret));
+	} else if (video_config_changed) {
+		camera_pipeline_on_rtc_video_config_changed();
+	}
+}
+
+static void app_monitor_rtc_video_transport_compatibility(void)
+{
+#if CONFIG_APP_RTC_SDK_VIDEO_ADAPT_ENABLE
+	const TickType_t now = xTaskGetTickCount();
+	bool log_fallback = false;
+
+	taskENTER_CRITICAL(&s_rtc_video_bitrate_lock);
+	if (s_rtc_video_bitrate_wait_started_tick != 0 &&
+	    !s_rtc_video_bitrate_feedback_seen &&
+	    !s_rtc_video_bitrate_fallback_logged &&
+	    now - s_rtc_video_bitrate_wait_started_tick >=
+		    pdMS_TO_TICKS(APP_RTC_VIDEO_TGMP_FEEDBACK_WAIT_MS)) {
+		s_rtc_video_bitrate_fallback_logged = true;
+		log_fallback = true;
+	}
+	taskEXIT_CRITICAL(&s_rtc_video_bitrate_lock);
+
+	if (log_fallback) {
+		ESP_LOGI(TAG,
+			 "TGMP feedback not observed; keep normal video profile");
+	}
+#endif
+}
+
+static void app_apply_pending_rtc_video_bitrate(bool marker_consumed)
+{
+	uint8_t stream_id = 0U;
+	uint32_t target_bitrate_bps = 0U;
+	uint32_t event_epoch = 0U;
+	uint32_t current_epoch = 0U;
+	bool pending = false;
+
+	taskENTER_CRITICAL(&s_rtc_video_bitrate_lock);
+	if (marker_consumed) {
+		s_rtc_video_bitrate_event_queued = false;
+	}
+	if (s_rtc_video_bitrate_pending) {
+		pending = true;
+		stream_id = s_rtc_video_bitrate_stream_id;
+		target_bitrate_bps = s_rtc_video_bitrate_target_bps;
+		event_epoch = s_rtc_video_bitrate_event_epoch;
+		s_rtc_video_bitrate_pending = false;
+	}
+	current_epoch = s_rtc_video_bitrate_epoch;
+	taskEXIT_CRITICAL(&s_rtc_video_bitrate_lock);
+
+	if (!pending ||
+	    event_epoch != current_epoch ||
+	    stream_id != RTC_TRANSPORT_LOCAL_VIDEO_STREAM_ID) {
+		return;
+	}
+
+	rtc_transport_stats_t rtc = {0};
+	rtc_transport_get_stats(&rtc);
+	if (!rtc.active_connection ||
+	    !rtc.call_active ||
+	    !rtc.local_video_send_enabled) {
+		return;
+	}
+
+	bool log_first_target = false;
+	taskENTER_CRITICAL(&s_rtc_video_bitrate_lock);
+	if (s_rtc_video_bitrate_logged_epoch != event_epoch) {
+		s_rtc_video_bitrate_logged_epoch = event_epoch;
+		log_first_target = true;
+	}
+	taskEXIT_CRITICAL(&s_rtc_video_bitrate_lock);
+	if (log_first_target) {
+		ESP_LOGI(TAG,
+			 "TGMP bitrate feedback active: stream=%u first_target=%ukbps",
+			 (unsigned)stream_id,
+			 (unsigned)(target_bitrate_bps / 1000U));
+	}
+
+	bool changed = false;
+	esp_err_t ret =
+		media_governor_apply_transport_bitrate_target(target_bitrate_bps,
+							     &changed);
+	if (ret != ESP_OK) {
+		ESP_LOGW(TAG,
+			 "RTC video bitrate target apply failed: target=%ukbps ret=%s",
+			 (unsigned)(target_bitrate_bps / 1000U),
+			 esp_err_to_name(ret));
+	} else if (changed) {
+		camera_pipeline_on_rtc_video_config_changed();
+	}
+}
+
+static void app_rtc_video_bitrate_required(tirtc_conn_t conn,
+					   uint8_t stream_id,
+					   uint32_t target_bitrate_bps,
+					   void *ctx)
+{
+	(void)conn;
+	(void)ctx;
+
+	if (stream_id != RTC_TRANSPORT_LOCAL_VIDEO_STREAM_ID ||
+	    target_bitrate_bps == 0U ||
+	    s_app_control_queue == NULL) {
+		return;
+	}
+
+	bool post_marker = false;
+	taskENTER_CRITICAL(&s_rtc_video_bitrate_lock);
+	s_rtc_video_bitrate_stream_id = stream_id;
+	s_rtc_video_bitrate_target_bps = target_bitrate_bps;
+	s_rtc_video_bitrate_event_epoch = s_rtc_video_bitrate_epoch;
+	s_rtc_video_bitrate_pending = true;
+	s_rtc_video_bitrate_feedback_seen = true;
+	s_rtc_video_bitrate_wait_started_tick = 0;
+	if (!s_rtc_video_bitrate_event_queued) {
+		s_rtc_video_bitrate_event_queued = true;
+		post_marker = true;
+	}
+	taskEXIT_CRITICAL(&s_rtc_video_bitrate_lock);
+
+	if (!post_marker) {
+		return;
+	}
+
+	const app_control_event_t event = {
+		.type = APP_CONTROL_EVENT_RTC_VIDEO_BITRATE_REQUIRED,
+	};
+	if (xQueueSendToBack(s_app_control_queue, &event, 0) != pdTRUE) {
+		taskENTER_CRITICAL(&s_rtc_video_bitrate_lock);
+		s_rtc_video_bitrate_event_queued = false;
+		taskEXIT_CRITICAL(&s_rtc_video_bitrate_lock);
 	}
 }
 
@@ -839,6 +1512,8 @@ static void app_control_task(void *arg)
 				break;
 			}
 			app_rtc_identity_conflict_clear_if_new_credentials(event.rtc_device_id);
+			ai_chat_token_invalidate_cache();
+			app_reset_ai_chat_token_prefetch_throttle();
 
 			ESP_LOGD(TAG,
 				 "rtc credential saved: reason=%s device_id_len=%u",
@@ -847,6 +1522,7 @@ static void app_control_task(void *arg)
 			if (network_is_connected() && system_time_has_valid_time()) {
 				device_online_set_network_ready(true);
 			}
+			wechat_voip_service_suspend_ingress();
 			device_call_reset_identity_state();
 			(void)device_online_notify_credentials_changed(reason);
 			ret = app_reconfigure_tirtc_after_settings_change(reason);
@@ -912,13 +1588,32 @@ static void app_control_task(void *arg)
 			}
 			break;
 		}
+		case APP_CONTROL_EVENT_DEVICE_ONLINE_READY:
+		{
+			app_id_t active_app = app_get_active_app();
+
+			ESP_LOGI(TAG, "network recovery: formal MQTT online, resume TiRTC");
+			app_wait_identity_before_rtc_prepare("mqtt-online");
+			app_start_device_identity_ingress();
+			if (active_app == APP_ID_AI_CHAT) {
+				app_request_ai_chat_start_if_idle("mqtt-online");
+			} else if (active_app == APP_ID_WECHAT) {
+				(void)app_enqueue_lifecycle_event(APP_LIFECYCLE_EVENT_START_APP_SERVICES,
+								  active_app);
+			}
+			break;
+		}
 		case APP_CONTROL_EVENT_CALL_SESSION_ENDED:
 			app_release_call_session_resources_if_idle();
+			break;
+		case APP_CONTROL_EVENT_RTC_VIDEO_BITRATE_REQUIRED:
+			app_apply_pending_rtc_video_bitrate(true);
 			break;
 		default:
 			ESP_LOGW(TAG, "unknown app control event: type=%u", (unsigned)event.type);
 			break;
 		}
+		app_apply_pending_rtc_video_bitrate(false);
 	}
 }
 
@@ -1111,7 +1806,7 @@ static esp_err_t app_rtc_set_door_open(bool open, void *ctx)
 	return ESP_OK;
 }
 
-static bool app_rtc_media_uses_echo_cancel(app_id_t app_id)
+static bool app_rtc_media_uses_realtime_audio(app_id_t app_id)
 {
 	switch (app_id) {
 	case APP_ID_HOME:
@@ -1127,14 +1822,40 @@ static bool app_rtc_media_uses_echo_cancel(app_id_t app_id)
 	}
 }
 
-static void app_set_rtc_echo_cancel_active(bool active, app_id_t active_app)
+static void app_set_rtc_media_prepared(bool prepared)
 {
-	esp_err_t ret = app_audio_policy_set_aec_source_active(
-		APP_AUDIO_AEC_SOURCE_RTC_MEDIA,
-		active && app_rtc_media_uses_echo_cancel(active_app));
+	esp_err_t ret = app_audio_policy_set_source_prepared(
+		APP_AUDIO_SOURCE_RTC_MEDIA,
+		prepared);
 	if (ret != ESP_OK) {
 		ESP_LOGW(TAG,
-			 "sync RTC echo cancellation failed: active=%d app=%s ret=%s",
+			 "sync RTC audio preparation failed: prepared=%d ret=%s",
+			 prepared ? 1 : 0,
+			 esp_err_to_name(ret));
+	}
+}
+
+static void app_set_ai_chat_media_prepared(bool prepared)
+{
+	esp_err_t ret = app_audio_policy_set_source_prepared(
+		APP_AUDIO_SOURCE_AI_CHAT_MEDIA,
+		prepared);
+	if (ret != ESP_OK) {
+		ESP_LOGW(TAG,
+			 "sync AI Chat audio preparation failed: prepared=%d ret=%s",
+			 prepared ? 1 : 0,
+			 esp_err_to_name(ret));
+	}
+}
+
+static void app_set_rtc_media_active(bool active, app_id_t active_app)
+{
+	esp_err_t ret = app_audio_policy_set_source_active(
+		APP_AUDIO_SOURCE_RTC_MEDIA,
+		active && app_rtc_media_uses_realtime_audio(active_app));
+	if (ret != ESP_OK) {
+		ESP_LOGW(TAG,
+			 "sync RTC realtime audio failed: active=%d app=%s ret=%s",
 			 active ? 1 : 0,
 			 app_id_name(active_app),
 			 esp_err_to_name(ret));
@@ -1145,12 +1866,12 @@ static void app_ai_chat_media_active_changed(bool active, void *ctx)
 {
 	(void)ctx;
 
-	esp_err_t ret = app_audio_policy_set_aec_source_active(
-		APP_AUDIO_AEC_SOURCE_AI_CHAT_MEDIA,
+	esp_err_t ret = app_audio_policy_set_source_active(
+		APP_AUDIO_SOURCE_AI_CHAT_MEDIA,
 		active);
 	if (ret != ESP_OK) {
 		ESP_LOGW(TAG,
-			 "sync AI Chat echo cancellation failed: active=%d ret=%s",
+			 "sync AI Chat realtime audio failed: active=%d ret=%s",
 			 active ? 1 : 0,
 			 esp_err_to_name(ret));
 	}
@@ -1159,7 +1880,7 @@ static void app_ai_chat_media_active_changed(bool active, void *ctx)
 void app_reset_rtc_call_media_state(void)
 {
 	(void)app_state_sync_call_media_defaults(false, NULL);
-	app_set_rtc_echo_cancel_active(false, APP_ID_HOME);
+	app_set_rtc_media_active(false, APP_ID_HOME);
 }
 
 static void app_rtc_call_active_changed(bool active, void *ctx)
@@ -1172,14 +1893,17 @@ static void app_rtc_call_active_changed(bool active, void *ctx)
 
 	media_defaults_changed = app_state_sync_call_media_defaults(active, &control);
 	active_app = app_get_active_app();
-	app_set_rtc_echo_cancel_active(active, active_app);
-	if (!media_defaults_changed) {
-		return;
-	}
+	app_set_rtc_media_active(active, active_app);
 	if (active && active_app == APP_ID_WECHAT &&
 	    APP_CONFIG_WECHAT_VOIP_LOCAL_VIDEO_ENABLE == 0) {
 		app_state_set_video_enabled(false);
 		control.video_enabled = false;
+	}
+	const bool wait_for_video_feedback =
+		active && control.video_enabled && active_app != APP_ID_AI_CHAT;
+	app_reset_rtc_video_transport_session(wait_for_video_feedback);
+	if (!media_defaults_changed) {
+		return;
 	}
 
 	ESP_LOGI(TAG,
@@ -1211,6 +1935,7 @@ static esp_err_t app_register_rtc_observer(void)
 	const rtc_transport_observer_t observer = {
 		.on_call_active = app_rtc_call_active_changed,
 		.on_start_error = app_request_rtc_identity_conflict,
+		.on_video_bitrate_required = app_rtc_video_bitrate_required,
 	};
 
 	return rtc_transport_register_observer(&observer, NULL);
@@ -1287,6 +2012,9 @@ static esp_err_t app_init_rtc_transport(void)
 		if (ret == ESP_OK) {
 			app_register_rtc_control_ops();
 			ret = app_register_rtc_observer();
+			if (ret == ESP_OK) {
+				ret = app_sync_rtc_video_bitrate_control();
+			}
 		}
 	}
 	free(rtc_config);
@@ -1490,31 +2218,18 @@ static bool app_wait_device_binding_before_rtc(const char *reason)
 static void app_wait_identity_before_rtc_prepare(const char *reason)
 {
 	device_online_snapshot_t online = {0};
-	uint32_t waited_ms = 0;
 
 	if (!app_wait_device_binding_before_rtc(reason)) {
 		return;
 	}
 
-	while (waited_ms < APP_RTC_PREPARE_WAIT_ONLINE_MS) {
-		device_online_get_snapshot(&online);
-		if (online.state == DEVICE_ONLINE_STATE_ONLINE ||
-		    online.state == DEVICE_ONLINE_STATE_UNBOUND ||
-		    online.state == DEVICE_ONLINE_STATE_ERROR ||
-		    !online.running) {
-			break;
-		}
-		vTaskDelay(pdMS_TO_TICKS(APP_RTC_PREPARE_POLL_MS));
-		waited_ms += APP_RTC_PREPARE_POLL_MS;
-	}
 	device_online_get_snapshot(&online);
 	ESP_LOGD(TAG,
-		 "rtc prepare after identity gate: reason=%s online_state=%d online_running=%d mqtt=%d waited_ms=%u",
+		 "rtc prepare after identity gate: reason=%s online_state=%d online_running=%d mqtt=%d",
 		 reason != NULL ? reason : "identity-ready",
 		 (int)online.state,
 		 online.running ? 1 : 0,
-		 online.mqtt_connected ? 1 : 0,
-		 (unsigned)waited_ms);
+		 online.mqtt_connected ? 1 : 0);
 	if (!device_online_is_online()) {
 		ESP_LOGW(TAG,
 			 "rtc prepare skipped: ThingConnect identity is not online reason=%s state=%d running=%d mqtt=%d",
@@ -1528,6 +2243,8 @@ static void app_wait_identity_before_rtc_prepare(const char *reason)
 	esp_err_t ret = app_prepare_rtc_after_time_sync(reason != NULL ? reason : "identity-ready");
 	if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
 		ESP_LOGW(TAG, "prepare rtc after identity gate failed: %s", esp_err_to_name(ret));
+	} else if (ret == ESP_OK) {
+		app_schedule_ai_chat_token_prefetch(reason);
 	}
 }
 
@@ -1541,7 +2258,7 @@ static void app_request_rtc_prepare_after_identity(const char *reason)
 		.type = APP_CONTROL_EVENT_RTC_PREPARE_AFTER_IDENTITY,
 	};
 	strlcpy(event.reason, reason != NULL ? reason : "identity-ready", sizeof(event.reason));
-	if (xQueueSend(s_app_control_queue, &event, 0) != pdTRUE) {
+	if (xQueueSendToBack(s_app_control_queue, &event, pdMS_TO_TICKS(200)) != pdTRUE) {
 		ESP_LOGW(TAG, "rtc prepare request dropped: reason=%s", event.reason);
 	}
 }
@@ -1588,6 +2305,8 @@ static void app_thing_bootstrap_task(void *arg)
 {
 	app_thing_bootstrap_context_t *context = (app_thing_bootstrap_context_t *)arg;
 	char reason[APP_RTC_RECONFIGURE_REASON_MAX] = "thing-bootstrap";
+	char rerun_reason[APP_RTC_RECONFIGURE_REASON_MAX] = {0};
+	bool rerun_pending = false;
 
 	if (context != NULL && context->reason[0] != '\0') {
 		strlcpy(reason, context->reason, sizeof(reason));
@@ -1627,9 +2346,23 @@ static void app_thing_bootstrap_task(void *arg)
 	}
 
 	taskENTER_CRITICAL(&s_app_lifecycle_lock);
+	rerun_pending = s_thing_bootstrap_rerun_pending;
+	if (rerun_pending) {
+		strlcpy(rerun_reason,
+			s_thing_bootstrap_rerun_reason[0] != '\0' ?
+				s_thing_bootstrap_rerun_reason : "network-recovered",
+			sizeof(rerun_reason));
+	}
 	s_thing_bootstrap_running = false;
+	s_thing_bootstrap_rerun_pending = false;
+	s_thing_bootstrap_rerun_reason[0] = '\0';
 	taskEXIT_CRITICAL(&s_app_lifecycle_lock);
 	free(context);
+
+	if (rerun_pending && network_is_connected() && system_time_has_valid_time()) {
+		ESP_LOGI(TAG, "network recovery: service bootstrap rerun reason=%s", rerun_reason);
+		app_schedule_thing_bootstrap(rerun_reason);
+	}
 	vTaskDeleteWithCaps(NULL);
 }
 
@@ -1655,6 +2388,11 @@ static void app_schedule_thing_bootstrap(const char *reason)
 	already_running = s_thing_bootstrap_running;
 	if (!already_running) {
 		s_thing_bootstrap_running = true;
+	} else {
+		s_thing_bootstrap_rerun_pending = true;
+		strlcpy(s_thing_bootstrap_rerun_reason,
+			context->reason,
+			sizeof(s_thing_bootstrap_rerun_reason));
 	}
 	taskEXIT_CRITICAL(&s_app_lifecycle_lock);
 	if (already_running) {
@@ -1673,6 +2411,8 @@ static void app_schedule_thing_bootstrap(const char *reason)
 	if (task_ret != pdPASS) {
 		taskENTER_CRITICAL(&s_app_lifecycle_lock);
 		s_thing_bootstrap_running = false;
+		s_thing_bootstrap_rerun_pending = false;
+		s_thing_bootstrap_rerun_reason[0] = '\0';
 		taskEXIT_CRITICAL(&s_app_lifecycle_lock);
 		free(context);
 		ESP_LOGW(TAG, "service bootstrap task create failed");
@@ -1794,15 +2534,20 @@ static void app_release_audio_resource(void)
 
 static esp_err_t app_acquire_camera_resource(void)
 {
-	if (!camera_driver_is_configured()) {
-		return ESP_OK;
-	}
-	return camera_driver_acquire();
+	/*
+	 * APP_RESOURCE_CAMERA is a logical lease used to keep application
+	 * lifecycles mutually exclusive. The active camera consumer owns the
+	 * physical driver: qr_scanner while scanning, camera_pipeline while
+	 * streaming. Taking a second driver reference here keeps the sensor open
+	 * with the previous profile and prevents the consumer from applying its
+	 * target before capture starts.
+	 */
+	return ESP_OK;
 }
 
 static void app_release_camera_resource(void)
 {
-	camera_driver_release_device();
+	/* Physical camera lifetime is released by the active camera consumer. */
 }
 
 static esp_err_t app_acquire_resources(uint32_t resources)
@@ -1868,6 +2613,7 @@ static void app_network_state_cb(const network_state_t *state, void *ctx)
 			app_schedule_thing_bootstrap("network-ready");
 		}
 	} else {
+		app_rtc_sdk_set_prepared(false);
 		device_online_set_network_ready(false);
 	}
 
@@ -1933,7 +2679,16 @@ static esp_err_t app_stop_app_services(app_id_t app_id)
 			return start_ret;
 		}
 		app_cancel_contact_scan_for_lifecycle();
-		esp_err_t call_ret = device_call_hangup();
+		device_call_snapshot_t call = {0};
+		device_call_get_snapshot(&call);
+		esp_err_t call_ret = ESP_OK;
+		if (call.pending_incoming || call.state == DEVICE_CALL_STATE_INCOMING) {
+			call_ret = device_call_reject_pending();
+		} else if (call.state == DEVICE_CALL_STATE_OUTGOING ||
+			   call.state == DEVICE_CALL_STATE_CONNECTING ||
+			   call.state == DEVICE_CALL_STATE_IN_CALL) {
+			call_ret = device_call_hangup();
+		}
 		if (call_ret != ESP_OK && call_ret != ESP_ERR_INVALID_STATE) {
 			ESP_LOGW(TAG, "app lifecycle device call close failed: %s", esp_err_to_name(call_ret));
 		}
@@ -1948,11 +2703,12 @@ static esp_err_t app_stop_app_services(app_id_t app_id)
 		break;
 	}
 	case APP_ID_AI_CHAT:
-		(void)ai_chat_close();
+		(void)app_close_ai_chat();
 		break;
 	case APP_ID_WECHAT:
 		app_cancel_wechat_contact_scan_for_lifecycle();
 		wechat_voip_service_stop();
+		app_release_wechat_call_resources_internal(true);
 		break;
 	case APP_ID_SYSTEM:
 	{
@@ -1992,6 +2748,7 @@ static esp_err_t app_start_app_services(app_id_t app_id)
 		return wechat_voip_service_start();
 	}
 	case APP_ID_AI_CHAT:
+		app_reset_ai_chat_token_prefetch_throttle();
 		if (!network_is_connected()) {
 			ESP_LOGD(TAG, "AI Chat waits for network connection");
 			return ESP_OK;
@@ -2023,11 +2780,18 @@ esp_err_t app_acquire_call_session_resources(bool video)
 		return ESP_ERR_INVALID_STATE;
 	}
 
+	/*
+	 * Device calls start at the same latency as LAN playback. The sink only
+	 * expands its jitter budget after measured underflow/backlog pressure, so
+	 * cellular resilience does not impose permanent delay on healthy links.
+	 */
+	app_set_rtc_media_prepared(true);
+
 	if (video && !s_call_resources.video_renderer_started) {
 		/* The decoder owns unavoidable internal RAM. Start it while the normal
 		 * H264 encoder reservation still protects its large contiguous block;
 		 * large frame pools were already reserved in PSRAM at boot. */
-		ret = call_video_renderer_start();
+		ret = call_video_renderer_start_for_codec(CALL_VIDEO_CODEC_H264);
 		if (ret != ESP_OK) {
 			ESP_LOGE(TAG, "start H264 call downlink failed: %s", esp_err_to_name(ret));
 			goto fail;
@@ -2054,6 +2818,13 @@ esp_err_t app_acquire_call_session_resources(bool video)
 				ESP_LOGE(TAG, "apply device-call video profile failed: %s", esp_err_to_name(ret));
 				goto fail;
 			}
+			(void)media_governor_reset_transport_adaptation(false, NULL);
+			ret = app_sync_rtc_video_bitrate_control();
+			if (ret != ESP_OK && ret != ESP_ERR_NOT_SUPPORTED) {
+				ESP_LOGW(TAG,
+					 "device-call TGMP unavailable; keep normal video profile: %s",
+					 esp_err_to_name(ret));
+			}
 			s_call_resources.video_profile_applied = true;
 			camera_pipeline_on_rtc_video_config_changed();
 			ESP_LOGI(TAG,
@@ -2077,15 +2848,25 @@ fail:
 
 static void app_release_call_session_resources_internal(bool restore_video_profile)
 {
+	bool leave_call_page = restore_video_profile || app_get_active_app() != APP_ID_CALL;
+
 	restore_video_profile = restore_video_profile && s_call_resources.video_profile_applied;
 
-	if (s_call_resources.video_renderer_started) {
+	if (s_call_resources.video_renderer_started && leave_call_page) {
 		esp_err_t video_ret = call_video_renderer_stop();
 		if (video_ret == ESP_OK || video_ret == ESP_ERR_INVALID_STATE) {
 			s_call_resources.video_renderer_started = false;
 		} else {
 			ESP_LOGW(TAG, "stop H264 call downlink failed: %s", esp_err_to_name(video_ret));
 		}
+	} else if (s_call_resources.video_renderer_started) {
+		/*
+		 * Keep the decoder task and its fixed pools warm between calls while
+		 * the call page owns the feature. Flush the old access units so the
+		 * next peer starts from a fresh key frame without paying decoder
+		 * creation cost again.
+		 */
+		call_video_renderer_flush();
 	}
 
 	/* Release the call's RTC/audio allocations first. On lifecycle exit the
@@ -2103,6 +2884,14 @@ static void app_release_call_session_resources_internal(bool restore_video_profi
 		esp_err_t profile_ret = media_governor_set_rtc_video_config(
 			&s_call_resources.previous_video_config);
 		if (profile_ret == ESP_OK) {
+			(void)media_governor_reset_transport_adaptation(false, NULL);
+			esp_err_t bitrate_ret = app_sync_rtc_video_bitrate_control();
+			if (bitrate_ret != ESP_OK &&
+			    bitrate_ret != ESP_ERR_NOT_SUPPORTED) {
+				ESP_LOGW(TAG,
+					 "restore RTC transport bitrate range failed: %s",
+					 esp_err_to_name(bitrate_ret));
+			}
 			camera_pipeline_on_rtc_video_config_changed();
 			ESP_LOGI(TAG,
 				 "device-call video profile restored: %ux%u@%u %ukbps",
@@ -2115,14 +2904,140 @@ static void app_release_call_session_resources_internal(bool restore_video_profi
 			ESP_LOGW(TAG, "restore RTC video profile failed: %s", esp_err_to_name(profile_ret));
 		}
 	}
+
+	app_set_rtc_media_prepared(false);
 }
 
 void app_release_call_session_resources(void)
 {
-	/* Keep the call-sized encoder reservation while the call page remains open.
-	 * Rebuilding the large IPC profile after every hangup fragments scarce
-	 * internal DMA memory and makes the next call pay the allocation cost again. */
+	/*
+	 * Keep the call-sized encoder reservation and downlink decoder warm while
+	 * the call page remains open. Rebuilding either after every hangup adds
+	 * seconds to the next call and fragments scarce internal DMA memory.
+	 */
 	app_release_call_session_resources_internal(false);
+}
+
+static esp_err_t app_prepare_wechat_call_resources(bool local_video_enabled,
+						   bool remote_video_enabled,
+						   void *ctx)
+{
+	esp_err_t ret = ESP_OK;
+
+	(void)ctx;
+	if (app_get_active_app() != APP_ID_WECHAT) {
+		return ESP_ERR_INVALID_STATE;
+	}
+
+	app_set_rtc_media_prepared(true);
+
+	if (remote_video_enabled && !s_wechat_call_resources.video_renderer_started) {
+		ret = call_video_renderer_start_for_codec(CALL_VIDEO_CODEC_MJPEG);
+		if (ret != ESP_OK) {
+			ESP_LOGE(TAG, "start WeChat MJPEG downlink failed: %s", esp_err_to_name(ret));
+			goto fail;
+		}
+		s_wechat_call_resources.video_renderer_started = true;
+	}
+
+	ret = app_switch_resources(APP_WECHAT_RESOURCE_MASK);
+	if (ret != ESP_OK) {
+		goto fail;
+	}
+
+	if (local_video_enabled && !s_wechat_call_resources.video_profile_applied) {
+		media_governor_video_config_t call_config = {0};
+
+		media_governor_get_rtc_video_config(
+			&s_wechat_call_resources.previous_video_config);
+		media_governor_build_device_call_video_config(&call_config);
+		ret = media_governor_set_rtc_video_config(&call_config);
+		if (ret != ESP_OK) {
+			ESP_LOGE(TAG,
+				 "apply WeChat video profile failed: %s",
+				 esp_err_to_name(ret));
+			goto fail;
+		}
+		s_wechat_call_resources.video_profile_applied = true;
+		(void)media_governor_reset_transport_adaptation(false, NULL);
+		ret = app_sync_rtc_video_bitrate_control();
+		if (ret != ESP_OK && ret != ESP_ERR_NOT_SUPPORTED) {
+			ESP_LOGW(TAG,
+				 "WeChat TGMP unavailable; keep normal video profile: %s",
+				 esp_err_to_name(ret));
+		}
+		camera_pipeline_on_rtc_video_config_changed();
+		ESP_LOGI(TAG,
+			 "WeChat video profile applied: %ux%u@%u %ukbps",
+			 (unsigned)call_config.width,
+			 (unsigned)call_config.height,
+			 (unsigned)call_config.fps,
+			 (unsigned)(call_config.bitrate_bps / 1000U));
+	}
+
+	ret = app_prepare_rtc_after_time_sync("wechat-call");
+	if (ret != ESP_OK) {
+		goto fail;
+	}
+	return ESP_OK;
+
+fail:
+	app_release_wechat_call_resources_internal(true);
+	return ret;
+}
+
+static void app_release_wechat_call_resources_internal(bool leave_wechat_page)
+{
+	bool leave_page = leave_wechat_page || app_get_active_app() != APP_ID_WECHAT;
+
+	if (s_wechat_call_resources.video_renderer_started && leave_page) {
+		esp_err_t ret = call_video_renderer_stop();
+		if (ret == ESP_OK || ret == ESP_ERR_INVALID_STATE) {
+			s_wechat_call_resources.video_renderer_started = false;
+		} else {
+			ESP_LOGW(TAG,
+				 "stop WeChat MJPEG downlink failed: %s",
+				 esp_err_to_name(ret));
+		}
+	} else if (s_wechat_call_resources.video_renderer_started) {
+		call_video_renderer_flush();
+	}
+
+	if (leave_page && s_wechat_call_resources.video_profile_applied) {
+		esp_err_t ret = media_governor_set_rtc_video_config(
+			&s_wechat_call_resources.previous_video_config);
+		if (ret == ESP_OK) {
+			(void)media_governor_reset_transport_adaptation(false, NULL);
+			esp_err_t bitrate_ret = app_sync_rtc_video_bitrate_control();
+			if (bitrate_ret != ESP_OK &&
+			    bitrate_ret != ESP_ERR_NOT_SUPPORTED) {
+				ESP_LOGW(TAG,
+					 "restore RTC transport bitrate range after WeChat failed: %s",
+					 esp_err_to_name(bitrate_ret));
+			}
+			camera_pipeline_on_rtc_video_config_changed();
+			s_wechat_call_resources.video_profile_applied = false;
+			ESP_LOGI(TAG,
+				 "WeChat video profile restored: %ux%u@%u %ukbps",
+				 (unsigned)s_wechat_call_resources.previous_video_config.width,
+				 (unsigned)s_wechat_call_resources.previous_video_config.height,
+				 (unsigned)s_wechat_call_resources.previous_video_config.fps,
+				 (unsigned)(s_wechat_call_resources.previous_video_config.bitrate_bps /
+					    1000U));
+		} else {
+			ESP_LOGW(TAG,
+				 "restore RTC video profile after WeChat failed: %s",
+				 esp_err_to_name(ret));
+		}
+	}
+
+	app_set_rtc_media_prepared(false);
+}
+
+static void app_release_wechat_call_resources(void *ctx)
+{
+	(void)ctx;
+	app_release_wechat_call_resources_internal(false);
 }
 
 static void app_release_call_session_resources_if_idle(void)
@@ -2233,6 +3148,18 @@ esp_err_t app_init(void)
 		 app_desc != NULL ? app_desc->project_name : "unknown",
 		 app_desc != NULL ? app_desc->date : "unknown",
 		 app_desc != NULL ? app_desc->time : "unknown");
+	/*
+	 * The P4 JPEG driver owns small internal DMA descriptors. Reserve those
+	 * before the DMA escrow, H264 encoder, RTC and audio stacks occupy the
+	 * internal heap; every WeChat call reuses the same decoder handle.
+	 */
+	esp_err_t mjpeg_decoder_prewarm_ret =
+		call_video_renderer_prewarm_mjpeg_decoder();
+	if (mjpeg_decoder_prewarm_ret != ESP_OK) {
+		ESP_LOGW(TAG,
+			 "MJPEG decoder early prewarm unavailable: %s",
+			 esp_err_to_name(mjpeg_decoder_prewarm_ret));
+	}
 	esp_err_t dma_escrow_ret = media_dma_reserve_init();
 	if (dma_escrow_ret != ESP_OK) {
 		ESP_LOGW(TAG, "DMA escrow init unavailable: %s", esp_err_to_name(dma_escrow_ret));
@@ -2241,6 +3168,12 @@ esp_err_t app_init(void)
 	esp_err_t h264_prewarm_ret = camera_pipeline_prewarm_h264();
 	if (h264_prewarm_ret != ESP_OK) {
 		ESP_LOGW(TAG, "H264 early prewarm unavailable: %s", esp_err_to_name(h264_prewarm_ret));
+	}
+	esp_err_t rtc_pool_prewarm_ret = rtc_transport_prewarm_media_pools();
+	if (rtc_pool_prewarm_ret != ESP_OK) {
+		ESP_LOGW(TAG,
+			 "RTC media PSRAM pool prewarm unavailable: %s",
+			 esp_err_to_name(rtc_pool_prewarm_ret));
 	}
 	esp_err_t scaler_prewarm_ret = camera_pipeline_prewarm_call_scaler();
 	if (scaler_prewarm_ret != ESP_OK && scaler_prewarm_ret != ESP_ERR_NOT_SUPPORTED) {
@@ -2254,6 +3187,15 @@ esp_err_t app_init(void)
 			 "device-call video pool prewarm unavailable: %s",
 			 esp_err_to_name(renderer_prewarm_ret));
 	}
+	/*
+	 * Reserve the high-performance AEC working set before networking and RTC
+	 * fragment memory. The driver retains it across app switches, so first
+	 * speech and later calls do not pay repeated ESP-SR creation cost.
+	 */
+	esp_err_t aec_prewarm_ret = audio_device_prepare_echo_cancel();
+	if (aec_prewarm_ret != ESP_OK) {
+		ESP_LOGW(TAG, "AEC early prewarm unavailable: %s", esp_err_to_name(aec_prewarm_ret));
+	}
 	app_log_heap_snapshot("media prewarm after");
 	ESP_RETURN_ON_ERROR(app_audio_policy_init(), TAG, "audio policy init failed");
 	ESP_RETURN_ON_ERROR(device_init(app_on_boot_button_changed, NULL), TAG, "device init failed");
@@ -2263,6 +3205,18 @@ esp_err_t app_init(void)
 	ESP_RETURN_ON_ERROR(app_configure_device_binding(), TAG, "device binding init failed");
 	ESP_RETURN_ON_ERROR(app_configure_device_online(), TAG, "device online init failed");
 	ESP_RETURN_ON_ERROR(app_configure_device_call(), TAG, "device call init failed");
+	const wechat_voip_media_lifecycle_t wechat_media_lifecycle = {
+		.prepare = app_prepare_wechat_call_resources,
+		.release = app_release_wechat_call_resources,
+	};
+	ESP_RETURN_ON_ERROR(
+		wechat_voip_service_configure_media_lifecycle(&wechat_media_lifecycle, NULL),
+		TAG,
+		"WeChat media lifecycle configure failed");
+	ESP_RETURN_ON_ERROR(
+		wechat_voip_service_set_incoming_policy(app_wechat_incoming_allowed, NULL),
+		TAG,
+		"WeChat incoming policy configure failed");
 	ESP_RETURN_ON_ERROR(rtc_transport_set_media_bridge(rtc_media_bridge_get_ops(),
 							   rtc_media_bridge_get_context()),
 			    TAG,
@@ -2306,21 +3260,81 @@ esp_err_t app_init(void)
 	return ESP_OK;
 }
 
+#if CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG || CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS || \
+	CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE || CONFIG_APP_RTC_SDK_VIDEO_ADAPT_ENABLE
+static void app_step_rtc_video_transport_adaptation(void)
+{
+#if CONFIG_APP_RTC_SDK_VIDEO_ADAPT_ENABLE
+	bool changed = false;
+	esp_err_t ret = media_governor_step_transport_adaptation(&changed);
+	if (ret != ESP_OK) {
+		ESP_LOGW(TAG,
+			 "RTC video bitrate convergence failed: %s",
+			 esp_err_to_name(ret));
+	} else if (changed) {
+		camera_pipeline_on_rtc_video_config_changed();
+	}
+#endif
+}
+
+static void app_runtime_monitor_loop(void)
+{
+	const TickType_t monitor_interval_ticks =
+#if CONFIG_APP_RTC_SDK_VIDEO_ADAPT_ENABLE
+		pdMS_TO_TICKS(APP_RTC_VIDEO_ADAPT_INTERVAL_MS);
+#else
+		pdMS_TO_TICKS(APP_MEDIA_HEALTH_INTERVAL_MS);
+#endif
+	TickType_t last_wake_tick = xTaskGetTickCount();
+#if CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG || CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE
+	TickType_t last_media_health_tick = last_wake_tick;
+#endif
 #if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
+	TickType_t last_runtime_snapshot_tick = last_wake_tick;
+#endif
+
+	while (true) {
+		vTaskDelayUntil(&last_wake_tick, monitor_interval_ticks);
+#if CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG || CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE || \
+	CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
+		const TickType_t now = xTaskGetTickCount();
+#endif
+
+		/* The callback normally posts an app-control marker. If that bounded
+		 * queue was momentarily full, consume its coalesced latest target here
+		 * instead of leaving TGMP feedback pending indefinitely. */
+		app_apply_pending_rtc_video_bitrate(false);
+		app_monitor_rtc_video_transport_compatibility();
+		app_step_rtc_video_transport_adaptation();
+
+#if CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG || CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE
+		if (now - last_media_health_tick >=
+		    pdMS_TO_TICKS(APP_MEDIA_HEALTH_INTERVAL_MS)) {
+			last_media_health_tick = now;
+			app_monitor_media_health();
+		}
+#endif
+#if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
+		if (now - last_runtime_snapshot_tick >=
+		    pdMS_TO_TICKS(APP_RUNTIME_SNAPSHOT_INTERVAL_MS)) {
+			last_runtime_snapshot_tick = now;
+			app_log_runtime_snapshot();
+		}
+#endif
+	}
+}
+
 static void app_runtime_monitor_task(void *arg)
 {
 	(void)arg;
-
-	while (true) {
-		vTaskDelay(pdMS_TO_TICKS(APP_RUNTIME_SNAPSHOT_INTERVAL_MS));
-		app_log_runtime_snapshot();
-	}
+	app_runtime_monitor_loop();
 }
 #endif
 
 void app_run(void)
 {
-#if !CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
+#if !CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG && !CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS && \
+	!CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE && !CONFIG_APP_RTC_SDK_VIDEO_ADAPT_ENABLE
 	ESP_LOGI(TAG, "periodic media diagnostics disabled; main task can exit");
 	return;
 #else
@@ -2336,14 +3350,11 @@ void app_run(void)
 						  &s_app_runtime_monitor_task,
 						  APP_TASK_STACK_CAPS_BACKGROUND);
 	if (task_ret != pdPASS) {
-		ESP_LOGE(TAG, "runtime monitor task start failed; keeping main task alive");
-		while (true) {
-			vTaskDelay(pdMS_TO_TICKS(APP_RUNTIME_SNAPSHOT_INTERVAL_MS));
-			app_log_runtime_snapshot();
-		}
+		ESP_LOGE(TAG, "media monitor task start failed; keeping main task alive");
+		app_runtime_monitor_loop();
 	}
 
-	ESP_LOGI(TAG, "runtime monitor task started; main task can exit");
+	APP_LOG_DETAIL(TAG, "media monitor task started; main task can exit");
 #endif
 }
 
@@ -2406,6 +3417,7 @@ static esp_err_t app_return_home_sync(void)
 			    TAG,
 			    "return home resources failed");
 	app_set_active_app(APP_ID_HOME);
+	app_schedule_ai_chat_token_prefetch("home");
 	return ESP_OK;
 }
 
@@ -2554,11 +3566,14 @@ esp_err_t app_update_rtc_device_credentials(const char *device_id, const char *d
 	ESP_RETURN_ON_ERROR(app_set_rtc_device_credentials(device_id, device_secret),
 			    TAG,
 			    "rtc device credentials save failed");
+	ai_chat_token_invalidate_cache();
+	app_reset_ai_chat_token_prefetch_throttle();
 	app_rtc_identity_conflict_clear_if_new_credentials(device_id);
 
 	if (network_is_connected() && system_time_has_valid_time()) {
 		device_online_set_network_ready(true);
 	}
+	wechat_voip_service_suspend_ingress();
 	device_call_reset_identity_state();
 	(void)device_online_notify_credentials_changed("credentials");
 	app_request_rtc_reconfigure_after_settings_change("credential-scan");
@@ -2604,17 +3619,21 @@ static esp_err_t app_start_device_online_if_ready(const char *reason)
 
 	esp_err_t ret = device_online_start_async(reason != NULL ? reason : "auto");
 	if (ret == ESP_OK || ret == ESP_ERR_INVALID_STATE) {
-		app_start_device_call_ingress();
+		app_start_device_identity_ingress();
 	}
 	return ret;
 }
 
-static void app_start_device_call_ingress(void)
+static void app_start_device_identity_ingress(void)
 {
-	esp_err_t ret = device_call_start();
+	esp_err_t wechat_ret = wechat_voip_service_start_ingress();
+	if (wechat_ret != ESP_OK) {
+		ESP_LOGW(TAG, "wechat call ingress start failed: %s", esp_err_to_name(wechat_ret));
+	}
 
-	if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-		ESP_LOGW(TAG, "device call listener start failed: %s", esp_err_to_name(ret));
+	esp_err_t call_ret = device_call_start();
+	if (call_ret != ESP_OK && call_ret != ESP_ERR_INVALID_STATE) {
+		ESP_LOGW(TAG, "device call listener start failed: %s", esp_err_to_name(call_ret));
 	}
 }
 
@@ -2659,11 +3678,14 @@ static esp_err_t app_reset_device_binding_internal(const char *reason)
 	}
 
 	ESP_LOGI(TAG, "device binding reconcile begin: reason=%s identity=retained", safe_reason);
+	wechat_voip_service_suspend_ingress();
 	device_call_reset_identity_state();
 	(void)rtc_transport_disconnect();
 	app_reset_rtc_call_media_state();
 	device_online_stop();
 	device_online_invalidate_cache();
+	ai_chat_token_invalidate_cache();
+	app_reset_ai_chat_token_prefetch_throttle();
 	device_binding_reset_state(safe_reason);
 
 	if (network_is_connected() && system_time_has_valid_time()) {
@@ -2756,14 +3778,33 @@ esp_err_t app_open_ai_chat(void)
 		return ESP_ERR_INVALID_STATE;
 	}
 
+	/* Prime the adaptive playout controller before the first remote packet.
+	 * AEC remains tied to media-active, where a playback reference exists. */
+	app_set_ai_chat_media_prepared(true);
+
 	ret = app_prepare_rtc_if_network_ready();
 	if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
 		ESP_LOGW(TAG, "prepare rtc for AI Chat failed: %s", esp_err_to_name(ret));
-		return ret;
+		goto fail;
 	}
-	ESP_RETURN_ON_ERROR(app_build_ai_chat_config(&ai_chat_config), TAG, "build AI Chat config failed");
-	ESP_RETURN_ON_ERROR(ai_chat_init(&ai_chat_config), TAG, "init AI Chat failed");
-	return ai_chat_open();
+	ret = app_build_ai_chat_config(&ai_chat_config);
+	if (ret != ESP_OK) {
+		ESP_LOGE(TAG, "build AI Chat config failed: %s", esp_err_to_name(ret));
+		goto fail;
+	}
+	ret = ai_chat_init(&ai_chat_config);
+	if (ret != ESP_OK) {
+		ESP_LOGE(TAG, "init AI Chat failed: %s", esp_err_to_name(ret));
+		goto fail;
+	}
+	ret = ai_chat_open();
+	if (ret == ESP_OK) {
+		return ESP_OK;
+	}
+
+fail:
+	app_set_ai_chat_media_prepared(false);
+	return ret;
 }
 
 esp_err_t app_request_start_ai_chat(void)
@@ -2780,7 +3821,9 @@ esp_err_t app_request_start_ai_chat(void)
 
 esp_err_t app_close_ai_chat(void)
 {
-	return ai_chat_close();
+	esp_err_t ret = ai_chat_close();
+	app_set_ai_chat_media_prepared(false);
+	return ret;
 }
 
 esp_err_t app_clear_ai_chat_messages(void)
@@ -2902,6 +3945,13 @@ esp_err_t app_set_rtc_video_config(const app_rtc_video_config_t *config)
 	esp_err_t ret = media_governor_set_rtc_video_config(&media_config);
 	if (ret != ESP_OK) {
 		return ret;
+	}
+	(void)media_governor_reset_transport_adaptation(false, NULL);
+	ret = app_sync_rtc_video_bitrate_control();
+	if (ret != ESP_OK && ret != ESP_ERR_NOT_SUPPORTED) {
+		ESP_LOGW(TAG,
+			 "RTC TGMP update unavailable; keep normal video profile: %s",
+			 esp_err_to_name(ret));
 	}
 
 	camera_pipeline_on_rtc_video_config_changed();

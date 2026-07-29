@@ -50,6 +50,14 @@ static const char *TAG = "ai_chat";
 #define AI_CHAT_START_SESSION_SETTLE_MS 300U
 #define AI_CHAT_HEARTBEAT_TASK_STACK  (8 * 1024)
 #define AI_CHAT_HEARTBEAT_TASK_PRIORITY 5
+#define AI_CHAT_DEVICE_ACTION_TASK_STACK (8 * 1024)
+#define AI_CHAT_DEVICE_ACTION_TASK_PRIORITY 5
+#define AI_CHAT_DEVICE_ACTION_ERROR_UNSUPPORTED (-32010)
+#define AI_CHAT_DEVICE_ACTION_ERROR_BUSY        (-32011)
+#define AI_CHAT_DEVICE_ACTION_ERROR_TARGET      (-32012)
+#define AI_CHAT_DEVICE_ACTION_ERROR_INVALID     (-32013)
+#define AI_CHAT_DEVICE_ACTION_ERROR_LOADING     (-32014)
+#define AI_CHAT_DEVICE_ACTION_ERROR_INTERNAL    (-32000)
 #define AI_CHAT_RTC_READY_WAIT_MS     30000U
 #define AI_CHAT_RTC_READY_POLL_MS     200U
 #define AI_CHAT_CONNECT_TIMEOUT_MS    20000U
@@ -138,6 +146,7 @@ typedef struct {
     ai_chat_caption_group_t captions[2];
     uint8_t message_count;
     ai_chat_message_t *messages;
+    bool device_action_pending;
     uint32_t rx_commands;
     int last_error;
 } ai_chat_state_data_t;
@@ -167,6 +176,13 @@ typedef struct {
 typedef struct {
     uint32_t generation;
 } ai_chat_heartbeat_context_t;
+
+typedef struct {
+    uint32_t generation;
+    tirtc_conn_t conn;
+    char jsonrpc_id_json[AI_CHAT_JSONRPC_ID_MAX];
+    ai_chat_device_action_t action;
+} ai_chat_device_action_context_t;
 
 typedef struct {
     uint32_t generation;
@@ -1001,6 +1017,120 @@ static char *ai_chat_build_notification_json(const char *method)
     return json;
 }
 
+static void ai_chat_device_action_set_result(ai_chat_device_action_result_t *result,
+                                             bool ok,
+                                             const char *status,
+                                             const char *message)
+{
+    if (result == NULL) {
+        return;
+    }
+    result->ok = ok;
+    ai_chat_copy_str(result->status, sizeof(result->status), status);
+    ai_chat_copy_str(result->message, sizeof(result->message), message);
+}
+
+static int ai_chat_device_action_error_code(const ai_chat_device_action_result_t *result)
+{
+    const char *status = result != NULL ? result->status : NULL;
+
+    if (status == NULL) {
+        return AI_CHAT_DEVICE_ACTION_ERROR_INTERNAL;
+    }
+    if (strcmp(status, "unsupported") == 0 ||
+        strcmp(status, "unsupported_call_type") == 0) {
+        return AI_CHAT_DEVICE_ACTION_ERROR_UNSUPPORTED;
+    }
+    if (strcmp(status, "busy") == 0) {
+        return AI_CHAT_DEVICE_ACTION_ERROR_BUSY;
+    }
+    if (strcmp(status, "not_found") == 0 ||
+        strcmp(status, "contacts_empty") == 0 ||
+        strcmp(status, "ambiguous") == 0 ||
+        strcmp(status, "offline") == 0 ||
+        strcmp(status, "network_offline") == 0) {
+        return AI_CHAT_DEVICE_ACTION_ERROR_TARGET;
+    }
+    if (strcmp(status, "missing_target") == 0) {
+        return AI_CHAT_DEVICE_ACTION_ERROR_INVALID;
+    }
+    if (strcmp(status, "contacts_loading") == 0) {
+        return AI_CHAT_DEVICE_ACTION_ERROR_LOADING;
+    }
+    return AI_CHAT_DEVICE_ACTION_ERROR_INTERNAL;
+}
+
+static char *ai_chat_build_device_action_result_json(const char *id_json,
+                                                     const ai_chat_device_action_result_t *result)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON *id = NULL;
+    cJSON *payload = NULL;
+    cJSON *error = NULL;
+    cJSON *data = NULL;
+    char *json = NULL;
+
+    if (root == NULL || id_json == NULL || result == NULL) {
+        cJSON_Delete(root);
+        return NULL;
+    }
+
+    id = cJSON_Parse(id_json);
+    if (id == NULL) {
+        cJSON_Delete(root);
+        cJSON_Delete(payload);
+        return NULL;
+    }
+
+    cJSON_AddStringToObject(root, "jsonrpc", "2.0");
+    cJSON_AddItemToObject(root, "id", id);
+
+    if (result->ok) {
+        payload = cJSON_CreateObject();
+        if (payload == NULL) {
+            cJSON_Delete(root);
+            return NULL;
+        }
+        cJSON_AddBoolToObject(payload, "ok", true);
+        cJSON_AddStringToObject(payload,
+                                "status",
+                                result->status[0] != '\0' ? result->status : "ok");
+        cJSON_AddStringToObject(payload,
+                                "message",
+                                result->message[0] != '\0' ? result->message : "已开始处理");
+        if (result->target_device_id[0] != '\0') {
+            cJSON_AddStringToObject(payload, "target_device_id", result->target_device_id);
+        }
+        if (result->matched_name[0] != '\0') {
+            cJSON_AddStringToObject(payload, "matched_name", result->matched_name);
+        }
+        cJSON_AddItemToObject(root, "result", payload);
+    } else {
+        error = cJSON_CreateObject();
+        data = cJSON_CreateObject();
+        if (error == NULL || data == NULL) {
+            cJSON_Delete(root);
+            cJSON_Delete(error);
+            cJSON_Delete(data);
+            return NULL;
+        }
+        cJSON_AddNumberToObject(error, "code", ai_chat_device_action_error_code(result));
+        cJSON_AddStringToObject(error,
+                                "message",
+                                result->message[0] != '\0' ? result->message : "设备动作执行失败");
+        cJSON_AddStringToObject(data,
+                                "status",
+                                result->status[0] != '\0' ? result->status : "failed");
+        cJSON_AddBoolToObject(data, "ok", false);
+        cJSON_AddItemToObject(error, "data", data);
+        cJSON_AddItemToObject(root, "error", error);
+    }
+
+    json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json;
+}
+
 static char *ai_chat_build_start_session_json(const char *device_id, const char *user_id, const char *role_id)
 {
     cJSON *root = cJSON_CreateObject();
@@ -1722,6 +1852,208 @@ static void ai_chat_heartbeat_task(void *ctx)
     ai_chat_delete_current_task_with_caps();
 }
 
+static void ai_chat_send_device_action_failure(tirtc_conn_t conn,
+                                               const char *id_json,
+                                               const char *status,
+                                               const char *message)
+{
+    ai_chat_device_action_result_t result = {0};
+    char *json = NULL;
+
+    if (conn == NULL || id_json == NULL || id_json[0] == '\0') {
+        return;
+    }
+
+    ai_chat_device_action_set_result(&result, false, status, message);
+    json = ai_chat_build_device_action_result_json(id_json, &result);
+    if (json == NULL) {
+        return;
+    }
+    (void)ai_chat_send_json(conn, json);
+    free(json);
+}
+
+static void ai_chat_device_action_task(void *arg)
+{
+    ai_chat_device_action_context_t *action_ctx = (ai_chat_device_action_context_t *)arg;
+    ai_chat_device_action_cb_t action_cb = NULL;
+    ai_chat_device_action_committed_cb_t committed_cb = NULL;
+    void *callback_ctx = NULL;
+    ai_chat_device_action_result_t result = {0};
+    esp_err_t ret = ESP_ERR_INVALID_STATE;
+    bool valid = false;
+    char *json = NULL;
+
+    if (action_ctx == NULL) {
+        ai_chat_delete_current_task_with_caps();
+        return;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    valid = ai_chat_generation_matches_locked(action_ctx->generation) &&
+            s_ai.conn == action_ctx->conn &&
+            s_ai.state != AI_CHAT_STATE_IDLE &&
+            s_ai.state != AI_CHAT_STATE_STOPPING;
+    if (valid) {
+        action_cb = s_ai.config.on_device_action;
+        committed_cb = s_ai.config.on_device_action_committed;
+        callback_ctx = s_ai.config.device_action_ctx;
+    }
+    xSemaphoreGive(s_lock);
+
+    if (!valid) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (ai_chat_generation_matches_locked(action_ctx->generation)) {
+            s_ai.device_action_pending = false;
+        }
+        xSemaphoreGive(s_lock);
+        free(action_ctx);
+        ai_chat_delete_current_task_with_caps();
+        return;
+    }
+
+    if (action_cb == NULL) {
+        ai_chat_device_action_set_result(&result,
+                                         false,
+                                         "unsupported",
+                                         "当前固件不支持这个设备动作");
+    } else {
+        ret = action_cb(&action_ctx->action, &result, callback_ctx);
+        if (ret != ESP_OK) {
+            result.ok = false;
+            if (result.status[0] == '\0') {
+                ai_chat_copy_str(result.status, sizeof(result.status), esp_err_to_name(ret));
+            }
+            if (result.message[0] == '\0') {
+                ai_chat_copy_str(result.message, sizeof(result.message), "设备动作执行失败");
+            }
+        }
+    }
+
+    json = ai_chat_build_device_action_result_json(action_ctx->jsonrpc_id_json, &result);
+    if (json == NULL) {
+        ret = ESP_ERR_NO_MEM;
+    } else {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        valid = ai_chat_generation_matches_locked(action_ctx->generation) &&
+                s_ai.conn == action_ctx->conn &&
+                s_ai.state != AI_CHAT_STATE_IDLE &&
+                s_ai.state != AI_CHAT_STATE_STOPPING;
+        xSemaphoreGive(s_lock);
+        ret = valid ? ai_chat_send_json(action_ctx->conn, json) : ESP_ERR_INVALID_STATE;
+        free(json);
+    }
+
+    ESP_LOGI(TAG,
+             "AI Chat device_action: action=%s target_len=%u status=%s ok=%d send=%s",
+             action_ctx->action.action[0] != '\0' ? action_ctx->action.action : "(empty)",
+             (unsigned)strlen(action_ctx->action.target),
+             result.status[0] != '\0' ? result.status : (result.ok ? "ok" : "failed"),
+             result.ok ? 1 : 0,
+             esp_err_to_name(ret));
+
+    if (ret == ESP_OK &&
+        result.ok &&
+        result.start_device_call &&
+        committed_cb != NULL) {
+        /*
+         * TiRtcSendCommand has accepted the complete JSON-RPC response at this
+         * point. Hand the asynchronous app transition to the lifecycle owner
+         * directly; a timing sleep is not a delivery or ordering contract.
+         */
+        esp_err_t commit_ret = committed_cb(&action_ctx->action, &result, callback_ctx);
+        if (commit_ret != ESP_OK) {
+            ESP_LOGE(TAG,
+                     "AI Chat device_action handoff failed after response: %s",
+                     esp_err_to_name(commit_ret));
+        }
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (ai_chat_generation_matches_locked(action_ctx->generation)) {
+        s_ai.device_action_pending = false;
+    }
+    xSemaphoreGive(s_lock);
+    free(action_ctx);
+    ai_chat_delete_current_task_with_caps();
+}
+
+static esp_err_t ai_chat_schedule_device_action(tirtc_conn_t conn, const ai_chat_event_t *event)
+{
+    ai_chat_device_action_context_t *action_ctx = NULL;
+    uint32_t generation = 0U;
+    bool valid = false;
+    bool busy = false;
+
+    if (conn == NULL || event == NULL || !event->jsonrpc_id_valid) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    valid = s_ai.conn == conn &&
+            s_ai.state != AI_CHAT_STATE_IDLE &&
+            s_ai.state != AI_CHAT_STATE_STOPPING;
+    if (valid) {
+        generation = s_ai.generation;
+        if (generation == 0U) {
+            valid = false;
+        } else if (s_ai.device_action_pending) {
+            busy = true;
+        } else {
+            s_ai.device_action_pending = true;
+        }
+    }
+    xSemaphoreGive(s_lock);
+    if (!valid || busy || generation == 0U) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    action_ctx = ai_chat_calloc_psram(1, sizeof(*action_ctx));
+    if (action_ctx == NULL) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (ai_chat_generation_matches_locked(generation)) {
+            s_ai.device_action_pending = false;
+        }
+        xSemaphoreGive(s_lock);
+        return ESP_ERR_NO_MEM;
+    }
+
+    action_ctx->generation = generation;
+    action_ctx->conn = conn;
+    ai_chat_copy_str(action_ctx->jsonrpc_id_json,
+                     sizeof(action_ctx->jsonrpc_id_json),
+                     event->jsonrpc_id_json);
+    ai_chat_copy_str(action_ctx->action.action,
+                     sizeof(action_ctx->action.action),
+                     event->action);
+    ai_chat_copy_str(action_ctx->action.target,
+                     sizeof(action_ctx->action.target),
+                     event->target);
+    ai_chat_copy_str(action_ctx->action.call_type,
+                     sizeof(action_ctx->action.call_type),
+                     event->call_type);
+
+    BaseType_t task_ret = xTaskCreatePinnedToCoreWithCaps(ai_chat_device_action_task,
+                                                          "ai_action",
+                                                          AI_CHAT_DEVICE_ACTION_TASK_STACK,
+                                                          action_ctx,
+                                                          AI_CHAT_DEVICE_ACTION_TASK_PRIORITY,
+                                                          NULL,
+                                                          AI_CHAT_CONTROL_TASK_CORE,
+                                                          AI_CHAT_TASK_ALLOC_CAPS);
+    if (task_ret != pdPASS) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (ai_chat_generation_matches_locked(generation)) {
+            s_ai.device_action_pending = false;
+        }
+        xSemaphoreGive(s_lock);
+        free(action_ctx);
+        ai_chat_log_heap("device action task create failed");
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
 static void ai_chat_handle_connect_timeout(uint32_t generation)
 {
     bool timed_out = false;
@@ -2308,6 +2640,28 @@ static void ai_chat_handle_event(tirtc_conn_t conn, const ai_chat_event_t *event
     case AI_CHAT_EVENT_END_SESSION:
         (void)ai_chat_close();
         break;
+    case AI_CHAT_EVENT_DEVICE_ACTION:
+    {
+        esp_err_t ret = ai_chat_schedule_device_action(conn, event);
+        if (ret != ESP_OK) {
+            const char *status = ret == ESP_ERR_NO_MEM ? "internal" :
+                                 ret == ESP_ERR_INVALID_ARG ? "invalid_request" : "busy";
+            const char *message = ret == ESP_ERR_NO_MEM ?
+                                  "设备资源不足，请稍后再试" :
+                                  ret == ESP_ERR_INVALID_ARG ?
+                                  "设备动作参数不完整" :
+                                  "已有设备动作正在执行";
+            ESP_LOGW(TAG,
+                     "AI Chat device_action rejected locally: action=%s ret=%s",
+                     event->action,
+                     esp_err_to_name(ret));
+            ai_chat_send_device_action_failure(conn,
+                                               event->jsonrpc_id_json,
+                                               status,
+                                               message);
+        }
+        break;
+    }
     default:
         break;
     }
@@ -2590,6 +2944,7 @@ esp_err_t ai_chat_close(void)
     if (s_ai.state == AI_CHAT_STATE_IDLE && conn == NULL) {
         memset(s_ai.captions, 0, sizeof(s_ai.captions));
         ai_chat_clear_messages_locked();
+        s_ai.device_action_pending = false;
         xSemaphoreGive(s_lock);
         return ESP_OK;
     }
@@ -2597,6 +2952,7 @@ esp_err_t ai_chat_close(void)
     close_generation = ai_chat_next_generation_locked();
     s_ai.conn = NULL;
     s_ai.cloud_speaking = false;
+    s_ai.device_action_pending = false;
     xSemaphoreGive(s_lock);
 
     if (conn != NULL) {

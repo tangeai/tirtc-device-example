@@ -9,6 +9,8 @@
 #include "esp_timer.h"
 #include "sdkconfig.h"
 
+#include "app_memory_policy.h"
+
 static const char *TAG = "video_scaler";
 
 #define VIDEO_YUV420_SCALE_DENOMINATOR 16U
@@ -121,9 +123,9 @@ esp_err_t video_yuv420_scaler_create(const video_yuv420_scaler_config_t *config,
     scaler->output_buffer_size =
         video_yuv420_align_up(scaler->output_data_len, VIDEO_YUV420_CACHE_LINE_SIZE);
     scaler->output_buffer =
-        heap_caps_aligned_alloc(VIDEO_YUV420_CACHE_LINE_SIZE,
-                                scaler->output_buffer_size,
-                                MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+        app_memory_aligned_alloc_psram(VIDEO_YUV420_CACHE_LINE_SIZE,
+                                       scaler->output_buffer_size,
+                                       MALLOC_CAP_DMA);
     if (scaler->output_buffer == NULL) {
         ESP_LOGE(TAG,
                  "YUV420 scaler output allocation failed: size=%u psram_largest=%u",
@@ -186,10 +188,9 @@ esp_err_t video_yuv420_scaler_warmup(video_yuv420_scaler_handle_t handle)
         video_yuv420_data_size(handle->config.input_width, handle->config.input_height);
     size_t input_buffer_size =
         video_yuv420_align_up(input_data_len, VIDEO_YUV420_CACHE_LINE_SIZE);
-    uint8_t *input = heap_caps_aligned_alloc(VIDEO_YUV420_CACHE_LINE_SIZE,
-                                             input_buffer_size,
-                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA |
-                                                 MALLOC_CAP_8BIT);
+    uint8_t *input = app_memory_aligned_alloc_psram(VIDEO_YUV420_CACHE_LINE_SIZE,
+                                                    input_buffer_size,
+                                                    MALLOC_CAP_DMA);
     if (input == NULL) {
         ESP_LOGE(TAG,
                  "YUV420 scaler warmup input allocation failed: size=%u psram_largest=%u",

@@ -5,6 +5,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
 extern SA_BOOL SA_resolve_host(const char* host, uint32_t* pIP);
 char* SA_ip2str(unsigned int ip, char ips[16]);
 //* shost can be like:  xx.xx.xxx:port

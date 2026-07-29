@@ -1,26 +1,50 @@
 # TiRTC SDK Version
 
-- SDK version: 2.2.0
-- Package channel: ESP32 device delivery
-- Target chips: ESP32-S3, ESP32-P4
-- Chip vendor: Espressif
-- Target OS: FreeRTOS / ESP-IDF
-- ESP-IDF: 5.5.4
-- S3 toolchain: xtensa-esp32s3-elf-gcc-14.2.0_20260121
-- P4 toolchain: riscv32-esp-elf-gcc-14.2.0_20260121
-- P2P stack: KCP / noSCTP
-- HTTP mode: `nossl=y`, `CONFIG_SSL_SUPPORT=0`
-- FreeRTOS tick contract: 1000 Hz
+| Item | Value |
+| --- | --- |
+| Package channel | ESP32-P4 test package |
+| TiRTC version | 2.3.0 |
+| Target | ESP32-P4 / FreeRTOS / ESP-IDF |
+| ESP-IDF | 5.5.4 |
+| Toolchain | riscv32-esp-elf-gcc-14.2.0_20260121 |
+| Nano branch | origin/tgmp |
+| Nano commit | aaad3da251bac90e0642b51b3279a1f40ca9fa9a |
+| tgwebrtc commit | e39114731ad488c88573d16f0855a1326d97c989 |
+| TGTRP interface | tag v1.5.10 |
+| Transport | KCP / noSCTP / noDTLS |
+| Build date | 2026-07-24 |
 
-## Libraries
+## Build Contract
 
-| Target | Size | MD5 | SHA256 |
-| --- | ---: | --- | --- |
-| ESP32-S3 | 4908580 | d4433a250b988902ebdf0687020be98b | f258f6fa48d6fd167d88cd5b09210828c663ceb451dea10e6f33a16c8407e037 |
-| ESP32-P4 | 2943636 | 23661a4ee27debc667f904f7118dd270 | 97d4285474e301f5e2846c837241632b9d2bca09a64d96d2ec385c6c68c40ec6 |
+- `CONFIG_FREERTOS_HZ=1000`
+- FreeRTOS trace facility disabled
+- FreeRTOS stats formatting functions disabled
+- FreeRTOS runtime stats disabled
+- `sizeof(StaticSemaphore_t)=84`
+- `CONFIG_LWIP_MAX_SOCKETS=10`
+- `libwebrtc_nosctp.a` is already bundled into `libTiRTC.a`
+
+The upstream SDK validation project used `CONFIG_ESP_HOST_WIFI_ENABLED=y`.
+This Waveshare ESP32-P4 board uses an ESP32-C6 over ESP-Hosted SDIO instead, so
+the application keeps `CONFIG_ESP_HOST_WIFI_ENABLED=n`,
+`CONFIG_ESP_WIFI_REMOTE_ENABLED=y`, and
+`CONFIG_ESP_WIFI_REMOTE_LIBRARY_HOSTED=y`. These IDF modes are mutually
+exclusive; enabling Host Wi-Fi would disable the board's working Wi-Fi Remote
+transport. The TiRTC socket interface remains provided by lwIP through
+ESP-WiFi-Remote.
 
 ## Integration Contract
 
-- Set `TIRTC_OPT_DEVICE_SECRET_KEY` before calling `TiRtcStart()`.
-- Use a stable physical identifier, such as the base MAC, for `TIRTC_OPT_CLIENT_ID`.
-- Keep the headers, target static library, this version file and `SHA256SUMS.txt` from the same package.
+- Set `TIRTC_OPT_DEVICE_SECRET_KEY` and a stable physical
+  `TIRTC_OPT_CLIENT_ID` before `TiRtcStart()`.
+- Register `TiRtcConnSetVideoBitrateParams()` after a connection is accepted
+  and before video transmission starts.
+- Treat `on_video_bitrate_required()` as an SDK-thread callback: post the
+  absolute target bitrate to an application worker and return immediately.
+- Keep `TIRTC_OPT_TGTRP_POLL_TIMEOUT` at its default `1 ms` for initial
+  integration.
+- This package passed static and final-link checks upstream. Device-side TGMP
+  behavior still requires runtime verification.
+
+The auxiliary `lib/esp32s3/libTiRTC.a` file is not linked by this ESP32-P4
+component and is not part of the 2.3.0 package contract.

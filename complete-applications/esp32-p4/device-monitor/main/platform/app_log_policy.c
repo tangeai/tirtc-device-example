@@ -10,7 +10,6 @@ void app_log_policy_apply(void)
     ESP_LOGI(TAG, "runtime log profile: diagnostic");
 #else
     static const char *const warning_only_tags[] = {
-        "CALL_FLOW",
         "H_API",
         "H_SDIO_DRV",
         "sdio_wrapper",
@@ -37,6 +36,9 @@ void app_log_policy_apply(void)
         "i2s_std",
     };
 
+    /* Call transitions are sparse and must remain visible in the concise
+     * profile so signalling delay can be separated from RTC/media delay. */
+    esp_log_level_set("CALL_FLOW", ESP_LOG_INFO);
     for (size_t index = 0; index < sizeof(warning_only_tags) / sizeof(warning_only_tags[0]); ++index) {
         esp_log_level_set(warning_only_tags[index], ESP_LOG_WARN);
     }

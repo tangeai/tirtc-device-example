@@ -1,0 +1,11 @@
+building/*
+!building/.gitkeep
+*.log
+*.tmp
+*.bak
+*.orig
+*.o
+Thumbs.db
+Desktop.ini
+.playwright-cli/
+.tmp/

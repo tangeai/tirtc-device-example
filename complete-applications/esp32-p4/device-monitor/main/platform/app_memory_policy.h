@@ -38,4 +38,9 @@ typedef struct {
 
 void *app_memory_alloc_psram(size_t size);
 void *app_memory_calloc_psram(size_t count, size_t size);
+void *app_memory_aligned_alloc_psram(size_t alignment, size_t size, uint32_t extra_caps);
+void *app_memory_aligned_calloc_psram(size_t alignment,
+                                      size_t count,
+                                      size_t size,
+                                      uint32_t extra_caps);
 void app_memory_get_snapshot(app_memory_snapshot_t *snapshot);

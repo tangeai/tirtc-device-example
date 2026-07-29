@@ -18,8 +18,8 @@
 测试配置，并通过环境变量传入 SDK 与工具链位置：
 
 ```bash
-SDK_ROOT=/path/to/im_sdk/opensource/freertos \
-TOOLCHAIN_BIN=/path/to/riscv32-ingenic-g32s10-elf-tools-r1.0.5/bin \
+G32_SDK_ROOT="<WSL_SDK_ROOT>/im_sdk/opensource/freertos" \
+G32_TOOLCHAIN_BIN="<WSL_TOOLCHAIN_ROOT>/bin" \
 bash scripts/build-in-sdk.sh
 ```
 

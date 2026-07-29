@@ -1,110 +1,153 @@
-# ESP32-P4 Media Architecture
+# ESP32-P4 媒体架构
 
-本文档说明 ESP32-P4 工程中摄像头、音频、TiRTC、UI 的分层和运行策略。目标是保证业务入口清晰、资源所有权明确、异常时可恢复。
+本文档说明摄像头、音频、TiRTC、显示和内存的所有权。目标是让每条媒体链路只有一个生命周期
+所有者，运行时不通过跨层补丁争抢硬件或连接句柄。
 
-## Layer Ownership
+本文对应应用版本 `1.2.3` 和 TiRTC SDK `2.3.0`。版本来源见
+[SOURCE_PROVENANCE.md](../SOURCE_PROVENANCE.md)，项目入口见 [README.md](../README.md)。
+下列参数描述当前源码设计和默认配置，不单独构成目标板运行证明。
 
-| Layer | Responsibility |
+## 分层
+
+| 层 | 责任 |
 | --- | --- |
-| `drivers` | Camera, display, touch, audio codec, DMA buffer and hardware lifecycle. |
-| `media` | Camera H264 pipeline, media profile, weak-network policy and runtime metrics. |
-| `services` | Feature-facing service APIs, such as QR scan, RTC bridge, device binding, AI Chat and VoIP. |
-| `protocols/tirtc` | TiRTC SDK lifecycle, connection handle, stream state and packet submission. |
-| `application` | App entry/exit orchestration and resource acquire/release decisions. |
-| `ui` | Visual state and user actions only. |
+| `drivers` | 摄像头、显示、触摸、音频 codec、DMA 和硬件生命周期 |
+| `media` | 摄像头 H264 pipeline、像素格式转换、媒体档位和运行指标 |
+| `services` | IPC、设备呼叫、微信 VoIP、AI Chat、绑定和 OTA 等业务服务 |
+| `protocols/tirtc` | TiRTC SDK、连接句柄、订阅、回调和媒体收发队列 |
+| `application` | 业务进入/退出、资源租约和所有权切换 |
+| `ui` | 状态展示和用户动作，不持有媒体设备或连接 |
 
-## Memory Ownership
+## 内存
 
-P4 uses capability-based allocation rather than treating all heap as interchangeable. The common policy is defined in `main/platform/app_memory_policy.h`.
+P4 使用 capability-based allocation，不把所有 heap 当作可互换内存。
 
-| Memory class | Long-term owners | Allocation rule |
+| 内存 | 长期所有者 | 策略 |
 | --- | --- | --- |
-| Internal RAM | DMA descriptors, realtime control queues, mutexes, audio I/O control, flash/NVS task stacks | Explicit `MALLOC_CAP_INTERNAL`; never used as a fallback for a failed media allocation. |
-| DMA-capable internal RAM | ESP-Hosted, camera/H264 driver DMA and the DMA escrow | Protected by the `192KB` IDF reserve and a `64KB` runtime escrow. |
-| PSRAM | H264 payloads, RTC TX pools, decoded video frames, HTTP/MQTT payload copies, UI snapshots and background task stacks | Explicit `MALLOC_CAP_SPIRAM`; allocation failure is returned to the owning service. |
+| Internal RAM | DMA 描述符、实时控制队列、mutex、音频 I/O 控制、flash/NVS task stack | 显式 `MALLOC_CAP_INTERNAL`，媒体分配失败时不回退到这里 |
+| DMA-capable internal RAM | ESP-Hosted 描述符、摄像头/H264/JPEG 驱动和 DMA escrow | IDF 预留 `192KB`，运行时 escrow `96KB`，不存放长期大块 SDIO payload |
+| PSRAM | SDIO streaming RX、H264/JPEG payload、RTC TX pool、解码帧、RGB565 帧、HTTP/MQTT 工作区和后台 task stack | 显式 `MALLOC_CAP_SPIRAM`，固定池优先于实时动态扩容 |
 
-The RTC send path allocates its pools once and reuses them:
+启动早期按顺序预热：
 
-- Video TX starts with four `512KB` PSRAM slots and grows a slot only when an encoded frame requires it.
-- Audio TX owns eighteen fixed `8KB` PSRAM slots. Per-packet `malloc/free` is not used on the live path.
-- Queue storage contains descriptors and slot indexes only. Payload bytes stay in the corresponding PSRAM pool.
+1. P4 JPEG decoder 的内部 DMA 描述符。
+2. DMA escrow。
+3. H264 encoder。
+4. RTC 视频发送池。
+5. 视频缩放/旋转工作区和下行显示池。
+6. AEC 工作集。
 
-Tasks that may execute while flash cache is unavailable, including OTA and NVS persistence workers, keep internal stacks. Network, media, UI snapshot and other background workers use PSRAM stacks. This distinction is intentional and must be preserved when adding a task.
+这些资源在服务发现、绑定、MQTT、TiRTC 和 UI 分配长期内存前占位。视频大块留在 PSRAM，
+内部 RAM 只承担硬件必须的描述符和实时控制。
 
-Task memory is reviewed at three levels:
+RTC 视频发送池使用固定 PSRAM slot；音频发送和播放缓冲也使用独立固定池。队列只保存描述符
+和 slot index，不保存大 payload。后台网络、媒体和 UI task 使用 PSRAM stack；
+flash/NVS、实时音频和小型应用控制 task 保留 internal stack。
 
-- Every task creation declares its stack capability explicitly. Background and media stacks use PSRAM; realtime audio, flash/NVS and small application control stacks remain internal.
-- Compiler stack-usage output is used to inspect task entries and their callees. The build warns when a single function needs more than `8KB`, so large snapshots and protocol payloads must be moved into an owner-specific PSRAM workspace.
-- Stack sizes are reduced only after runtime high-water marks prove enough reserve. Static frame size alone is not a safe reason to shrink a task stack.
+ESP-Hosted streaming RX 使用两个 `64KB` cache-aligned PSRAM DMA 缓冲，只有 PSRAM DMA
+分配失败时才回退到 `4KB` internal DMA 缓冲。这样把 Wi-Fi burst payload 留在 PSRAM，
+同时保护 H264、JPEG 和音频依赖的内部 DMA 连续块。
 
-The device online worker and its HTTP/MQTT credentials use PSRAM. Device binding keeps an internal stack because it persists pending sessions, but its network/session workspace is PSRAM-backed and only the small NVS blobs stay on the internal stack. Long-lived call, contact and service-registry caches use external BSS; mutexes, queues, spinlocks and hot RTC configuration remain internal.
+## 摄像头上行
 
-LVGL renders through PSRAM draw buffers and copies through one bounded internal DMA transfer buffer. That transfer buffer uses the same internal-RAM budget as the former pair of small DMA draw buffers, while larger transactions reduce synchronous SPI overhead during call video.
+`main/media/camera_pipeline.c` 持有实时 RTC 摄像头：
 
-H264 is prewarmed before service discovery, binding, MQTT, TiRTC and UI workloads allocate their long-lived state. The DMA escrow is temporarily lent to H264 during encoder or decoder bootstrap and reclaimed afterward only when the contiguous block is still available. An escrow already lent to the retained encoder is a valid state and must not block decoder recovery.
+- IPC 使用 OV5647 `1280x960` YUV420 和 ESP32-P4 H264 硬编。
+- 传感器输出与编码器输入尺寸一致时走 YUV420 direct，不增加 RGB565 中转。
+- 热路径为 `camera_driver -> camera_pipeline -> H264 encoder -> tirtc_session`。
+- RTC 上行不做本地摄像头预览。
+- QR scanner 只在扫码页持有摄像头，离开后释放。
+- PSRAM 中的 H264 输入和输出在 DMA 边界使用 `esp_cache_msync`。
+- 第一帧必须是完整关键帧，丢失依赖后重新请求 IDR。
 
-Runtime snapshots report current, largest-block and minimum-ever values for internal RAM, DMA RAM and PSRAM, together with PSRAM allocation failures and media pool occupancy. The minimum-ever values are the acceptance metric for long calls; current free memory alone does not reveal transient pressure or fragmentation.
+设备间呼叫和微信 VoIP 使用 `480x320@15fps`、`800kbps` 起始的独立上行档位；退出通话后恢复 IPC 正常档位。
 
-## Camera Pipeline
+## 视频下行
 
-`main/media/camera_pipeline.c` is the owner of live RTC camera capture.
+`main/services/call_video_renderer.c` 是下行视频的统一 renderer，但 codec path 分开：
 
-- RTC camera uplink uses OV5647 YUV420 frames as the H264 encoder input.
-- The sensor and RTC encoder share the supported `1280x960` YUV420 frame directly; no scaling, crop buffer or per-frame copy is used.
-- The hot path is `camera_driver -> camera_pipeline -> ESP32-P4 H264 encoder -> tirtc_session`.
-- RTC video does not render a local preview. This keeps display refresh from competing with H264 encoding and ESP-Hosted Wi-Fi.
-- QR scanning owns the camera only while the scan page is active and releases it before RTC video starts.
-- H264 input/output buffers that may live in PSRAM are synchronized with `esp_cache_msync` around encoder submission and output reads.
-- The first valid upstream frame must be a key frame before the TiRTC video stream is considered started.
+### 设备间呼叫
 
-Public wrappers remain stable:
+- 接收 constrained-baseline H264。
+- 软件 H264 decoder 输出 YUV420。
+- PPA 优先完成缩放、裁剪和 RGB565 转换，软件路径作为回退。
+- H264 依赖帧丢失时进入 key-frame resync，不继续显示错误参考帧。
+- 压缩输入使用 16 个 `256KB` PSRAM slot；输入溢出后标记延迟恢复，在下一次 IDR 到达时
+  清空旧依赖链并切换到新一代解码状态。
+- 解码任务优先保持 H264 参考链连续；转换任务每处理一帧主动让出一个 tick，避免持续占满调度窗口。
 
-- `camera_pipeline_set_rtc_video_enabled()` controls the RTC upstream camera source.
-- `camera_pipeline_set_rtc_video_sink()` binds the encoded H264 sink.
-- `media_governor_set_rtc_video_config()` adjusts width, height, FPS and bitrate.
-- `media_governor_apply_weak_network_level()` maps weak-network levels to video profiles.
+### 微信 VoIP
 
-## Default Policy
+- 设备能力上报 `down_video_mt=mjpeg`、`screen_width=480`、`screen_height=320`。
+- 服务端把微信视频转换为独立 MJPEG 帧。
+- P4 hardware JPEG decoder 输出 RGB565。
+- PPA 优先完成旋转、居中 `cover` 裁剪和 `480x320` 输出，软件转换作为回退。
+  ThingConnect 协议字段独立上报 `object_fit=contain`。
+- 竖向 JPEG 默认顺时针旋转 90 度，横向 JPEG保持原方向。
+- 压缩输入复用 16 个 `256KB` PSRAM slot；解码和显示使用固定 PSRAM pool。
+- MJPEG 帧彼此独立。队列积压时释放旧帧并解码最新帧，避免延迟持续增长。
 
-| Item | Default |
+统一输出由三个 RGB565 slot 组成。控制层可见时由 LVGL 合成；控制层自动隐藏后切换为整帧 PSRAM direct-LCD DMA，点击画面恢复控制层。
+
+## 音频和 AEC
+
+音频 ownership 由 application policy 统一管理：
+
+- IPC、设备呼叫和微信 VoIP 使用 RTC media owner。
+- AI Chat 使用独立 media owner。
+- 进入业务时先 prepare 自适应播放缓冲，媒体真正 active 后启用 AEC。
+- AEC 优先使用 codec 同步 DAC reference；无法锁定时使用 `80ms` 软件延迟参考。
+- 退出业务时停止采集、播放和 AEC 处理，但保留预热工作区供后续会话复用。
+
+播放控制器根据 underflow、积压和抖动调整目标缓冲，不通过长期固定大延迟掩盖弱网。
+
+## TiRTC 发送与码率
+
+`main/protocols/tirtc/tirtc_session.c` 持有连接和发送队列：
+
+- 视频进入预分配 PSRAM TX pool。
+- 发送任务优先丢弃过期视频，不让旧帧无界堆积。
+- 音频使用独立队列，视频启动期间只允许有界延后。
+- 无效句柄、远端关闭和 teardown 在协议层与应用层闭环，UI 不直接释放连接。
+
+TiRTC `2.3.0` 的 TGMP 控制器通过 `on_video_bitrate_required()` 给出绝对目标码率。回调只投递
+事件，应用控制任务更新 media governor 和硬件编码器。双向通话档位为 `200-800kbps`；
+IPC 等其他档位按当前基准码率和画面规模计算范围。
+
+该控制器保留为可选策略，默认关闭；启用后拥塞降码率立即生效，恢复升码率需经过稳定等待
+并分级上调。旧的本地队列压力自动降级也默认关闭，避免两个控制器竞争。
+
+## 默认参数
+
+| 项目 | 默认值 |
 | --- | --- |
-| Sensor capture | `1280x960` binning mode |
-| RTC target | `1280x960@20fps` |
-| H264 bitrate | `4Mbps` |
-| GOP | `40` |
+| IPC | `1280x960@20fps`, `4Mbps` |
+| 双向通话/微信上行 | `480x320@15fps`, `800kbps` 起始，TGMP `200-800kbps` |
+| H264 GOP | `30` |
 | H264 output buffer | `1MB` |
 | Max delta payload | `256KB` |
-| Startup max delta payload | `128KB` for the first `2500ms` |
-| Auto weak-network adaptation | Disabled |
-| Wait remote subscribe before capture | Disabled |
-| Stale camera frame drain | Enabled |
+| Startup max delta payload | 首 `2500ms` 为 `128KB` |
+| TiRTC SDK bitrate adaptation | 关闭 |
+| Legacy local auto adaptation | 关闭 |
+| Wait subscribe before capture | 关闭 |
+| Direct LCD with auto-hidden controls | 开启 |
 
-Weak-network support is an interface and policy layer, not a default behavior. Normal demonstration builds should run the full configured video profile unless the upper layer explicitly applies a weak-network level.
+## 失败边界
 
-## TiRTC Send Path
+- 丢弃二维码预览帧不能停止 RTC。
+- 丢弃视频帧或显示帧不能关闭 TiRTC 连接。
+- JPEG/H264 单帧解码失败只能丢帧并保留下一次恢复机会。
+- 媒体队列必须有界；业务退出后队列、帧 slot 和连接状态归零。
+- 日志只保留首帧、状态转换、周期汇总和可执行错误，不按帧刷屏。
 
-`main/protocols/tirtc/tirtc_session.c` owns the TiRTC connection handle and the media send queues.
+## 建议验证
 
-- Video frames enter a preallocated PSRAM-backed TX pool.
-- The TX task drops stale queued video before sending, rather than letting old frames pile up.
-- Audio uses a separate queue and may be deferred briefly during video bootstrap.
-- Send-buffer watermarks are logged and used to protect the connection from long backpressure.
-- Invalid handle, remote close and teardown are handled in the protocol/application layers, not in UI callbacks.
+以下项目用于开发者完成构建后的目标板验证：
 
-## Failure Handling
-
-The media path should degrade before it disconnects or reboots:
-
-- A dropped QR preview frame must not stop RTC.
-- A dropped or stale RTC video frame must not close the TiRTC connection.
-- ESP-Hosted TX pressure should be visible through runtime snapshots and TiRTC send-buffer logs.
-- Stage logs should remain one-shot or periodic summaries: first frame, encoder ready, bitrate/fps stats, DMA largest block and stop reason.
-
-## Validation Checklist
-
-1. Boot to home page, confirm display orientation and touch coordinate mapping.
-2. Bind device or confirm cached credentials are loaded.
-3. Connect TiRTC, confirm `H264 encoder ready` and `camera pipeline first upstream frame`.
-4. Keep one connection alive for at least 5 minutes while watching FPS, bitrate, DMA largest block and send-buffer pressure.
-5. Return home, confirm `camera=0 rtc=0 fps=0.0 bitrate=0kbps`.
-6. Re-enter IPC view repeatedly, confirm no stale camera task or connection handle remains.
+1. 检查横屏显示和触摸坐标。
+2. 检查绑定、正式 MQTT 和 TiRTC 上线。
+3. 分别检查 IPC、设备呼叫、微信 VoIP 和 AI Chat。
+4. 对微信 VoIP 确认 H264 上行与 MJPEG 下行均有首帧证据。
+5. 保持每个主要场景至少 5 分钟，观察 fps、bitrate、queue、DMA largest block、PSRAM pool
+   和 AEC。
+6. 每个场景连续进入和退出至少 10 次，确认无残留资源和连接句柄。

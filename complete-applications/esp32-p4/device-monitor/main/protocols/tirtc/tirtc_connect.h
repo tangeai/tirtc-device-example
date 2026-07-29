@@ -20,6 +20,8 @@ esp_err_t tirtc_connect_start_with_token(const char *remote_device_id,
                                          TIRTCCONNECTCALLBACK callback,
                                          void *user_data);
 bool tirtc_connect_is_connecting(void);
+/* Cancel the application attempt while keeping the TiRTC listener online. */
+bool tirtc_connect_abort_attempt(void);
 void tirtc_connect_on_tirtc_started(void);
 void tirtc_connect_cancel(void);
 

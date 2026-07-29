@@ -47,7 +47,12 @@ typedef struct {
     bool running;
     bool uplink_enabled;
     bool worker_busy;
+    bool resources_prepared;
+    bool local_video_enabled;
+    bool remote_video_enabled;
     uint32_t generation;
+    wechat_voip_media_lifecycle_t lifecycle;
+    void *lifecycle_ctx;
     wechat_voip_media_stats_t stats;
 } wechat_voip_media_state_t;
 
@@ -56,6 +61,7 @@ static portMUX_TYPE s_media_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_unsupported_audio_format_logged;
 static bool s_audio_downsample_logged;
 
+static void wechat_voip_media_release_resources(void);
 static void wechat_voip_media_capture_cb(const uint8_t *data,
                                          size_t data_len,
                                          const audio_format_t *format,
@@ -247,7 +253,7 @@ static esp_err_t wechat_voip_media_init(void)
     esp_err_t ret = microphone_register_observer(wechat_voip_media_capture_cb, NULL);
     if (ret != ESP_OK) {
         vQueueDeleteWithCaps(s_media.queue);
-        memset(&s_media, 0, sizeof(s_media));
+        s_media.queue = NULL;
         return ret;
     }
 
@@ -261,12 +267,84 @@ static esp_err_t wechat_voip_media_init(void)
     if (task_ret != pdPASS) {
         microphone_unregister_observer(wechat_voip_media_capture_cb, NULL);
         vQueueDeleteWithCaps(s_media.queue);
-        memset(&s_media, 0, sizeof(s_media));
+        s_media.queue = NULL;
+        s_media.task = NULL;
         return ESP_ERR_NO_MEM;
     }
 
     s_media.initialized = true;
     return ESP_OK;
+}
+
+esp_err_t wechat_voip_media_configure_lifecycle(const wechat_voip_media_lifecycle_t *lifecycle,
+                                                void *ctx)
+{
+    taskENTER_CRITICAL(&s_media_lock);
+    if (s_media.running || s_media.resources_prepared) {
+        taskEXIT_CRITICAL(&s_media_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (lifecycle != NULL) {
+        s_media.lifecycle = *lifecycle;
+    } else {
+        memset(&s_media.lifecycle, 0, sizeof(s_media.lifecycle));
+    }
+    s_media.lifecycle_ctx = ctx;
+    taskEXIT_CRITICAL(&s_media_lock);
+    return ESP_OK;
+}
+
+esp_err_t wechat_voip_media_prepare(bool local_video_enabled, bool remote_video_enabled)
+{
+    wechat_voip_media_lifecycle_t lifecycle = {0};
+    void *lifecycle_ctx = NULL;
+
+    taskENTER_CRITICAL(&s_media_lock);
+    if (s_media.resources_prepared) {
+        bool same_profile = s_media.local_video_enabled == local_video_enabled &&
+                            s_media.remote_video_enabled == remote_video_enabled;
+        taskEXIT_CRITICAL(&s_media_lock);
+        return same_profile ? ESP_OK : ESP_ERR_INVALID_STATE;
+    }
+    lifecycle = s_media.lifecycle;
+    lifecycle_ctx = s_media.lifecycle_ctx;
+    taskEXIT_CRITICAL(&s_media_lock);
+
+    if (lifecycle.prepare != NULL) {
+        esp_err_t ret = lifecycle.prepare(local_video_enabled,
+                                          remote_video_enabled,
+                                          lifecycle_ctx);
+        if (ret != ESP_OK) {
+            return ret;
+        }
+    }
+
+    taskENTER_CRITICAL(&s_media_lock);
+    s_media.resources_prepared = true;
+    s_media.local_video_enabled = local_video_enabled;
+    s_media.remote_video_enabled = remote_video_enabled;
+    taskEXIT_CRITICAL(&s_media_lock);
+    return ESP_OK;
+}
+
+static void wechat_voip_media_release_resources(void)
+{
+    void (*release)(void *ctx) = NULL;
+    void *lifecycle_ctx = NULL;
+
+    taskENTER_CRITICAL(&s_media_lock);
+    if (s_media.resources_prepared) {
+        s_media.resources_prepared = false;
+        s_media.local_video_enabled = false;
+        s_media.remote_video_enabled = false;
+        release = s_media.lifecycle.release;
+        lifecycle_ctx = s_media.lifecycle_ctx;
+    }
+    taskEXIT_CRITICAL(&s_media_lock);
+
+    if (release != NULL) {
+        release(lifecycle_ctx);
+    }
 }
 
 esp_err_t wechat_voip_media_start(tirtc_conn_t conn)
@@ -286,6 +364,14 @@ esp_err_t wechat_voip_media_start(tirtc_conn_t conn)
             return stop_ret;
         }
     }
+
+    taskENTER_CRITICAL(&s_media_lock);
+    bool resources_prepared = s_media.resources_prepared;
+    taskEXIT_CRITICAL(&s_media_lock);
+    ESP_RETURN_ON_FALSE(resources_prepared,
+                        ESP_ERR_INVALID_STATE,
+                        TAG,
+                        "wechat media resources are not prepared");
 
     ESP_RETURN_ON_ERROR(wechat_voip_media_init(), TAG, "init microphone media failed");
     ESP_RETURN_ON_ERROR(microphone_prepare_capture_path(), TAG, "prepare microphone path failed");
@@ -356,15 +442,25 @@ esp_err_t wechat_voip_media_stop_wait(tirtc_conn_t conn, uint32_t timeout_ms)
     uint32_t waited_ms = 0;
     bool target_running = false;
     bool worker_busy = false;
+    bool any_running = false;
+
+    taskENTER_CRITICAL(&s_media_lock);
+    bool wrong_connection = conn != NULL && s_media.running && s_media.conn != conn;
+    taskEXIT_CRITICAL(&s_media_lock);
+    if (wrong_connection) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
     wechat_voip_media_stop(conn);
 
     do {
         taskENTER_CRITICAL(&s_media_lock);
         target_running = s_media.running && (conn == NULL || conn == s_media.conn);
+        any_running = s_media.running;
         worker_busy = s_media.worker_busy;
         taskEXIT_CRITICAL(&s_media_lock);
-        if (!target_running && !worker_busy) {
+        if (!target_running && !any_running && !worker_busy) {
+            wechat_voip_media_release_resources();
             return ESP_OK;
         }
 
@@ -372,7 +468,7 @@ esp_err_t wechat_voip_media_stop_wait(tirtc_conn_t conn, uint32_t timeout_ms)
         waited_ms += WECHAT_VOIP_MEDIA_STOP_POLL_MS;
     } while (waited_ms < timeout_ms);
 
-    return (target_running || worker_busy) ? ESP_ERR_TIMEOUT : ESP_OK;
+    return (target_running || any_running || worker_busy) ? ESP_ERR_TIMEOUT : ESP_OK;
 }
 
 bool wechat_voip_media_is_running(void)

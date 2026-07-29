@@ -213,7 +213,10 @@ static void app_snapshot_fill_ai_chat(app_ai_chat_snapshot_t *ai_snapshot)
 	ai_snapshot->active = ai->active;
 	ai_snapshot->listening = ai->listening;
 	ai_snapshot->cloud_speaking = ai->cloud_speaking;
+	ai_snapshot->video_active = ai->video_active;
 	ai_snapshot->tx_audio_frames = ai->tx_audio_frames;
+	ai_snapshot->tx_video_frames = ai->tx_video_frames;
+	ai_snapshot->tx_video_failures = ai->tx_video_failures;
 	ai_snapshot->rx_commands = ai->rx_commands;
 	ai_snapshot->last_error = ai->last_error;
 	strlcpy(ai_snapshot->asr_caption, ai->asr_caption, sizeof(ai_snapshot->asr_caption));

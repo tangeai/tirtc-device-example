@@ -53,6 +53,35 @@ static tirtc_runtime_t s_tirtc = {
     .stop_notified = true,
 };
 
+static bool tirtc_is_blank_or_placeholder(const char *value, const char *placeholder)
+{
+    return value == NULL || value[0] == '\0' || strcmp(value, placeholder) == 0;
+}
+
+static bool tirtc_client_id_is_valid(const char *client_id)
+{
+    if (client_id == NULL)
+    {
+        return false;
+    }
+
+    size_t len = strlen(client_id);
+    if (len == 0 || len > 64)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < len; ++i)
+    {
+        unsigned char ch = (unsigned char)client_id[i];
+        if (ch < 0x20 || ch > 0x7e)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void tirtc_start_local_media(tirtc_conn_t hconn, const char *reason)
 {
 #if TIRTC_AUTO_PUSH_LOCAL_MEDIA_ON_CONNECT
@@ -230,8 +259,8 @@ static void on_disconnected(tirtc_conn_t hconn)
 /*
  * 收包与订阅回调
  *
- * demo 只处理当前连接上的事件。连接建立后不自动出图；收到订阅后发送
- * 本地 H264/PCMA，同时保留取消订阅、再次订阅、请求关键帧等控制回调。
+ * demo 只处理当前连接上的事件。默认策略可在连接建立后主动发送本地
+ * H264/PCMA，也可以通过配置切换为订阅驱动发送。
  */
 static void on_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *data)
 {
@@ -390,7 +419,10 @@ esp_err_t tirtc_start(void)
     s_tirtc.rx_video_count = 0;
     s_tirtc.rx_audio_count = 0;
 
-    ESP_LOGI(TAG, "TiRTC 版本: %s", TiRtcGetVersion());
+    const char *sdk_version = TiRtcGetVersion();
+    const char *sdk_build_info = TiRtcGetBuildInfo();
+    ESP_LOGI(TAG, "TiRTC 版本: %s", sdk_version != NULL ? sdk_version : "");
+    ESP_LOGI(TAG, "TiRTC 构建信息: %s", sdk_build_info != NULL ? sdk_build_info : "");
     ESP_LOGI(TAG, "PSRAM 总量=%zu 可用=%zu",
              heap_caps_get_total_size(MALLOC_CAP_SPIRAM),
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -414,7 +446,7 @@ esp_err_t tirtc_start(void)
     {
         sdk_ret = TiRtcSetOption(TIRTC_OPT_SERVICE_ENDPOINT,
                                  TIRTC_SERVICE_ENDPOINT,
-                                 (uint32_t)strlen(TIRTC_SERVICE_ENDPOINT) + 1U);
+                                 (uint32_t)strlen(TIRTC_SERVICE_ENDPOINT));
         if (sdk_ret != 0)
         {
             ESP_LOGE(TAG, "设置 TiRTC 服务地址失败: %d %s", sdk_ret, TiRtcGetErrorStr(sdk_ret));
@@ -439,9 +471,19 @@ esp_err_t tirtc_start(void)
     }
     s_tirtc.sdk_initialized = true;
 
-    if (strlen(TIRTC_DEVICE_ID) == 0 || strlen(TIRTC_DEVICE_SECRET_KEY) == 0)
+    if (tirtc_is_blank_or_placeholder(TIRTC_DEVICE_ID, "your_device_id") ||
+        tirtc_is_blank_or_placeholder(TIRTC_DEVICE_SECRET_KEY, "your_device_secret") ||
+        tirtc_is_blank_or_placeholder(TIRTC_CLIENT_ID, "your_client_id"))
     {
-        ESP_LOGE(TAG, "设备 ID 或设备密钥为空，无法上线");
+        ESP_LOGE(TAG, "请先配置 TIRTC_DEVICE_ID、TIRTC_DEVICE_SECRET_KEY 和 TIRTC_CLIENT_ID");
+        TiRtcUninit();
+        s_tirtc.sdk_initialized = false;
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!tirtc_client_id_is_valid(TIRTC_CLIENT_ID))
+    {
+        ESP_LOGE(TAG, "TIRTC_CLIENT_ID 必须是 1 到 64 个可打印 ASCII 字符");
         TiRtcUninit();
         s_tirtc.sdk_initialized = false;
         return ESP_ERR_INVALID_STATE;
@@ -449,10 +491,36 @@ esp_err_t tirtc_start(void)
 
     sdk_ret = TiRtcSetOption(TIRTC_OPT_DEVICE_SECRET_KEY,
                              TIRTC_DEVICE_SECRET_KEY,
-                             (uint32_t)strlen(TIRTC_DEVICE_SECRET_KEY) + 1U);
+                             (uint32_t)strlen(TIRTC_DEVICE_SECRET_KEY));
     if (sdk_ret != 0)
     {
         ESP_LOGE(TAG, "设置设备密钥失败: %d %s", sdk_ret, TiRtcGetErrorStr(sdk_ret));
+        TiRtcUninit();
+        s_tirtc.sdk_initialized = false;
+        return ESP_FAIL;
+    }
+
+    if (!tirtc_is_blank_or_placeholder(TIRTC_APP_ID, "your_app_id"))
+    {
+        sdk_ret = TiRtcSetOption(TIRTC_OPT_APP_ID,
+                                 TIRTC_APP_ID,
+                                 (uint32_t)strlen(TIRTC_APP_ID));
+        if (sdk_ret != 0)
+        {
+            ESP_LOGE(TAG, "设置 AppId 失败: %d %s", sdk_ret, TiRtcGetErrorStr(sdk_ret));
+            TiRtcUninit();
+            s_tirtc.sdk_initialized = false;
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "TiRTC AppId 已设置");
+    }
+
+    sdk_ret = TiRtcSetOption(TIRTC_OPT_CLIENT_ID,
+                             TIRTC_CLIENT_ID,
+                             (uint32_t)strlen(TIRTC_CLIENT_ID));
+    if (sdk_ret != 0)
+    {
+        ESP_LOGE(TAG, "设置 client_id 失败: %d %s", sdk_ret, TiRtcGetErrorStr(sdk_ret));
         TiRtcUninit();
         s_tirtc.sdk_initialized = false;
         return ESP_FAIL;
@@ -467,7 +535,7 @@ esp_err_t tirtc_start(void)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "TiRTC 启动请求已提交: device_id=%s", TIRTC_DEVICE_ID);
+    ESP_LOGI(TAG, "TiRTC 启动请求已提交: device_id=%s client_id=%s", TIRTC_DEVICE_ID, TIRTC_CLIENT_ID);
     return ESP_OK;
 }
 

@@ -198,6 +198,54 @@ static const char *wifi_bandwidth_name(wifi_bandwidth_t bandwidth)
     }
 }
 
+static const char *wifi_auth_mode_name(wifi_auth_mode_t authmode)
+{
+    switch (authmode) {
+    case WIFI_AUTH_OPEN:
+        return "open";
+    case WIFI_AUTH_WEP:
+        return "wep";
+    case WIFI_AUTH_WPA_PSK:
+        return "wpa";
+    case WIFI_AUTH_WPA2_PSK:
+        return "wpa2";
+    case WIFI_AUTH_WPA_WPA2_PSK:
+        return "wpa/wpa2";
+    case WIFI_AUTH_WPA2_ENTERPRISE:
+        return "wpa2-enterprise";
+    case WIFI_AUTH_WPA3_PSK:
+        return "wpa3";
+    case WIFI_AUTH_WPA2_WPA3_PSK:
+        return "wpa2/wpa3";
+    case WIFI_AUTH_WAPI_PSK:
+        return "wapi";
+    default:
+        return "unknown";
+    }
+}
+
+static void wifi_log_connected_link(void)
+{
+    wifi_ap_record_t ap_info = {0};
+    esp_err_t ret = esp_wifi_sta_get_ap_info(&ap_info);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "wifi link details unavailable: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    const char *phy = ap_info.phy_11ax ? "11ax" :
+                      ap_info.phy_11n ? "11n" :
+                      ap_info.phy_11g ? "11g" :
+                      ap_info.phy_11b ? "11b" : "legacy";
+    ESP_LOGI(TAG,
+             "wifi link: channel=%u bandwidth=%s phy=%s auth=%s rssi=%d",
+             (unsigned)ap_info.primary,
+             wifi_bandwidth_name(ap_info.bandwidth),
+             phy,
+             wifi_auth_mode_name(ap_info.authmode),
+             (int)ap_info.rssi);
+}
+
 static void wifi_connect_watchdog_task(void *ctx)
 {
     (void)ctx;
@@ -863,6 +911,7 @@ static void wifi_event_handler(void *arg,
         strlcpy(connected_ip, s_wifi_status.ip_addr, sizeof(connected_ip));
         taskEXIT_CRITICAL(&s_wifi_lock);
         wifi_refresh_rssi();
+        wifi_log_connected_link();
 
         esp_err_t save_ret = wifi_save_saved_config();
         if (save_ret != ESP_OK) {

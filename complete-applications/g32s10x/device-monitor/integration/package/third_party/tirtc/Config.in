@@ -1,0 +1,7 @@
+config CONFIG_TIRTC
+    bool "TiRTC SDK"
+    depends on CONFIG_RISCV1
+    select CONFIG_MBEDTLS
+    default n
+    help
+        Enable the TiRTC SDK for Ingenic G32S10X FreeRTOS.

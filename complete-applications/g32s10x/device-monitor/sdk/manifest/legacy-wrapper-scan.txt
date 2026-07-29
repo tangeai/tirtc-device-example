@@ -1,0 +1,4 @@
+PASS: tgtrp_channel_video_sndv is absent
+PASS: tgtrp_channel_audio_sndv is absent
+PASS: tgtrp_channel_data_sndv is absent
+PASS: tgtrp_channel_sendv is internally resolved after whole-archive link

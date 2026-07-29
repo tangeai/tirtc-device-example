@@ -1,0 +1,15 @@
+* text=auto
+*.c text eol=lf
+*.h text eol=lf
+*.mk text eol=lf
+*.in text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=crlf
+*.md text eol=lf
+*.png binary
+*.a binary
+
+# SDK delivery files keep their source formatting; release checks use their
+# declared library hash rather than repository-wide whitespace normalization.
+sdk/include/** -whitespace
+sdk/manifest/** -whitespace

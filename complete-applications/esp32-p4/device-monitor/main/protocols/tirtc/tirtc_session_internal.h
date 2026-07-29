@@ -14,7 +14,6 @@
 #define TIRTC_SESSION_INVALID_STREAM_ID    0xFF
 #define TIRTC_SESSION_EVENT_QUEUE_LEN      16
 #define TIRTC_SESSION_MESSAGE_STREAM_ID    11
-#define TIRTC_SESSION_LOCAL_VIDEO_STREAM_ID 11
 #define TIRTC_SESSION_REMOTE_VIDEO_STREAM_ID 11
 #define TIRTC_SESSION_LOCAL_AUDIO_STREAM_ID 10
 #define TIRTC_SESSION_REMOTE_AUDIO_STREAM_ID 10
@@ -77,6 +76,7 @@ typedef enum {
     TIRTC_SESSION_EVENT_UNSUBSCRIBE_AUDIO,
     TIRTC_SESSION_EVENT_REMOTE_MESSAGE,
     TIRTC_SESSION_EVENT_REMOTE_COMMAND,
+    TIRTC_SESSION_EVENT_VIDEO_BITRATE_REQUIRED,
     TIRTC_SESSION_EVENT_DISCONNECT_REQUEST,
 } tirtc_session_event_type_t;
 
@@ -109,6 +109,11 @@ typedef struct {
             uint8_t *data;
             size_t data_len;
         } command;
+        struct {
+            tirtc_conn_t conn;
+            uint8_t stream_id;
+            uint32_t target_bitrate_bps;
+        } video_bitrate;
         struct {
             tirtc_conn_t conn;
             bool complete_shutdown;
@@ -160,6 +165,7 @@ void tirtc_session_set_peer_video_requested(bool enabled);
 void tirtc_session_set_peer_audio_requested(bool enabled);
 void tirtc_session_get_local_peer_state(tirtc_session_peer_state_t *state);
 void tirtc_session_set_last_peer_state(const tirtc_session_peer_state_t *state);
+esp_err_t tirtc_session_apply_video_bitrate_params(tirtc_conn_t conn);
 esp_err_t tirtc_session_apply_remote_volume_command(uint8_t percent);
 esp_err_t tirtc_session_apply_remote_door_command(bool open);
 esp_err_t tirtc_session_send_command_raw(tirtc_conn_t conn, uint32_t cmdw, const void *data, size_t data_len);

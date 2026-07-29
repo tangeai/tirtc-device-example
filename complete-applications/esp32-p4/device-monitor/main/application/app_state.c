@@ -15,11 +15,17 @@ static const uint64_t APP_RTC_RATE_WINDOW_US = 1000000ULL;
 
 typedef struct {
 	uint32_t tx_video_frames;
+	uint32_t rx_video_frames;
 	uint32_t tx_audio_frames;
 	uint32_t rx_audio_frames;
+	size_t tx_video_bytes;
+	size_t rx_video_bytes;
 	uint16_t tx_video_fps;
+	uint16_t rx_video_fps;
 	uint16_t tx_audio_fps;
 	uint16_t rx_audio_fps;
+	uint32_t tx_video_bitrate_kbps;
+	uint32_t rx_video_bitrate_kbps;
 	int64_t last_sample_us;
 } app_rtc_rate_state_t;
 
@@ -44,6 +50,17 @@ static uint16_t app_state_compute_frame_rate(uint32_t frame_delta, uint64_t elap
 
 	uint64_t fps = (((uint64_t)frame_delta * 1000000ULL) + (elapsed_us / 2ULL)) / elapsed_us;
 	return fps > UINT16_MAX ? UINT16_MAX : (uint16_t)fps;
+}
+
+static uint32_t app_state_compute_bitrate_kbps(size_t byte_delta, uint64_t elapsed_us)
+{
+	if (elapsed_us == 0) {
+		return 0;
+	}
+
+	uint64_t bitrate_kbps =
+		(((uint64_t)byte_delta * 8ULL * 1000ULL) + (elapsed_us / 2ULL)) / elapsed_us;
+	return bitrate_kbps > UINT32_MAX ? UINT32_MAX : (uint32_t)bitrate_kbps;
 }
 
 app_control_state_t app_state_get_control(void)
@@ -131,48 +148,98 @@ bool app_state_sync_call_media_defaults(bool call_active, app_control_state_t *c
 void app_state_fill_rtc_frame_rates(app_rtc_snapshot_t *snapshot, const rtc_transport_stats_t *rtc)
 {
 	int64_t now_us = esp_timer_get_time();
+	bool counters_restarted = false;
 
 	if (snapshot == NULL || rtc == NULL) {
 		return;
 	}
 
 	taskENTER_CRITICAL(&s_rtc_rate_lock);
+	counters_restarted =
+		rtc->tx_video_frames < s_rtc_rate_state.tx_video_frames ||
+		rtc->rx_video_frames < s_rtc_rate_state.rx_video_frames ||
+		rtc->tx_audio_frames < s_rtc_rate_state.tx_audio_frames ||
+		rtc->rx_audio_frames < s_rtc_rate_state.rx_audio_frames ||
+		rtc->tx_video_bytes < s_rtc_rate_state.tx_video_bytes ||
+		rtc->rx_video_bytes < s_rtc_rate_state.rx_video_bytes;
 	if (!rtc->active_connection || !rtc->call_active) {
 		s_rtc_rate_state.tx_video_fps = 0;
+		s_rtc_rate_state.rx_video_fps = 0;
 		s_rtc_rate_state.tx_audio_fps = 0;
 		s_rtc_rate_state.rx_audio_fps = 0;
+		s_rtc_rate_state.tx_video_bitrate_kbps = 0;
+		s_rtc_rate_state.rx_video_bitrate_kbps = 0;
 		s_rtc_rate_state.tx_video_frames = rtc->tx_video_frames;
+		s_rtc_rate_state.rx_video_frames = rtc->rx_video_frames;
 		s_rtc_rate_state.tx_audio_frames = rtc->tx_audio_frames;
 		s_rtc_rate_state.rx_audio_frames = rtc->rx_audio_frames;
+		s_rtc_rate_state.tx_video_bytes = rtc->tx_video_bytes;
+		s_rtc_rate_state.rx_video_bytes = rtc->rx_video_bytes;
 		s_rtc_rate_state.last_sample_us = now_us;
-	} else if (s_rtc_rate_state.last_sample_us == 0 || now_us <= s_rtc_rate_state.last_sample_us) {
+	} else if (s_rtc_rate_state.last_sample_us == 0 ||
+		   now_us <= s_rtc_rate_state.last_sample_us ||
+		   counters_restarted) {
+		s_rtc_rate_state.tx_video_fps = 0;
+		s_rtc_rate_state.rx_video_fps = 0;
+		s_rtc_rate_state.tx_audio_fps = 0;
+		s_rtc_rate_state.rx_audio_fps = 0;
+		s_rtc_rate_state.tx_video_bitrate_kbps = 0;
+		s_rtc_rate_state.rx_video_bitrate_kbps = 0;
 		s_rtc_rate_state.tx_video_frames = rtc->tx_video_frames;
+		s_rtc_rate_state.rx_video_frames = rtc->rx_video_frames;
 		s_rtc_rate_state.tx_audio_frames = rtc->tx_audio_frames;
 		s_rtc_rate_state.rx_audio_frames = rtc->rx_audio_frames;
+		s_rtc_rate_state.tx_video_bytes = rtc->tx_video_bytes;
+		s_rtc_rate_state.rx_video_bytes = rtc->rx_video_bytes;
 		s_rtc_rate_state.last_sample_us = now_us;
 	} else {
 		uint64_t elapsed_us = (uint64_t)(now_us - s_rtc_rate_state.last_sample_us);
 		uint32_t tx_video_delta = rtc->tx_video_frames - s_rtc_rate_state.tx_video_frames;
+		uint32_t rx_video_delta = rtc->rx_video_frames - s_rtc_rate_state.rx_video_frames;
 		uint32_t tx_audio_delta = rtc->tx_audio_frames - s_rtc_rate_state.tx_audio_frames;
 		uint32_t rx_audio_delta = rtc->rx_audio_frames - s_rtc_rate_state.rx_audio_frames;
+		size_t tx_video_byte_delta =
+			rtc->tx_video_bytes - s_rtc_rate_state.tx_video_bytes;
+		size_t rx_video_byte_delta =
+			rtc->rx_video_bytes - s_rtc_rate_state.rx_video_bytes;
 
 		if (elapsed_us >= APP_RTC_RATE_WINDOW_US) {
 			s_rtc_rate_state.tx_video_fps = app_state_compute_frame_rate(tx_video_delta, elapsed_us);
+			s_rtc_rate_state.rx_video_fps = app_state_compute_frame_rate(rx_video_delta, elapsed_us);
 			s_rtc_rate_state.tx_audio_fps = app_state_compute_frame_rate(tx_audio_delta, elapsed_us);
 			s_rtc_rate_state.rx_audio_fps = app_state_compute_frame_rate(rx_audio_delta, elapsed_us);
+			s_rtc_rate_state.tx_video_bitrate_kbps =
+				app_state_compute_bitrate_kbps(tx_video_byte_delta, elapsed_us);
+			s_rtc_rate_state.rx_video_bitrate_kbps =
+				app_state_compute_bitrate_kbps(rx_video_byte_delta, elapsed_us);
 			s_rtc_rate_state.tx_video_frames = rtc->tx_video_frames;
+			s_rtc_rate_state.rx_video_frames = rtc->rx_video_frames;
 			s_rtc_rate_state.tx_audio_frames = rtc->tx_audio_frames;
 			s_rtc_rate_state.rx_audio_frames = rtc->rx_audio_frames;
+			s_rtc_rate_state.tx_video_bytes = rtc->tx_video_bytes;
+			s_rtc_rate_state.rx_video_bytes = rtc->rx_video_bytes;
 			s_rtc_rate_state.last_sample_us = now_us;
-		} else if (tx_video_delta > 0 || tx_audio_delta > 0 || rx_audio_delta > 0) {
+		} else if (tx_video_delta > 0 || rx_video_delta > 0 ||
+			   tx_audio_delta > 0 || rx_audio_delta > 0 ||
+			   tx_video_byte_delta > 0 || rx_video_byte_delta > 0) {
 			s_rtc_rate_state.tx_video_fps = app_state_compute_frame_rate(tx_video_delta, elapsed_us);
+			s_rtc_rate_state.rx_video_fps = app_state_compute_frame_rate(rx_video_delta, elapsed_us);
 			s_rtc_rate_state.tx_audio_fps = app_state_compute_frame_rate(tx_audio_delta, elapsed_us);
 			s_rtc_rate_state.rx_audio_fps = app_state_compute_frame_rate(rx_audio_delta, elapsed_us);
+			s_rtc_rate_state.tx_video_bitrate_kbps =
+				app_state_compute_bitrate_kbps(tx_video_byte_delta, elapsed_us);
+			s_rtc_rate_state.rx_video_bitrate_kbps =
+				app_state_compute_bitrate_kbps(rx_video_byte_delta, elapsed_us);
 		}
 	}
 
 	snapshot->tx_video_fps = s_rtc_rate_state.tx_video_fps;
+	snapshot->rx_video_fps = s_rtc_rate_state.rx_video_fps;
 	snapshot->tx_audio_fps = s_rtc_rate_state.tx_audio_fps;
 	snapshot->rx_audio_fps = s_rtc_rate_state.rx_audio_fps;
+	snapshot->tx_video_transport_bitrate_kbps =
+		s_rtc_rate_state.tx_video_bitrate_kbps;
+	snapshot->rx_video_transport_bitrate_kbps =
+		s_rtc_rate_state.rx_video_bitrate_kbps;
 	taskEXIT_CRITICAL(&s_rtc_rate_lock);
 }

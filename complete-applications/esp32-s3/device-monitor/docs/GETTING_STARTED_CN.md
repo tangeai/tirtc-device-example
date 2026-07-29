@@ -123,7 +123,7 @@ TiRTC 设备呼叫用于验证设备到设备的实时音频链路。普通设�
 
 本示例沿用 TiRTC 微信 VoIP example 的小程序体验链路：
 
-- 设备侧启动服务发现：`https://ep-open.tange-ai.com/services`
+- 设备侧启动服务发现：`http://ep-open.tangeopen.com/services`
 - 绑定/VoIP/AI/call 和 MQTT 的编译期地址仅作发现失败兜底；当前兜底 HTTPS 服务为 `https://mqtt-demo.tange-ai.com`，MQTT 为 `mqtts://mqtt-demo.tange-ai.com:8883`
 - 绑定流程写入 `device_id` / `device_key` 后，设备在线服务统一维护 MQTT 连接，微信 VoIP 只注册自己的业务消息监听。
 - 示例小程序 AppID：`wx27d4b2d7eb37eb58`

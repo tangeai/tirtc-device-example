@@ -24,6 +24,11 @@ typedef struct {
     uint32_t output_level;
     uint8_t speaker_volume_percent;
     uint8_t capture_gain_percent;
+    bool aec_active;
+    bool aec_reference_active;
+    uint32_t aec_process_frames;
+    uint64_t aec_process_us_total;
+    uint32_t aec_process_us_max;
 } audio_stats_t;
 
 typedef struct {

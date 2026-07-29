@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 
 #include "h264_file_source.h"
+#include "tirtc_app.h"
 
 static const char *TAG = "local_media";
 
@@ -29,10 +30,10 @@ static const char *TAG = "local_media";
 #define LOCAL_MEDIA_AUDIO_TASK_STACK (4 * 1024)
 #define LOCAL_MEDIA_TASK_PRIORITY 6
 #define LOCAL_MEDIA_TASK_CORE 1
-#define LOCAL_MEDIA_STOP_POLL_MS 10U
 
 static portMUX_TYPE s_media_lock = portMUX_INITIALIZER_UNLOCKED;
-static tirtc_conn_t s_media_conn;
+static tirtc_conn_t s_video_conn;
+static tirtc_conn_t s_audio_conn;
 static TaskHandle_t s_video_task;
 static TaskHandle_t s_audio_task;
 static uint8_t s_video_stream_id;
@@ -161,7 +162,8 @@ static BaseType_t create_media_task(TaskFunction_t task_func,
 #endif
 }
 
-static tirtc_conn_t current_connection(uint8_t *video_stream_id,
+static tirtc_conn_t current_connection(bool video,
+                                       uint8_t *video_stream_id,
                                        uint8_t *audio_stream_id,
                                        bool *restart_video,
                                        bool *restart_audio)
@@ -169,7 +171,23 @@ static tirtc_conn_t current_connection(uint8_t *video_stream_id,
     tirtc_conn_t conn = NULL;
 
     portENTER_CRITICAL(&s_media_lock);
-    conn = s_media_conn;
+    conn = video ? s_video_conn : s_audio_conn;
+    if (conn == NULL)
+    {
+        TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
+        if (video && s_video_task == current_task)
+        {
+            /*
+             * 先原子释放任务所有权，再退出循环。快速重订阅会看到 NULL 并创建
+             * 新任务，旧任务后续清理不会覆盖新句柄。
+             */
+            s_video_task = NULL;
+        }
+        else if (!video && s_audio_task == current_task)
+        {
+            s_audio_task = NULL;
+        }
+    }
     if (video_stream_id != NULL)
     {
         *video_stream_id = s_video_stream_id;
@@ -214,6 +232,7 @@ static void video_task_entry(void *arg)
     TickType_t last_wake = xTaskGetTickCount();
     uint32_t frame_index = 0;
     uint32_t media_ts_ms = 0;
+    bool waiting_for_key_frame = false;
     int ret = h264_file_source_open(LOCAL_MEDIA_VIDEO_PATH, &source);
 
     if (ret != H264_FILE_SOURCE_OK)
@@ -235,7 +254,7 @@ static void video_task_entry(void *arg)
         size_t length = 0;
         bool is_key_frame = false;
 
-        conn = current_connection(&stream_id, NULL, &restart_video, NULL);
+        conn = current_connection(true, &stream_id, NULL, &restart_video, NULL);
         if (conn == NULL)
         {
             break;
@@ -246,6 +265,7 @@ static void video_task_entry(void *arg)
             h264_file_source_reset(&source);
             frame_index = 0;
             media_ts_ms = 0;
+            waiting_for_key_frame = true;
             last_wake = xTaskGetTickCount();
             ESP_LOGI(TAG, "[TX][video] 收到关键帧请求，从 H264 文件头重新发送");
         }
@@ -268,6 +288,13 @@ static void video_task_entry(void *arg)
             continue;
         }
 
+        if (waiting_for_key_frame && !is_key_frame)
+        {
+            media_ts_ms += LOCAL_MEDIA_VIDEO_INTERVAL_MS;
+            vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(LOCAL_MEDIA_VIDEO_INTERVAL_MS));
+            continue;
+        }
+
         TIRTCFRAMEINFO frame = {
             .stream_id = stream_id,
             .media = TIRTC_VIDEO_H264,
@@ -277,15 +304,31 @@ static void video_task_entry(void *arg)
             .length = (uint32_t)length,
         };
 
+        if (!tirtc_connection_guard_lock(conn))
+        {
+            break;
+        }
+
         ret = TiRtcSendVideoStream(conn, &frame, (void *)data);
         frame_index++;
+        size_t send_buffer_used = 0;
+        if (ret >= 0 && (frame_index % LOCAL_MEDIA_VIDEO_LOG_FRAMES) == 0)
+        {
+            send_buffer_used = TiRtcGetSendBufferUsed(conn);
+        }
+        tirtc_connection_guard_unlock();
+
         media_ts_ms += LOCAL_MEDIA_VIDEO_INTERVAL_MS;
 
         if (ret == TIRTC_E_BUSY)
         {
+            waiting_for_key_frame = true;
+            h264_file_source_reset(&source);
             if ((frame_index % LOCAL_MEDIA_VIDEO_FPS) == 0)
             {
-                ESP_LOGW(TAG, "[TX][video] 发送缓冲忙：已丢帧，视频帧=%" PRIu32, frame_index);
+                ESP_LOGW(TAG,
+                         "[TX][video] 发送缓冲忙：丢弃后续非关键帧并从文件头恢复，视频帧=%" PRIu32,
+                         frame_index);
             }
         }
         else if (ret < 0)
@@ -305,7 +348,12 @@ static void video_task_entry(void *arg)
                      "[TX][video] 发送统计：视频帧=%" PRIu32 "，流ID=%u，发送缓冲=%zu字节",
                      frame_index,
                      stream_id,
-                     TiRtcGetSendBufferUsed(conn));
+                     send_buffer_used);
+        }
+
+        if (ret >= 0 && is_key_frame)
+        {
+            waiting_for_key_frame = false;
         }
 
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(LOCAL_MEDIA_VIDEO_INTERVAL_MS));
@@ -319,7 +367,6 @@ exit_task:
     {
         s_video_task = NULL;
     }
-    s_video_starting = false;
     portEXIT_CRITICAL(&s_media_lock);
 
     ESP_LOGI(TAG, "[TX][video] 本机 H264 发送任务已停止");
@@ -365,7 +412,7 @@ static void audio_task_entry(void *arg)
         uint32_t duration_ms = 0;
         bool restart_audio = false;
 
-        conn = current_connection(NULL, &stream_id, NULL, &restart_audio);
+        conn = current_connection(false, NULL, &stream_id, NULL, &restart_audio);
         if (conn == NULL)
         {
             break;
@@ -419,8 +466,20 @@ static void audio_task_entry(void *arg)
             .length = (uint32_t)bytes_read,
         };
 
+        if (!tirtc_connection_guard_lock(conn))
+        {
+            break;
+        }
+
         int ret = TiRtcSendAudioStream(conn, &frame, packet);
         packet_index++;
+        size_t send_buffer_used = 0;
+        if (ret >= 0 && (packet_index % LOCAL_MEDIA_AUDIO_LOG_PACKETS) == 0)
+        {
+            send_buffer_used = TiRtcGetSendBufferUsed(conn);
+        }
+        tirtc_connection_guard_unlock();
+
         media_ts_ms += duration_ms;
 
         if (ret == TIRTC_E_BUSY)
@@ -447,7 +506,7 @@ static void audio_task_entry(void *arg)
                      "[TX][audio] 发送统计：音频包=%" PRIu32 "，流ID=%u，发送缓冲=%zu字节",
                      packet_index,
                      stream_id,
-                     TiRtcGetSendBufferUsed(conn));
+                     send_buffer_used);
         }
 
         if (feof(fp))
@@ -475,7 +534,6 @@ exit_task:
     {
         s_audio_task = NULL;
     }
-    s_audio_starting = false;
     portEXIT_CRITICAL(&s_media_lock);
 
     ESP_LOGI(TAG, "[TX][audio] 本机 PCMA 发送任务已停止");
@@ -515,8 +573,8 @@ esp_err_t local_media_stream_start_video(tirtc_conn_t hconn, uint8_t stream_id)
     }
 
     portENTER_CRITICAL(&s_media_lock);
-    new_connection = (s_media_conn != hconn);
-    s_media_conn = hconn;
+    new_connection = (s_video_conn != hconn);
+    s_video_conn = hconn;
     s_video_stream_id = stream_id;
     if (new_connection)
     {
@@ -546,7 +604,7 @@ esp_err_t local_media_stream_start_video(tirtc_conn_t hconn, uint8_t stream_id)
 
         if (task_ret != pdPASS)
         {
-            local_media_stream_stop(hconn);
+            local_media_stream_stop_video(hconn, stream_id);
             ESP_LOGE(TAG, "创建 H264 发送任务失败");
             return ESP_ERR_NO_MEM;
         }
@@ -574,8 +632,8 @@ esp_err_t local_media_stream_start_audio(tirtc_conn_t hconn, uint8_t stream_id)
     }
 
     portENTER_CRITICAL(&s_media_lock);
-    new_connection = (s_media_conn != hconn);
-    s_media_conn = hconn;
+    new_connection = (s_audio_conn != hconn);
+    s_audio_conn = hconn;
     s_audio_stream_id = stream_id;
     if (new_connection)
     {
@@ -606,7 +664,7 @@ esp_err_t local_media_stream_start_audio(tirtc_conn_t hconn, uint8_t stream_id)
 
         if (task_ret != pdPASS)
         {
-            local_media_stream_stop(hconn);
+            local_media_stream_stop_audio(hconn, stream_id);
             ESP_LOGE(TAG, "创建 PCMA 发送任务失败");
             return ESP_ERR_NO_MEM;
         }
@@ -619,9 +677,33 @@ esp_err_t local_media_stream_start_audio(tirtc_conn_t hconn, uint8_t stream_id)
 void local_media_stream_request_key_frame(tirtc_conn_t hconn)
 {
     portENTER_CRITICAL(&s_media_lock);
-    if (hconn != NULL && hconn == s_media_conn)
+    if (hconn != NULL && hconn == s_video_conn)
     {
         s_video_restart_requested = true;
+    }
+    portEXIT_CRITICAL(&s_media_lock);
+}
+
+void local_media_stream_stop_video(tirtc_conn_t hconn, uint8_t stream_id)
+{
+    portENTER_CRITICAL(&s_media_lock);
+    if ((hconn == NULL || hconn == s_video_conn) &&
+        (hconn == NULL || stream_id == s_video_stream_id))
+    {
+        s_video_conn = NULL;
+        s_video_restart_requested = false;
+    }
+    portEXIT_CRITICAL(&s_media_lock);
+}
+
+void local_media_stream_stop_audio(tirtc_conn_t hconn, uint8_t stream_id)
+{
+    portENTER_CRITICAL(&s_media_lock);
+    if ((hconn == NULL || hconn == s_audio_conn) &&
+        (hconn == NULL || stream_id == s_audio_stream_id))
+    {
+        s_audio_conn = NULL;
+        s_audio_restart_requested = false;
     }
     portEXIT_CRITICAL(&s_media_lock);
 }
@@ -629,37 +711,15 @@ void local_media_stream_request_key_frame(tirtc_conn_t hconn)
 void local_media_stream_stop(tirtc_conn_t hconn)
 {
     portENTER_CRITICAL(&s_media_lock);
-    if (hconn == NULL || hconn == s_media_conn)
+    if (hconn == NULL || hconn == s_video_conn)
     {
-        s_media_conn = NULL;
+        s_video_conn = NULL;
         s_video_restart_requested = false;
+    }
+    if (hconn == NULL || hconn == s_audio_conn)
+    {
+        s_audio_conn = NULL;
         s_audio_restart_requested = false;
     }
     portEXIT_CRITICAL(&s_media_lock);
-}
-
-void local_media_stream_stop_and_wait(tirtc_conn_t hconn, uint32_t timeout_ms)
-{
-    uint32_t waited_ms = 0;
-
-    local_media_stream_stop(hconn);
-
-    while (waited_ms < timeout_ms)
-    {
-        bool running = false;
-
-        portENTER_CRITICAL(&s_media_lock);
-        running = (s_video_task != NULL || s_audio_task != NULL || s_video_starting || s_audio_starting);
-        portEXIT_CRITICAL(&s_media_lock);
-
-        if (!running)
-        {
-            return;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(LOCAL_MEDIA_STOP_POLL_MS));
-        waited_ms += LOCAL_MEDIA_STOP_POLL_MS;
-    }
-
-    ESP_LOGW(TAG, "等待本地测试音视频停止超时");
 }

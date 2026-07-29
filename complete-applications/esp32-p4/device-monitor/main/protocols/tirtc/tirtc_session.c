@@ -62,6 +62,16 @@ typedef enum {
 #define TIRTC_SESSION_HAS_CLIENT_ID_OPTION 0
 #endif
 
+#if defined(TIRTC_VERSION_MAJOR) && defined(TIRTC_VERSION_MINOR) && \
+    ((TIRTC_VERSION_MAJOR > 2) || (TIRTC_VERSION_MAJOR == 2 && TIRTC_VERSION_MINOR >= 3))
+#define TIRTC_SESSION_HAS_TGMP_BITRATE_CONTROL 1
+#else
+#define TIRTC_SESSION_HAS_TGMP_BITRATE_CONTROL 0
+#endif
+
+#define TIRTC_SESSION_BITRATE_EVENT_MIN_INTERVAL_US 500000ULL
+#define TIRTC_SESSION_BITRATE_EVENT_FAST_STEP_BPS   64000U
+
 #ifndef CONFIG_APP_RTC_WAIT_VIDEO_SUBSCRIBE_BEFORE_CAPTURE
 #define CONFIG_APP_RTC_WAIT_VIDEO_SUBSCRIBE_BEFORE_CAPTURE 0
 #endif
@@ -118,6 +128,7 @@ typedef struct {
 
 typedef struct {
     uint32_t generation;
+    tirtc_conn_t expected_conn;
     uint16_t width;
     uint16_t height;
     uint64_t pts_us;
@@ -129,6 +140,8 @@ typedef struct {
     uint8_t flags;
     bool has_frame_info;
     bool test_frame;
+    bool external_frame;
+    uint8_t external_stream_id;
 } tirtc_session_local_video_packet_t;
 
 typedef struct {
@@ -220,6 +233,9 @@ static bool s_builtin_video_capture_enabled;
 static tirtc_session_media_profile_t s_media_profile = TIRTC_SESSION_MEDIA_PROFILE_AV;
 static uint8_t s_local_video_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
 static uint8_t s_local_audio_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
+static tirtc_conn_t s_external_video_conn;
+static uint8_t s_external_video_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
+static bool s_external_video_active;
 static bool s_local_video_publish_forced;
 static bool s_local_audio_publish_forced;
 static bool s_test_video_publish_forced;
@@ -241,6 +257,10 @@ static bool s_remote_audio_first_packet_logged;
 static bool s_remote_message_first_packet_logged;
 static bool s_local_video_first_packet_logged;
 static bool s_local_audio_first_packet_logged;
+static bool s_local_h264_key_frame_queued;
+static bool s_local_h264_key_frame_published;
+static bool s_local_h264_recovery_pending;
+static uint32_t s_local_h264_recovery_count;
 static bool s_closing_conn_was_sdk_started;
 static char s_started_device_id[TIRTC_SESSION_DEVICE_ID_MAX_LEN];
 static char s_started_credential_hash[TIRTC_SESSION_SHA256_HEX_LEN];
@@ -250,9 +270,15 @@ static uint64_t s_test_video_retry_after_us;
 static uint64_t s_test_audio_retry_after_us;
 static uint8_t s_local_rgb[3] = {0x2E, 0x8F, 0x6B};
 static tirtc_session_peer_state_t s_last_peer_state;
+static bool s_video_bitrate_params_enabled;
+static tirtc_session_video_bitrate_params_t s_video_bitrate_params;
+static tirtc_conn_t s_last_video_bitrate_event_conn;
+static uint32_t s_last_video_bitrate_event_bps;
+static uint64_t s_last_video_bitrate_event_us;
 static tirtc_session_stats_t s_stats = {
     .local_video_stream_id = TIRTC_SESSION_INVALID_STREAM_ID,
     .local_audio_stream_id = TIRTC_SESSION_INVALID_STREAM_ID,
+    .send_buffer_limit = TIRTC_SESSION_MAX_SEND_BUFFER,
 };
 static tirtc_session_observer_slot_t s_observers[TIRTC_SESSION_OBSERVER_MAX];
 static uint8_t *s_local_video_tx_buffers[TIRTC_SESSION_VIDEO_TX_BUFFER_POOL_SIZE];
@@ -337,7 +363,6 @@ static void tirtc_session_set_last_event_locked(const char *event_text);
 static void tirtc_session_mark_local_video_requested_locked(void);
 static void tirtc_session_reset_call_state_locked(void);
 static bool tirtc_session_should_defer_audio_for_local_video_locked(void);
-static bool tirtc_session_should_defer_audio_for_local_video(void);
 static bool tirtc_session_should_prepare_playback_after_bootstrap(void);
 static void tirtc_session_build_local_peer_state_locked(tirtc_session_peer_state_t *state);
 static tirtc_session_state_t tirtc_session_compute_state_locked(void);
@@ -351,6 +376,8 @@ static void tirtc_session_free_local_video_packet(tirtc_session_local_video_pack
 static void tirtc_session_free_local_audio_packet(tirtc_session_local_audio_packet_t *packet);
 static void tirtc_session_flush_local_video_tx_queue(void);
 static void tirtc_session_flush_local_audio_tx_queue(void);
+static void tirtc_session_recover_local_h264_stream(const char *reason,
+                                                     bool network_backpressure);
 static void tirtc_session_trim_local_audio_tx_queue(UBaseType_t max_packets);
 static esp_err_t tirtc_session_acquire_local_video_buffer_slot(uint8_t *slot_out);
 static void tirtc_session_release_local_video_buffer_slot(uint8_t slot);
@@ -424,9 +451,17 @@ static void tirtc_session_on_unsubscribe_video(tirtc_conn_t hconn, uint8_t strea
 static int tirtc_session_on_subscribe_audio(tirtc_conn_t hconn, uint8_t stream_id);
 static void tirtc_session_on_unsubscribe_audio(tirtc_conn_t hconn, uint8_t stream_id);
 static void tirtc_session_on_request_key_frame(tirtc_conn_t hconn, uint8_t stream_id);
+#if TIRTC_SESSION_HAS_TGMP_BITRATE_CONTROL
+static void tirtc_session_on_video_bitrate_required(tirtc_conn_t hconn,
+                                                    uint8_t stream_id,
+                                                    uint32_t target_bitrate_bps);
+#endif
 static bool tirtc_session_notify_command(tirtc_conn_t conn, uint32_t cmdw, const void *data, uint32_t data_len);
 static void tirtc_session_notify_connection_error(tirtc_conn_t conn, int error);
 static void tirtc_session_notify_disconnected(tirtc_conn_t conn);
+static void tirtc_session_notify_video_bitrate_required(tirtc_conn_t conn,
+                                                        uint8_t stream_id,
+                                                        uint32_t target_bitrate_bps);
 static void tirtc_session_on_external_whip_connect_result(int error, tirtc_conn_t hconn, void *user_data);
 static bool tirtc_session_should_tolerate_invalid_handle(tirtc_conn_t conn, uint64_t *conn_age_us);
 bool tirtc_session_should_retry_message_stream_after_invalid_handle(tirtc_conn_t conn, const char *operation);
@@ -450,6 +485,9 @@ static const TIRTCCALLBACKS s_tirtc_callbacks = {
     .on_unsubscribe_video = tirtc_session_on_unsubscribe_video,
     .on_subscribe_audio = tirtc_session_on_subscribe_audio,
     .on_unsubscribe_audio = tirtc_session_on_unsubscribe_audio,
+#if TIRTC_SESSION_HAS_TGMP_BITRATE_CONTROL
+    .on_video_bitrate_required = tirtc_session_on_video_bitrate_required,
+#endif
 };
 
 static bool tirtc_session_has_media_bridge(void)
@@ -459,9 +497,11 @@ static bool tirtc_session_has_media_bridge(void)
            s_media_ops.set_capture_enabled != NULL ||
            s_media_ops.set_video_capture_enabled != NULL ||
            s_media_ops.request_video_key_frame != NULL ||
+           s_media_ops.request_video_stream_start_key_frame != NULL ||
            s_media_ops.prepare_playback_path != NULL ||
            s_media_ops.submit_remote_audio != NULL ||
            s_media_ops.submit_remote_video != NULL ||
+           s_media_ops.remote_video_requires_key_frame != NULL ||
            s_media_ops.flush != NULL;
 }
 
@@ -549,6 +589,23 @@ static void tirtc_session_notify_disconnected(tirtc_conn_t conn)
     }
 }
 
+static void tirtc_session_notify_video_bitrate_required(tirtc_conn_t conn,
+                                                        uint8_t stream_id,
+                                                        uint32_t target_bitrate_bps)
+{
+    tirtc_session_observer_slot_t observers[TIRTC_SESSION_OBSERVER_MAX] = {0};
+    size_t count = tirtc_session_copy_observers(observers, TIRTC_SESSION_OBSERVER_MAX);
+
+    for (size_t index = 0; index < count; ++index) {
+        if (observers[index].observer.on_video_bitrate_required != NULL) {
+            observers[index].observer.on_video_bitrate_required(conn,
+                                                                stream_id,
+                                                                target_bitrate_bps,
+                                                                observers[index].ctx);
+        }
+    }
+}
+
 static void tirtc_session_notify_call_active(bool active)
 {
     tirtc_session_observer_slot_t observers[TIRTC_SESSION_OBSERVER_MAX] = {0};
@@ -618,6 +675,15 @@ static void tirtc_session_media_request_video_key_frame(void)
     }
 }
 
+static void tirtc_session_media_request_video_stream_start_key_frame(void)
+{
+    if (s_media_ops.request_video_stream_start_key_frame != NULL) {
+        s_media_ops.request_video_stream_start_key_frame(s_media_ctx);
+        return;
+    }
+    tirtc_session_media_request_video_key_frame();
+}
+
 static esp_err_t tirtc_session_media_prepare_playback_path(void)
 {
     ESP_RETURN_ON_FALSE(s_media_ops.prepare_playback_path != NULL,
@@ -632,6 +698,7 @@ static esp_err_t tirtc_session_media_submit_remote_audio(uint8_t media,
                                                          uint8_t flags,
                                                          const uint8_t *data,
                                                          size_t data_len,
+                                                         uint32_t pts,
                                                          size_t *playback_data_len)
 {
     ESP_RETURN_ON_FALSE(s_media_ops.submit_remote_audio != NULL,
@@ -639,7 +706,13 @@ static esp_err_t tirtc_session_media_submit_remote_audio(uint8_t media,
                         TAG,
                         "rtc media audio sink not configured");
 
-    return s_media_ops.submit_remote_audio(media, flags, data, data_len, playback_data_len, s_media_ctx);
+    return s_media_ops.submit_remote_audio(media,
+                                           flags,
+                                           data,
+                                           data_len,
+                                           pts,
+                                           playback_data_len,
+                                           s_media_ctx);
 }
 
 static esp_err_t tirtc_session_media_submit_remote_video(uint8_t media,
@@ -654,6 +727,14 @@ static esp_err_t tirtc_session_media_submit_remote_video(uint8_t media,
                         "rtc media video sink not configured");
 
     return s_media_ops.submit_remote_video(media, flags, data, data_len, pts, s_media_ctx);
+}
+
+static bool tirtc_session_media_remote_video_requires_key_frame(void)
+{
+    if (s_media_ops.remote_video_requires_key_frame == NULL) {
+        return true;
+    }
+    return s_media_ops.remote_video_requires_key_frame(s_media_ctx);
 }
 
 static void tirtc_session_media_flush(void)
@@ -729,6 +810,7 @@ static void tirtc_session_init_stats(void)
     memset(&s_stats, 0, sizeof(s_stats));
     s_stats.local_video_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
     s_stats.local_audio_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
+    s_stats.send_buffer_limit = TIRTC_SESSION_MAX_SEND_BUFFER;
     tirtc_session_set_last_event_locked("init");
     tirtc_session_sync_stats_locked();
     taskEXIT_CRITICAL(&s_rtc_lock);
@@ -896,10 +978,6 @@ static esp_err_t tirtc_session_create_local_video_tx_resources(void)
                         TAG,
                         "rtc local video queue alloc failed");
 
-    ESP_RETURN_ON_ERROR(tirtc_session_prealloc_local_video_tx_pool(),
-                        TAG,
-                        "rtc local video tx pool prealloc failed");
-
     if (s_local_video_tx_free_queue == NULL) {
         s_local_video_tx_free_queue = xQueueCreateWithCaps(TIRTC_SESSION_VIDEO_TX_BUFFER_POOL_SIZE,
                                                            sizeof(uint8_t),
@@ -947,6 +1025,22 @@ static esp_err_t tirtc_session_prealloc_local_audio_tx_pool(void)
     return ESP_OK;
 }
 
+esp_err_t tirtc_session_prewarm_media_pools(void)
+{
+    /*
+     * These are payload-only pools. Reserve them from PSRAM before network,
+     * TLS, UI and business tasks start so media startup never has to compete
+     * for multi-megabyte blocks at connection time.
+     */
+    ESP_RETURN_ON_ERROR(tirtc_session_prealloc_local_video_tx_pool(),
+                        TAG,
+                        "rtc video PSRAM pool prewarm failed");
+    ESP_RETURN_ON_ERROR(tirtc_session_prealloc_local_audio_tx_pool(),
+                        TAG,
+                        "rtc audio PSRAM pool prewarm failed");
+    return ESP_OK;
+}
+
 static esp_err_t tirtc_session_create_local_audio_tx_resources(void)
 {
     ESP_RETURN_ON_ERROR(tirtc_session_create_queue(&s_local_audio_tx_queue,
@@ -955,10 +1049,6 @@ static esp_err_t tirtc_session_create_local_audio_tx_resources(void)
                                                    APP_QUEUE_CAPS_CONTROL),
                         TAG,
                         "rtc local audio queue alloc failed");
-
-    ESP_RETURN_ON_ERROR(tirtc_session_prealloc_local_audio_tx_pool(),
-                        TAG,
-                        "rtc local audio tx pool prealloc failed");
 
     if (s_local_audio_tx_free_queue == NULL) {
         s_local_audio_tx_free_queue = xQueueCreateWithCaps(TIRTC_SESSION_AUDIO_TX_BUFFER_POOL_SIZE,
@@ -1054,6 +1144,9 @@ static esp_err_t tirtc_session_create_runtime_resources(void)
 {
     ESP_RETURN_ON_ERROR(tirtc_session_create_event_resources(), TAG, "rtc event resources init failed");
     ESP_RETURN_ON_ERROR(tirtc_session_create_sdk_api_lock(), TAG, "rtc sdk api lock init failed");
+    ESP_RETURN_ON_ERROR(tirtc_session_prewarm_media_pools(),
+                        TAG,
+                        "rtc PSRAM media pools init failed");
     ESP_RETURN_ON_ERROR(tirtc_session_create_local_video_tx_resources(),
                         TAG,
                         "rtc local video resources init failed");
@@ -1608,6 +1701,13 @@ static void tirtc_session_reset_call_state_locked(void)
     s_remote_audio_first_packet_logged = false;
     s_remote_message_first_packet_logged = false;
     s_local_video_first_packet_logged = false;
+    s_local_h264_key_frame_queued = false;
+    s_local_h264_key_frame_published = false;
+    s_local_h264_recovery_pending = false;
+    s_local_h264_recovery_count = 0;
+    s_external_video_conn = NULL;
+    s_external_video_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
+    s_external_video_active = false;
     s_last_remote_audio_rx_log_tick = 0;
     s_last_remote_message_rx_log_tick = 0;
     s_last_remote_key_frame_request_tick = 0;
@@ -1646,8 +1746,12 @@ static bool tirtc_session_is_media_bootstrap_ready_locked(void)
 
 static bool tirtc_session_media_profile_allows_remote_video_locked(void)
 {
-    return s_remote_video_receive_enabled &&
-           s_media_profile != TIRTC_SESSION_MEDIA_PROFILE_EXTERNAL_AUDIO;
+    /*
+     * The media profile selects microphone ownership. It must not suppress
+     * encoded-video downlink for an external-audio full-duplex session such as
+     * WeChat.
+     */
+    return s_remote_video_receive_enabled;
 }
 
 static bool tirtc_session_media_profile_uses_builtin_capture_locked(void)
@@ -2427,25 +2531,11 @@ static bool tirtc_session_should_defer_audio_for_local_video_locked(void)
 #endif
 }
 
-static bool tirtc_session_should_defer_audio_for_local_video(void)
-{
-    bool defer_audio = false;
-
-    taskENTER_CRITICAL(&s_rtc_lock);
-    defer_audio = tirtc_session_should_defer_audio_for_local_video_locked();
-    taskEXIT_CRITICAL(&s_rtc_lock);
-    return defer_audio;
-}
-
 static bool tirtc_session_should_prepare_playback_after_bootstrap(void)
 {
     media_governor_rtc_policy_t policy = {0};
     media_governor_get_rtc_policy(&policy);
-    if (!policy.prepare_playback_while_video_first &&
-        tirtc_session_should_defer_audio_for_local_video()) {
-        return false;
-    }
-    return true;
+    return policy.prepare_playback_while_video_first;
 }
 
 static void tirtc_session_retry_remote_media_request_after_delay(bool retry_video,
@@ -2498,7 +2588,7 @@ void tirtc_session_run_media_bootstrap(void)
     tirtc_session_apply_local_media_policy();
     tirtc_session_request_remote_media();
     if (!tirtc_session_should_prepare_playback_after_bootstrap()) {
-        ESP_LOGI(TAG, "rtc audio bootstrap deferred: video-first profile");
+        APP_LOG_DETAIL(TAG, "rtc playback path deferred until first remote audio packet");
         return;
     }
     if (tirtc_session_media_prepare_playback_path() != ESP_OK) {
@@ -2821,14 +2911,16 @@ static void tirtc_session_complete_call_response_internal(bool accepted, bool de
     bool should_bootstrap = false;
     bool was_call_active = false;
     bool was_media_deferred = false;
-    bool call_active_changed = false;
+    bool media_active_changed = false;
+    bool media_active = false;
 
     taskENTER_CRITICAL(&s_rtc_lock);
     was_call_active = s_call_active;
     was_media_deferred = s_call_media_deferred;
     s_call_active = accepted;
     s_call_media_deferred = accepted && defer_media;
-    call_active_changed = was_call_active != s_call_active;
+    media_active = s_call_active && !s_call_media_deferred;
+    media_active_changed = (was_call_active && !was_media_deferred) != media_active;
     s_incoming_call_pending = false;
     s_pending_call_cmdw = 0;
     tirtc_session_sync_stats_locked();
@@ -2837,8 +2929,13 @@ static void tirtc_session_complete_call_response_internal(bool accepted, bool de
                        !s_start_in_progress && !s_stop_in_progress && s_closing_conn == NULL;
     taskEXIT_CRITICAL(&s_rtc_lock);
 
-    if (call_active_changed) {
-        tirtc_session_notify_call_active(accepted);
+    /*
+     * on_call_active owns application media resources. A deferred device call
+     * has an accepted transport but must not start capture/render until the
+     * room confirmation command promotes it to an active media session.
+     */
+    if (media_active_changed) {
+        tirtc_session_notify_call_active(media_active);
     }
     if (should_bootstrap && !tirtc_session_is_test_media_active()) {
         tirtc_session_schedule_media_bootstrap(was_media_deferred ?
@@ -3362,6 +3459,16 @@ bool tirtc_session_try_accept_connection(tirtc_conn_t conn)
     } else if (s_active_conn == NULL) {
         s_active_conn = conn;
         s_active_conn_accepted_at_us = esp_timer_get_time();
+        /*
+         * H264 stream-start state is connection-scoped. The cumulative media
+         * counters intentionally survive a call, but they must never make a
+         * new peer accept a delta frame before its first IDR.
+         */
+        s_local_video_first_packet_logged = false;
+        s_local_h264_key_frame_queued = false;
+        s_local_h264_key_frame_published = false;
+        s_local_h264_recovery_pending = false;
+        s_local_h264_recovery_count = 0;
         s_active_conn_auto_media = s_next_connection_auto_media;
         s_active_conn_defer_media = s_next_connection_defer_media;
         s_next_connection_auto_media = TIRTC_SESSION_DEFAULT_AUTO_MEDIA;
@@ -3454,7 +3561,7 @@ esp_err_t tirtc_session_track_external_connection(tirtc_conn_t conn, bool auto_m
     tirtc_session_bind_connection_user_data(conn);
 
     if (!auto_media) {
-        ESP_LOGI(TAG, "external connection uses external media owner: hconn=%p", conn);
+        APP_LOG_DETAIL(TAG, "external connection uses external media owner: hconn=%p", conn);
     }
 
     tirtc_session_event_t rtc_event = {
@@ -3477,17 +3584,28 @@ void tirtc_session_update_local_video_subscription(tirtc_conn_t conn, uint8_t st
 {
     uint8_t normalized_stream_id = tirtc_session_normalize_local_video_stream_id(stream_id);
     bool request_key_frame = false;
+    bool stream_start_key_frame = false;
+    bool flush_video_queue = false;
 
     taskENTER_CRITICAL(&s_rtc_lock);
     if (conn == s_active_conn && s_sdk_started && !s_start_in_progress && !s_stop_in_progress &&
         s_closing_conn == NULL) {
         if (subscribed) {
+            bool new_subscription = !s_peer_wants_video ||
+                                    s_local_video_stream_id != normalized_stream_id;
             s_local_video_stream_id = normalized_stream_id;
             s_peer_wants_video = true;
             s_peer_video_control_seen = true;
             tirtc_session_mark_local_video_requested_locked();
             s_local_video_publish_forced = false;
             s_test_video_publish_forced = false;
+            if (new_subscription) {
+                s_local_h264_key_frame_queued = false;
+                s_local_h264_key_frame_published = false;
+                s_local_h264_recovery_pending = false;
+                flush_video_queue = true;
+                stream_start_key_frame = true;
+            }
             tirtc_session_sync_stats_locked();
             request_key_frame = true;
         } else if (s_local_video_stream_id == normalized_stream_id) {
@@ -3496,12 +3614,21 @@ void tirtc_session_update_local_video_subscription(tirtc_conn_t conn, uint8_t st
             s_peer_video_control_seen = true;
             s_local_video_publish_forced = false;
             s_test_video_publish_forced = false;
+            s_local_h264_key_frame_queued = false;
+            s_local_h264_key_frame_published = false;
+            s_local_h264_recovery_pending = false;
+            flush_video_queue = true;
             tirtc_session_sync_stats_locked();
         }
     }
     taskEXIT_CRITICAL(&s_rtc_lock);
 
-    if (request_key_frame) {
+    if (flush_video_queue) {
+        tirtc_session_flush_local_video_tx_queue();
+    }
+    if (stream_start_key_frame) {
+        tirtc_session_media_request_video_stream_start_key_frame();
+    } else if (request_key_frame) {
         tirtc_session_media_request_video_key_frame();
     }
 }
@@ -3540,12 +3667,12 @@ static bool tirtc_session_begin_connection_shutdown(tirtc_conn_t hconn,
     bool tracked = false;
     bool newly_detached = false;
     bool sdk_started = false;
-    bool call_was_active = false;
+    bool call_media_was_active = false;
 
     taskENTER_CRITICAL(&s_rtc_lock);
     sdk_started = s_sdk_started;
     if (hconn != NULL && hconn == s_active_conn) {
-        call_was_active = s_call_active;
+        call_media_was_active = s_call_active && !s_call_media_deferred;
         s_active_conn = NULL;
         s_active_conn_accepted_at_us = 0U;
         s_active_conn_auto_media = TIRTC_SESSION_DEFAULT_AUTO_MEDIA;
@@ -3592,7 +3719,7 @@ static bool tirtc_session_begin_connection_shutdown(tirtc_conn_t hconn,
         tirtc_session_flush_local_audio_tx_queue();
         tirtc_session_media_flush();
     }
-    if (newly_detached && call_was_active) {
+    if (newly_detached && call_media_was_active) {
         tirtc_session_notify_call_active(false);
     }
 
@@ -3655,6 +3782,30 @@ static bool tirtc_session_is_ready_to_send_video(tirtc_conn_t *conn, uint8_t *st
     if (ready) {
         *conn = s_active_conn;
         *stream_id = tirtc_session_get_effective_local_video_stream_id_locked();
+    }
+    taskEXIT_CRITICAL(&s_rtc_lock);
+    return ready;
+}
+
+static bool tirtc_session_is_ready_to_send_external_video(tirtc_conn_t expected_conn,
+                                                          uint8_t expected_stream_id,
+                                                          tirtc_conn_t *conn,
+                                                          uint8_t *stream_id)
+{
+    bool ready = false;
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    ready = expected_conn != NULL &&
+            expected_stream_id != TIRTC_SESSION_INVALID_STREAM_ID &&
+            s_sdk_started && !s_start_in_progress && !s_stop_in_progress &&
+            s_closing_conn == NULL &&
+            s_active_conn == expected_conn &&
+            s_external_video_active &&
+            s_external_video_conn == expected_conn &&
+            s_external_video_stream_id == expected_stream_id;
+    if (ready) {
+        *conn = expected_conn;
+        *stream_id = expected_stream_id;
     }
     taskEXIT_CRITICAL(&s_rtc_lock);
     return ready;
@@ -3812,9 +3963,37 @@ static bool tirtc_session_local_video_stream_started(void)
     bool started = false;
 
     taskENTER_CRITICAL(&s_rtc_lock);
-    started = s_stats.tx_video_frames > 0U;
+    started = s_local_h264_key_frame_queued ||
+              s_local_h264_key_frame_published;
     taskEXIT_CRITICAL(&s_rtc_lock);
     return started;
+}
+
+static bool tirtc_session_local_h264_key_frame_published(void)
+{
+    bool published = false;
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    published = s_local_h264_key_frame_published;
+    taskEXIT_CRITICAL(&s_rtc_lock);
+    return published;
+}
+
+static void tirtc_session_mark_local_h264_key_frame_queued(void)
+{
+    taskENTER_CRITICAL(&s_rtc_lock);
+    s_local_h264_key_frame_queued = true;
+    s_local_h264_recovery_pending = false;
+    taskEXIT_CRITICAL(&s_rtc_lock);
+}
+
+static void tirtc_session_mark_local_h264_key_frame_published(void)
+{
+    taskENTER_CRITICAL(&s_rtc_lock);
+    s_local_h264_key_frame_queued = false;
+    s_local_h264_key_frame_published = true;
+    s_local_h264_recovery_pending = false;
+    taskEXIT_CRITICAL(&s_rtc_lock);
 }
 
 static void tirtc_session_trim_local_video_tx_queue(UBaseType_t max_packets)
@@ -3974,15 +4153,21 @@ static esp_err_t tirtc_session_enqueue_local_video_packet(const uint8_t *data,
                                                          uint8_t media,
                                                          uint8_t flags,
                                                          const TIRTCFRAMEINFO *frame_info,
-                                                         bool test_frame)
+                                                         bool test_frame,
+                                                         bool external_frame,
+                                                         tirtc_conn_t expected_conn,
+                                                         uint8_t external_stream_id)
 {
     const uint8_t effective_media = frame_info != NULL ? frame_info->media : media;
     const uint8_t effective_flags = frame_info != NULL ? frame_info->flags : flags;
-    const bool first_h264_key = effective_media == TIRTC_VIDEO_H264 &&
+    const bool local_h264 = !test_frame && effective_media == TIRTC_VIDEO_H264;
+    const bool h264_key_frame = local_h264 &&
                                 (effective_flags & TIRTC_FRAME_FLAG_KEY_FRAME) != 0;
     bool video_stream_started = false;
+    bool arm_initial_h264_key = false;
     tirtc_session_local_video_packet_t packet = {
         .generation = tirtc_session_get_local_video_tx_generation(),
+        .expected_conn = expected_conn,
         .width = width,
         .height = height,
         .pts_us = pts_us,
@@ -3992,11 +4177,16 @@ static esp_err_t tirtc_session_enqueue_local_video_packet(const uint8_t *data,
         .flags = flags,
         .has_frame_info = frame_info != NULL,
         .test_frame = test_frame,
+        .external_frame = external_frame,
+        .external_stream_id = external_stream_id,
     };
     uint8_t buffer_slot = TIRTC_SESSION_VIDEO_TX_BUFFER_SLOT_INVALID;
     esp_err_t slot_ret = ESP_OK;
     size_t old_slot_capacity = 0;
 
+    if (test_frame && external_frame) {
+        return ESP_ERR_INVALID_ARG;
+    }
     if (s_local_video_tx_queue == NULL || s_local_video_tx_free_queue == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -4005,20 +4195,25 @@ static esp_err_t tirtc_session_enqueue_local_video_packet(const uint8_t *data,
         video_stream_started = tirtc_session_local_video_stream_started();
     }
 
-    if (!test_frame && effective_media == TIRTC_VIDEO_H264 && !video_stream_started) {
-        if (!first_h264_key) {
+    if (local_h264 && !video_stream_started) {
+        if (!h264_key_frame) {
             return ESP_ERR_INVALID_STATE;
         }
         tirtc_session_flush_local_video_tx_queue();
         packet.generation = tirtc_session_get_local_video_tx_generation();
+        arm_initial_h264_key = true;
     }
 
-    if (!test_frame && video_stream_started) {
+    if (!test_frame && !local_h264) {
         tirtc_session_trim_local_video_tx_queue(TIRTC_SESSION_VIDEO_TX_TARGET_BACKLOG);
     }
 
     slot_ret = tirtc_session_acquire_local_video_buffer_slot(&buffer_slot);
     if (slot_ret != ESP_OK) {
+        if (local_h264) {
+            tirtc_session_recover_local_h264_stream("tx pool exhausted", true);
+            return slot_ret;
+        }
         tirtc_session_drop_oldest_local_video_packet();
         slot_ret = tirtc_session_acquire_local_video_buffer_slot(&buffer_slot);
         if (slot_ret != ESP_OK) {
@@ -4030,6 +4225,9 @@ static esp_err_t tirtc_session_enqueue_local_video_packet(const uint8_t *data,
     slot_ret = tirtc_session_ensure_local_video_buffer_capacity(buffer_slot, data_len);
     if (slot_ret != ESP_OK) {
         tirtc_session_release_local_video_buffer_slot(buffer_slot);
+        if (local_h264) {
+            tirtc_session_recover_local_h264_stream("tx slot resize failed", false);
+        }
         return slot_ret;
     }
 
@@ -4043,10 +4241,24 @@ static esp_err_t tirtc_session_enqueue_local_video_packet(const uint8_t *data,
                                                 data_len,
                                                 s_local_video_tx_buffer_capacities[buffer_slot] != old_slot_capacity);
 
+    if (arm_initial_h264_key) {
+        /*
+         * Publish the queued state before xQueueSend. The TX task can run as
+         * soon as the item enters the queue and must not race a later flag
+         * update that would put the stream back into WAIT_KEY_FRAME.
+         */
+        tirtc_session_mark_local_h264_key_frame_queued();
+    }
     if (xQueueSend(s_local_video_tx_queue, &packet, 0) == pdTRUE) {
         memset(&packet, 0, sizeof(packet));
         packet.buffer_slot = TIRTC_SESSION_VIDEO_TX_BUFFER_SLOT_INVALID;
         return ESP_OK;
+    }
+
+    if (local_h264) {
+        tirtc_session_free_local_video_packet(&packet);
+        tirtc_session_recover_local_h264_stream("tx queue full", true);
+        return ESP_ERR_TIMEOUT;
     }
 
     tirtc_session_drop_oldest_local_video_packet();
@@ -4127,6 +4339,45 @@ static void tirtc_session_flush_local_video_tx_queue(void)
     while (s_local_video_tx_queue != NULL && xQueueReceive(s_local_video_tx_queue, &packet, 0) == pdTRUE) {
         tirtc_session_free_local_video_packet(&packet);
     }
+}
+
+static void tirtc_session_recover_local_h264_stream(const char *reason,
+                                                     bool network_backpressure)
+{
+    bool start_recovery = false;
+    uint32_t recovery_count = 0;
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    s_local_h264_key_frame_queued = false;
+    s_local_h264_key_frame_published = false;
+    if (!s_local_h264_recovery_pending) {
+        s_local_h264_recovery_pending = true;
+        s_local_h264_recovery_count++;
+        recovery_count = s_local_h264_recovery_count;
+        start_recovery = true;
+    }
+    taskEXIT_CRITICAL(&s_rtc_lock);
+
+    if (!start_recovery) {
+        return;
+    }
+
+    /*
+     * Once any encoded H264 frame is lost, later P-frames may reference data
+     * the decoder never received. Drop the remaining delta chain and resume
+     * only from a freshly requested IDR.
+     */
+    tirtc_session_flush_local_video_tx_queue();
+    tirtc_session_note_event("h264 recovery");
+    if (network_backpressure) {
+        media_governor_note_network_backpressure();
+    }
+    APP_LOG_DETAIL(TAG,
+                   "local H264 continuity recovery: reason=%s count=%lu backpressure=%d",
+                   reason != NULL ? reason : "unspecified",
+                   (unsigned long)recovery_count,
+                   network_backpressure ? 1 : 0);
+    tirtc_session_media_request_video_key_frame();
 }
 
 static void tirtc_session_flush_local_audio_tx_queue(void)
@@ -4322,12 +4573,19 @@ static esp_err_t tirtc_session_copy_payload(const void *data, size_t data_len, u
 static void tirtc_session_normalize_service_endpoint(tirtc_session_config_t *config)
 {
     const char *sdk_version = TiRtcGetVersion();
+    bool requires_http_endpoint = false;
 
     if (config == NULL || strncmp(config->service_endpoint, "https://", 8) != 0) {
         return;
     }
-    if (sdk_version == NULL ||
-        (strcmp(sdk_version, "v2.2.0") != 0 && strcmp(sdk_version, "2.2.0") != 0)) {
+    if (sdk_version != NULL) {
+        requires_http_endpoint =
+            strcmp(sdk_version, "v2.2.0") == 0 ||
+            strcmp(sdk_version, "2.2.0") == 0 ||
+            strcmp(sdk_version, "v2.3.0") == 0 ||
+            strcmp(sdk_version, "2.3.0") == 0;
+    }
+    if (!requires_http_endpoint) {
         return;
     }
 
@@ -4337,7 +4595,9 @@ static void tirtc_session_normalize_service_endpoint(tirtc_session_config_t *con
                            "http://%s",
                            config->service_endpoint + 8);
     if (written <= 0 || written >= (int)sizeof(compatible_endpoint)) {
-        ESP_LOGW(TAG, "rtc sdk v2.2.0 endpoint compatibility conversion failed");
+        ESP_LOGW(TAG,
+                 "rtc sdk %s endpoint compatibility conversion failed",
+                 sdk_version);
         return;
     }
 
@@ -4370,6 +4630,7 @@ static esp_err_t tirtc_session_prepare_sdk_with_lock(void)
 {
     int option_ret = 0;
     uint32_t max_send_buffer = TIRTC_SESSION_MAX_SEND_BUFFER;
+    int connect_cache_enabled = TIRTC_SESSION_CONNECT_CACHE_ENABLE;
 
     if (s_sdk_initialized) {
         return ESP_OK;
@@ -4394,6 +4655,23 @@ static esp_err_t tirtc_session_prepare_sdk_with_lock(void)
                    "rtc sdk send buffer configured: %u bytes",
                    (unsigned)max_send_buffer);
 
+    option_ret = TiRtcSetOption(TIRTC_OPT_CONNECT_CACHE,
+                                &connect_cache_enabled,
+                                (uint32_t)sizeof(connect_cache_enabled));
+    if (option_ret != 0) {
+        tirtc_session_set_last_error(option_ret);
+        tirtc_session_note_event("set connect cache failed");
+        ESP_LOGE(TAG,
+                 "TiRtcSetOption(CONNECT_CACHE) failed: %s (%d)",
+                 TiRtcGetErrorStr(option_ret),
+                 option_ret);
+        tirtc_session_update_state(TIRTC_SESSION_STATE_ERROR);
+        return ESP_FAIL;
+    }
+    APP_LOG_DETAIL(TAG,
+                   "rtc sdk connect cache configured: enabled=%d",
+                   connect_cache_enabled);
+
     if (s_config.service_endpoint[0] != '\0') {
         option_ret = TiRtcSetOption(TIRTC_OPT_SERVICE_ENDPOINT,
                                     s_config.service_endpoint,
@@ -4416,6 +4694,14 @@ static esp_err_t tirtc_session_prepare_sdk_with_lock(void)
         tirtc_session_update_state(TIRTC_SESSION_STATE_ERROR);
         return ESP_FAIL;
     }
+    const char *sdk_version = TiRtcGetVersion();
+    const char *sdk_build_info = TiRtcGetBuildInfo();
+    ESP_LOGI(TAG,
+             "rtc sdk loaded: version=%s",
+             sdk_version != NULL ? sdk_version : "unknown");
+    APP_LOG_DETAIL(TAG,
+                   "rtc sdk build: %s",
+                   sdk_build_info != NULL ? sdk_build_info : "unknown");
     APP_LOG_DETAIL(TAG, "rtc sdk init stage: TiRtcInit done");
 
     taskENTER_CRITICAL(&s_rtc_lock);
@@ -4827,9 +5113,11 @@ static esp_err_t tirtc_session_request_remote_video(tirtc_conn_t conn)
     }
 
     ESP_LOGD(TAG, "remote video requested: stream=%u", (unsigned)TIRTC_SESSION_REMOTE_VIDEO_STREAM_ID);
-    (void)tirtc_session_request_remote_key_frame(conn,
-                                                TIRTC_SESSION_REMOTE_VIDEO_STREAM_ID,
-                                                "remote video requested");
+    if (tirtc_session_media_remote_video_requires_key_frame()) {
+        (void)tirtc_session_request_remote_key_frame(conn,
+                                                    TIRTC_SESSION_REMOTE_VIDEO_STREAM_ID,
+                                                    "remote video requested");
+    }
 
     taskENTER_CRITICAL(&s_rtc_lock);
     if (conn == s_active_conn && s_sdk_started && !s_start_in_progress && !s_stop_in_progress &&
@@ -5210,7 +5498,11 @@ static int tirtc_session_send_local_video_packet(const uint8_t *data,
                                                 uint8_t media,
                                                 uint8_t flags,
                                                 const TIRTCFRAMEINFO *input_frame_info,
-                                                bool test_frame)
+                                                uint32_t generation,
+                                                bool test_frame,
+                                                bool external_frame,
+                                                tirtc_conn_t expected_conn,
+                                                uint8_t external_stream_id)
 {
     tirtc_conn_t conn = NULL;
     uint8_t stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
@@ -5230,9 +5522,13 @@ static int tirtc_session_send_local_video_packet(const uint8_t *data,
     }
 
     bool video_stream_started = false;
-    taskENTER_CRITICAL(&s_rtc_lock);
-    video_stream_started = s_stats.tx_video_frames > 0U;
-    taskEXIT_CRITICAL(&s_rtc_lock);
+    if (test_frame) {
+        taskENTER_CRITICAL(&s_rtc_lock);
+        video_stream_started = s_stats.tx_video_frames > 0U;
+        taskEXIT_CRITICAL(&s_rtc_lock);
+    } else {
+        video_stream_started = tirtc_session_local_h264_key_frame_published();
+    }
 
     bool key_frame = (frame_info.flags & TIRTC_FRAME_FLAG_KEY_FRAME) != 0;
     bool can_drop_frame = video_stream_started &&
@@ -5240,9 +5536,22 @@ static int tirtc_session_send_local_video_packet(const uint8_t *data,
                            !key_frame);
     int send_ret = TIRTC_E_BUSY;
     if (tirtc_session_take_sdk_api_lock(test_frame ? TIRTC_SESSION_SDK_API_LOCK_WAIT_TICKS :
-                                                     TIRTC_SESSION_VIDEO_TX_SDK_API_LOCK_WAIT_TICKS)) {
-        bool ready = test_frame ? tirtc_session_is_ready_to_send_test_video(&conn, &stream_id)
-                                : tirtc_session_is_ready_to_send_video(&conn, &stream_id);
+                                                      TIRTC_SESSION_VIDEO_TX_SDK_API_LOCK_WAIT_TICKS)) {
+        if (generation != tirtc_session_get_local_video_tx_generation()) {
+            tirtc_session_give_sdk_api_lock();
+            return TIRTC_SESSION_VIDEO_TX_NOT_READY;
+        }
+        bool ready = false;
+        if (test_frame) {
+            ready = tirtc_session_is_ready_to_send_test_video(&conn, &stream_id);
+        } else if (external_frame) {
+            ready = tirtc_session_is_ready_to_send_external_video(expected_conn,
+                                                                  external_stream_id,
+                                                                  &conn,
+                                                                  &stream_id);
+        } else {
+            ready = tirtc_session_is_ready_to_send_video(&conn, &stream_id);
+        }
         if (!ready) {
             send_ret = TIRTC_SESSION_VIDEO_TX_NOT_READY;
             if (!test_frame && tirtc_session_should_log_local_video_tx_issue()) {
@@ -5271,7 +5580,8 @@ static int tirtc_session_send_local_video_packet(const uint8_t *data,
                 taskEXIT_CRITICAL(&s_rtc_lock);
 
                 ESP_LOGW(TAG,
-                         "local video tx not ready: sdk=%d start=%d stop=%d closing=%d conn=%d call=%d send=%d peer_video=%d forced=%d stream=%u payload=%u",
+                         "%svideo tx not ready: sdk=%d start=%d stop=%d closing=%d conn=%d call=%d send=%d peer_video=%d forced=%d stream=%u payload=%u",
+                         external_frame ? "external " : "local ",
                          sdk_started,
                          start_in_progress,
                          stop_in_progress,
@@ -5281,7 +5591,7 @@ static int tirtc_session_send_local_video_packet(const uint8_t *data,
                          video_enabled,
                          peer_wants_video,
                          forced_publish,
-                         (unsigned)local_stream_id,
+                         (unsigned)(external_frame ? external_stream_id : local_stream_id),
                          (unsigned)data_len);
             }
             tirtc_session_give_sdk_api_lock();
@@ -5331,6 +5641,12 @@ static int tirtc_session_send_local_video_packet(const uint8_t *data,
         uint64_t accepted_at_us = 0U;
         uint64_t first_requested_at_us = 0U;
 
+        if (!test_frame &&
+            frame_info.media == TIRTC_VIDEO_H264 &&
+            key_frame) {
+            tirtc_session_mark_local_h264_key_frame_published();
+        }
+
         taskENTER_CRITICAL(&s_rtc_lock);
         if (!s_local_video_first_packet_logged) {
             s_local_video_first_packet_logged = true;
@@ -5342,14 +5658,15 @@ static int tirtc_session_send_local_video_packet(const uint8_t *data,
         forced_publish = s_local_video_publish_forced;
         accepted_at_us = s_active_conn_accepted_at_us;
         first_requested_at_us = s_local_video_first_requested_at_us;
-        tirtc_session_set_last_event_locked(test_frame ? "test video tx" : "video tx");
+        tirtc_session_set_last_event_locked(test_frame ? "test video tx" :
+                                            (external_frame ? "external video tx" : "video tx"));
         taskEXIT_CRITICAL(&s_rtc_lock);
 
         if (log_first_packet) {
             uint64_t now_us = esp_timer_get_time();
             ESP_LOGI(TAG,
                      "%svideo first tx stream=%u media=%u(%s) flags=%u payload=%u size=%ux%u peer_video=%d forced=%d accepted_ms=%llu request_ms=%llu",
-                     test_frame ? "test " : "local ",
+                     test_frame ? "test " : (external_frame ? "external " : "local "),
                      (unsigned)stream_id,
                      (unsigned)frame_info.media,
                      tirtc_session_media_name(frame_info.media),
@@ -5468,7 +5785,10 @@ esp_err_t tirtc_session_send_test_video_frame(const TIRTCFRAMEINFO *frame_info, 
                                                    frame_info->media,
                                                    frame_info->flags,
                                                    frame_info,
-                                                   true);
+                                                   true,
+                                                   false,
+                                                   NULL,
+                                                   TIRTC_SESSION_INVALID_STREAM_ID);
 }
 
 esp_err_t tirtc_session_send_local_video_frame(const uint8_t *data,
@@ -5500,7 +5820,105 @@ esp_err_t tirtc_session_send_local_video_frame(const uint8_t *data,
                                                    media,
                                                    flags,
                                                    NULL,
-                                                   false);
+                                                   false,
+                                                   false,
+                                                   NULL,
+                                                   TIRTC_SESSION_INVALID_STREAM_ID);
+}
+
+esp_err_t tirtc_session_set_external_video_active(tirtc_conn_t conn,
+                                                  uint8_t stream_id,
+                                                  bool active)
+{
+    bool changed = false;
+    esp_err_t ret = ESP_OK;
+
+    ESP_RETURN_ON_FALSE(conn != NULL,
+                        ESP_ERR_INVALID_ARG,
+                        TAG,
+                        "external video connection is null");
+    ESP_RETURN_ON_FALSE(stream_id != TIRTC_SESSION_INVALID_STREAM_ID,
+                        ESP_ERR_INVALID_ARG,
+                        TAG,
+                        "external video stream is invalid");
+    if (active) {
+        ESP_RETURN_ON_FALSE(tirtc_session_is_connection_usable(conn),
+                            ESP_ERR_INVALID_STATE,
+                            TAG,
+                            "external video connection is inactive");
+    }
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    if (active) {
+        if (s_external_video_active &&
+            (s_external_video_conn != conn ||
+             s_external_video_stream_id != stream_id)) {
+            ret = ESP_ERR_INVALID_STATE;
+        } else if (!s_external_video_active) {
+            s_external_video_conn = conn;
+            s_external_video_stream_id = stream_id;
+            s_external_video_active = true;
+            changed = true;
+        }
+    } else if (s_external_video_active &&
+               s_external_video_conn == conn &&
+               s_external_video_stream_id == stream_id) {
+        s_external_video_conn = NULL;
+        s_external_video_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
+        s_external_video_active = false;
+        changed = true;
+    }
+    if (changed) {
+        s_local_video_first_packet_logged = false;
+        s_local_h264_key_frame_queued = false;
+        s_local_h264_key_frame_published = false;
+        s_local_h264_recovery_pending = false;
+        s_local_h264_recovery_count = 0;
+    }
+    taskEXIT_CRITICAL(&s_rtc_lock);
+
+    if (changed) {
+        tirtc_session_flush_local_video_tx_queue();
+        tirtc_session_note_event(active ? "external video on" : "external video off");
+    }
+    return ret;
+}
+
+esp_err_t tirtc_session_send_external_video_frame(tirtc_conn_t conn,
+                                                  uint8_t stream_id,
+                                                  const uint8_t *data,
+                                                  size_t data_len,
+                                                  uint16_t width,
+                                                  uint16_t height,
+                                                  uint64_t pts_us,
+                                                  uint8_t media,
+                                                  uint8_t flags)
+{
+    tirtc_conn_t active_conn = NULL;
+    uint8_t active_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
+
+    if (conn == NULL || data == NULL || data_len == 0U || !TIRTC_IS_VIDEO(media)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!tirtc_session_is_ready_to_send_external_video(conn,
+                                                       stream_id,
+                                                       &active_conn,
+                                                       &active_stream_id)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    return tirtc_session_enqueue_local_video_packet(data,
+                                                   data_len,
+                                                   width,
+                                                   height,
+                                                   pts_us,
+                                                   media,
+                                                   flags,
+                                                   NULL,
+                                                   false,
+                                                   true,
+                                                   active_conn,
+                                                   active_stream_id);
 }
 
 esp_err_t tirtc_session_send_test_audio_pcm_frame(const uint8_t *data,
@@ -5697,6 +6115,11 @@ static void tirtc_session_local_video_tx_task(void *ctx)
     while (xQueueReceive(s_local_video_tx_queue, &packet, portMAX_DELAY) == pdTRUE) {
         uint64_t now_us = esp_timer_get_time();
         uint32_t current_generation = tirtc_session_get_local_video_tx_generation();
+        uint8_t packet_media = packet.has_frame_info ? packet.frame_info.media : packet.media;
+        bool local_h264_packet = !packet.test_frame && packet_media == TIRTC_VIDEO_H264;
+        bool recover_h264 = false;
+        bool recovery_is_backpressure = false;
+        const char *recovery_reason = NULL;
         bool packet_is_fresh = packet.pts_us == 0 || now_us <= packet.pts_us ||
                                now_us - packet.pts_us <= TIRTC_SESSION_VIDEO_TX_MAX_AGE_US;
 
@@ -5729,7 +6152,11 @@ static void tirtc_session_local_video_tx_task(void *ctx)
                                                                  packet.media,
                                                                  packet.flags,
                                                                  packet.has_frame_info ? &packet.frame_info : NULL,
-                                                                 packet.test_frame);
+                                                                 packet.generation,
+                                                                 packet.test_frame,
+                                                                 packet.external_frame,
+                                                                 packet.expected_conn,
+                                                                 packet.external_stream_id);
             uint64_t send_us = esp_timer_get_time() - send_start_us;
             if (send_ret >= 0) {
                 sent_count++;
@@ -5738,6 +6165,21 @@ static void tirtc_session_local_video_tx_task(void *ctx)
                     max_payload_bytes = packet.data_len;
                 }
             } else {
+                if (local_h264_packet) {
+                    recover_h264 = true;
+                    if (send_ret == TIRTC_SESSION_VIDEO_TX_THROTTLED ||
+                        send_ret == TIRTC_E_BUSY) {
+                        recovery_is_backpressure = true;
+                        recovery_reason = send_ret == TIRTC_SESSION_VIDEO_TX_THROTTLED ?
+                                          "SDK send buffer throttled" :
+                                          "SDK video send busy";
+                    } else if (send_ret == TIRTC_SESSION_VIDEO_TX_NOT_READY ||
+                               send_ret == TIRTC_SESSION_VIDEO_TX_WAIT_KEY_FRAME) {
+                        recovery_reason = "SDK send deferred";
+                    } else {
+                        recovery_reason = "SDK video send failed";
+                    }
+                }
                 if (send_ret == TIRTC_SESSION_VIDEO_TX_NOT_READY ||
                     send_ret == TIRTC_SESSION_VIDEO_TX_WAIT_KEY_FRAME) {
                     defer_count++;
@@ -5761,6 +6203,11 @@ static void tirtc_session_local_video_tx_task(void *ctx)
         } else {
             uint32_t age_ms = 0;
             stale_drop_count++;
+            if (local_h264_packet && packet.generation == current_generation) {
+                recover_h264 = true;
+                recovery_is_backpressure = true;
+                recovery_reason = "queued H264 frame stale";
+            }
             if (packet.pts_us != 0 && now_us > packet.pts_us) {
                 age_ms = (uint32_t)((now_us - packet.pts_us) / 1000ULL);
             }
@@ -5785,6 +6232,10 @@ static void tirtc_session_local_video_tx_task(void *ctx)
             }
         }
         tirtc_session_free_local_video_packet(&packet);
+        if (recover_h264) {
+            tirtc_session_recover_local_h264_stream(recovery_reason,
+                                                     recovery_is_backpressure);
+        }
 
         uint64_t stats_now_us = esp_timer_get_time();
         if (stats_now_us - window_start_us >= ((uint64_t)TIRTC_SESSION_TX_LOG_INTERVAL_MS * 1000ULL)) {
@@ -6055,6 +6506,7 @@ static void tirtc_session_on_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *fra
                                                 frame_info->flags,
                                                 (const uint8_t *)data,
                                                 frame_info->length,
+                                                frame_info->ts,
                                                 &playback_data_len) != ESP_OK) {
         tirtc_session_note_event("remote audio drop");
         return;
@@ -6138,6 +6590,7 @@ static void tirtc_session_on_video(tirtc_conn_t hconn, const TIRTCFRAMEINFO *fra
         tirtc_session_note_event("remote video drop");
         if (frame_info->media == TIRTC_VIDEO_H264 &&
             submit_ret != ESP_ERR_INVALID_STATE &&
+            submit_ret != ESP_ERR_NOT_SUPPORTED &&
             tirtc_session_take_remote_key_frame_retry_slot()) {
             (void)tirtc_session_request_remote_key_frame(hconn,
                                                         frame_info->stream_id,
@@ -6158,8 +6611,9 @@ static void tirtc_session_on_video(tirtc_conn_t hconn, const TIRTCFRAMEINFO *fra
 
     if (log_first_packet) {
         ESP_LOGI(TAG,
-                 "remote video first packet media=%u flags=%u payload=%u",
+                 "remote video first packet media=%u(%s) flags=%u payload=%u",
                  frame_info->media,
+                 tirtc_session_media_name(frame_info->media),
                  frame_info->flags,
                  (unsigned)frame_info->length);
         tirtc_session_retry_remote_media_request_after_delay(false,
@@ -6306,6 +6760,59 @@ static void tirtc_session_on_unsubscribe_audio(tirtc_conn_t hconn, uint8_t strea
     }
 }
 
+#if TIRTC_SESSION_HAS_TGMP_BITRATE_CONTROL
+static void tirtc_session_on_video_bitrate_required(tirtc_conn_t hconn,
+                                                    uint8_t stream_id,
+                                                    uint32_t target_bitrate_bps)
+{
+    if (hconn == NULL || target_bitrate_bps == 0U) {
+        return;
+    }
+
+    const uint64_t now_us = (uint64_t)esp_timer_get_time();
+    bool post_event = true;
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    if (hconn == s_last_video_bitrate_event_conn &&
+        s_last_video_bitrate_event_us != 0U &&
+        now_us >= s_last_video_bitrate_event_us &&
+        now_us - s_last_video_bitrate_event_us <
+            TIRTC_SESSION_BITRATE_EVENT_MIN_INTERVAL_US) {
+        const uint32_t delta_bps =
+            target_bitrate_bps >= s_last_video_bitrate_event_bps ?
+                target_bitrate_bps - s_last_video_bitrate_event_bps :
+                s_last_video_bitrate_event_bps - target_bitrate_bps;
+        post_event = delta_bps >= TIRTC_SESSION_BITRATE_EVENT_FAST_STEP_BPS;
+    }
+    if (post_event) {
+        s_last_video_bitrate_event_conn = hconn;
+        s_last_video_bitrate_event_bps = target_bitrate_bps;
+        s_last_video_bitrate_event_us = now_us;
+    }
+    taskEXIT_CRITICAL(&s_rtc_lock);
+
+    if (!post_event) {
+        return;
+    }
+
+    const tirtc_session_event_t rtc_event = {
+        .type = TIRTC_SESSION_EVENT_VIDEO_BITRATE_REQUIRED,
+        .payload.video_bitrate = {
+            .conn = hconn,
+            .stream_id = stream_id,
+            .target_bitrate_bps = target_bitrate_bps,
+        },
+    };
+    if (!tirtc_session_enqueue_event(&rtc_event, 0)) {
+        tirtc_session_note_event("bitrate event drop");
+        APP_LOG_DETAIL(TAG,
+                       "rtc event queue full: video bitrate target dropped stream=%u target=%ukbps",
+                       (unsigned)stream_id,
+                       (unsigned)(target_bitrate_bps / 1000U));
+    }
+}
+#endif
+
 static void tirtc_session_sdk_log_cb(const char *log, uint32_t length)
 {
     if (log == NULL || length == 0) {
@@ -6354,12 +6861,20 @@ static void tirtc_session_configure_sdk_logs(bool announce)
 static void tirtc_session_on_request_key_frame(tirtc_conn_t hconn, uint8_t stream_id)
 {
     bool active = false;
+    bool external_video = false;
     bool forced_publish = false;
     bool apply_policy = false;
 
     taskENTER_CRITICAL(&s_rtc_lock);
     active = hconn != NULL && hconn == s_active_conn && s_sdk_started && !s_start_in_progress &&
              !s_stop_in_progress && s_closing_conn == NULL && s_call_active;
+    external_video = hconn != NULL &&
+                     hconn == s_active_conn &&
+                     s_sdk_started && !s_start_in_progress &&
+                     !s_stop_in_progress && s_closing_conn == NULL &&
+                     s_external_video_active &&
+                     s_external_video_conn == hconn &&
+                     s_external_video_stream_id == stream_id;
     if (active && stream_id == TIRTC_SESSION_LOCAL_VIDEO_STREAM_ID) {
         s_peer_wants_video = true;
         s_peer_video_control_seen = true;
@@ -6369,22 +6884,22 @@ static void tirtc_session_on_request_key_frame(tirtc_conn_t hconn, uint8_t strea
     }
     taskEXIT_CRITICAL(&s_rtc_lock);
 
-    if (!active) {
+    if (!active && !external_video) {
         ESP_LOGD(TAG, "ignore key frame request for inactive connection hconn=%p stream=%u", hconn, stream_id);
         return;
     }
 
-    if (stream_id != TIRTC_SESSION_LOCAL_VIDEO_STREAM_ID) {
+    if (!external_video && stream_id != TIRTC_SESSION_LOCAL_VIDEO_STREAM_ID) {
         ESP_LOGD(TAG, "ignore key frame request for unsupported stream=%u", stream_id);
         return;
     }
 
     tirtc_session_note_event("key frame asked");
-    ESP_LOGI(TAG,
-             "remote requested local key frame: hconn=%p stream=%u forced_publish=%d",
-             hconn,
-             (unsigned)stream_id,
-             forced_publish);
+    APP_LOG_DETAIL(TAG,
+                   "KF req: src=%s stream=%u force=%d",
+                   external_video ? "ext" : "local",
+                   (unsigned)stream_id,
+                   forced_publish);
 
     tirtc_session_media_request_video_key_frame();
     if (apply_policy) {
@@ -6394,18 +6909,22 @@ static void tirtc_session_on_request_key_frame(tirtc_conn_t hconn, uint8_t strea
 
 void tirtc_session_apply_hangup_local_state(void)
 {
-    bool was_call_active = false;
+    bool call_media_was_active = false;
 
     tirtc_session_release_remote_media();
 
     taskENTER_CRITICAL(&s_rtc_lock);
-    was_call_active = s_call_active;
+    call_media_was_active = s_call_active && !s_call_media_deferred;
     s_call_active = false;
+    s_call_media_deferred = false;
     s_incoming_call_pending = false;
     s_pending_call_cmdw = 0;
     s_media_bootstrap_pending = false;
     s_local_video_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
     s_local_audio_stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
+    s_local_h264_key_frame_queued = false;
+    s_local_h264_key_frame_published = false;
+    s_local_h264_recovery_pending = false;
     tirtc_session_sync_stats_locked();
     taskEXIT_CRITICAL(&s_rtc_lock);
 
@@ -6417,12 +6936,15 @@ void tirtc_session_apply_hangup_local_state(void)
     tirtc_session_media_flush();
 
     tirtc_session_note_event("hangup local");
-    if (was_call_active) {
+    if (call_media_was_active) {
         tirtc_session_notify_call_active(false);
     }
 }
 
-esp_err_t tirtc_session_set_external_audio_call_active(tirtc_conn_t conn, bool active)
+esp_err_t tirtc_session_set_external_media_call_active(tirtc_conn_t conn,
+                                                       bool active,
+                                                       bool local_video_enabled,
+                                                       bool remote_video_enabled)
 {
     tirtc_conn_t active_conn = NULL;
 
@@ -6434,19 +6956,36 @@ esp_err_t tirtc_session_set_external_audio_call_active(tirtc_conn_t conn, bool a
 
     if (active) {
         taskENTER_CRITICAL(&s_rtc_lock);
-        /* External audio changes audio ownership only. Preserve the local
-         * camera policy and any video subscription received before 0x2000. */
+        /* External audio owns microphone capture; video remains independently
+         * configurable in both directions. */
         s_media_profile = TIRTC_SESSION_MEDIA_PROFILE_EXTERNAL_AUDIO;
+        s_remote_video_receive_enabled = remote_video_enabled;
         tirtc_session_sync_stats_locked();
         taskEXIT_CRITICAL(&s_rtc_lock);
 
-        tirtc_session_complete_call_response(true);
+        (void)tirtc_session_set_local_video_send_enabled(local_video_enabled);
         (void)tirtc_session_set_local_audio_send_enabled(true);
+        tirtc_session_complete_call_response(true);
         tirtc_session_apply_local_media_policy();
+        tirtc_session_request_remote_media();
     } else {
         tirtc_session_apply_hangup_local_state();
     }
     return ESP_OK;
+}
+
+esp_err_t tirtc_session_set_external_audio_call_active(tirtc_conn_t conn, bool active)
+{
+    bool local_video_enabled = false;
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    local_video_enabled = s_local_video_send_enabled;
+    taskEXIT_CRITICAL(&s_rtc_lock);
+
+    return tirtc_session_set_external_media_call_active(conn,
+                                                        active,
+                                                        local_video_enabled,
+                                                        false);
 }
 
 void tirtc_session_apply_local_media_policy(void)
@@ -6750,6 +7289,20 @@ static void tirtc_session_worker_task(void *ctx)
                 tirtc_session_handle_remote_command(&event);
             }
             break;
+        case TIRTC_SESSION_EVENT_VIDEO_BITRATE_REQUIRED:
+            if (tirtc_session_is_connection_usable(event.payload.video_bitrate.conn)) {
+                tirtc_session_notify_video_bitrate_required(
+                    event.payload.video_bitrate.conn,
+                    event.payload.video_bitrate.stream_id,
+                    event.payload.video_bitrate.target_bitrate_bps);
+            } else {
+                APP_LOG_DETAIL(TAG,
+                               "video bitrate target ignored: inactive hconn=%p stream=%u target=%ukbps",
+                               event.payload.video_bitrate.conn,
+                               (unsigned)event.payload.video_bitrate.stream_id,
+                               (unsigned)(event.payload.video_bitrate.target_bitrate_bps / 1000U));
+            }
+            break;
         case TIRTC_SESSION_EVENT_CONN_ERROR:
             if (tirtc_session_is_connection_tracked(event.payload.conn.conn)) {
                 tirtc_session_notify_connection_error(event.payload.conn.conn, event.payload.conn.error);
@@ -6924,6 +7477,92 @@ esp_err_t tirtc_session_apply_remote_door_command(bool open)
     return ops.set_door_open(open, ctx);
 }
 
+esp_err_t tirtc_session_apply_video_bitrate_params(tirtc_conn_t conn)
+{
+    tirtc_session_video_bitrate_params_t params = {0};
+    bool enabled = false;
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    enabled = s_video_bitrate_params_enabled;
+    params = s_video_bitrate_params;
+    taskEXIT_CRITICAL(&s_rtc_lock);
+
+    if (!enabled) {
+        return ESP_OK;
+    }
+#if !TIRTC_SESSION_HAS_TGMP_BITRATE_CONTROL
+    (void)conn;
+    return ESP_ERR_NOT_SUPPORTED;
+#else
+    if (!tirtc_session_is_connection_usable(conn)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!tirtc_session_take_sdk_api_lock(TIRTC_SESSION_SDK_API_LOCK_WAIT_TICKS)) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    int sdk_ret = TiRtcConnSetVideoBitrateParams(conn,
+                                                 params.stream_id,
+                                                 params.min_bitrate_bps,
+                                                 params.max_bitrate_bps,
+                                                 params.start_bitrate_bps);
+    tirtc_session_give_sdk_api_lock();
+    if (sdk_ret != 0) {
+        tirtc_session_set_last_error(sdk_ret);
+        ESP_LOGW(TAG,
+                 "TGMP video bitrate params rejected: stream=%u min=%uk max=%uk start=%uk ret=%d %s",
+                 (unsigned)params.stream_id,
+                 (unsigned)(params.min_bitrate_bps / 1000U),
+                 (unsigned)(params.max_bitrate_bps / 1000U),
+                 (unsigned)(params.start_bitrate_bps / 1000U),
+                 sdk_ret,
+                 TiRtcGetErrorStr(sdk_ret));
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG,
+             "TGMP video bitrate control ready: stream=%u min=%uk max=%uk start=%uk",
+             (unsigned)params.stream_id,
+             (unsigned)(params.min_bitrate_bps / 1000U),
+             (unsigned)(params.max_bitrate_bps / 1000U),
+             (unsigned)(params.start_bitrate_bps / 1000U));
+    return ESP_OK;
+#endif
+}
+
+esp_err_t tirtc_session_set_video_bitrate_params(
+    const tirtc_session_video_bitrate_params_t *params)
+{
+    tirtc_conn_t active_conn = NULL;
+
+    if (params != NULL &&
+        (params->min_bitrate_bps == 0U ||
+         params->max_bitrate_bps < params->min_bitrate_bps ||
+         params->start_bitrate_bps < params->min_bitrate_bps ||
+         params->start_bitrate_bps > params->max_bitrate_bps)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    if (params != NULL) {
+        s_video_bitrate_params = *params;
+        s_video_bitrate_params_enabled = true;
+    } else {
+        memset(&s_video_bitrate_params, 0, sizeof(s_video_bitrate_params));
+        s_video_bitrate_params_enabled = false;
+    }
+    if (s_active_conn != NULL && s_sdk_started && !s_start_in_progress &&
+        !s_stop_in_progress && s_closing_conn == NULL) {
+        active_conn = s_active_conn;
+    }
+    taskEXIT_CRITICAL(&s_rtc_lock);
+
+    if (params == NULL || active_conn == NULL) {
+        return ESP_OK;
+    }
+    return tirtc_session_apply_video_bitrate_params(active_conn);
+}
+
 esp_err_t tirtc_session_register_observer(const tirtc_session_observer_t *observer, void *ctx)
 {
     if (observer == NULL) {
@@ -6934,10 +7573,13 @@ esp_err_t tirtc_session_register_observer(const tirtc_session_observer_t *observ
     for (size_t index = 0; index < TIRTC_SESSION_OBSERVER_MAX; ++index) {
         if (s_observers[index].used &&
             s_observers[index].observer.on_command == observer->on_command &&
+            s_observers[index].observer.on_message == observer->on_message &&
             s_observers[index].observer.on_call_active == observer->on_call_active &&
             s_observers[index].observer.on_connection_error == observer->on_connection_error &&
             s_observers[index].observer.on_disconnected == observer->on_disconnected &&
             s_observers[index].observer.on_start_error == observer->on_start_error &&
+            s_observers[index].observer.on_video_bitrate_required ==
+                observer->on_video_bitrate_required &&
             s_observers[index].ctx == ctx) {
             taskEXIT_CRITICAL(&s_observer_lock);
             return ESP_OK;
@@ -7475,7 +8117,18 @@ esp_err_t tirtc_session_disconnect(void)
     ESP_RETURN_ON_FALSE(s_initialized, ESP_ERR_INVALID_STATE, TAG, "rtc not initialized");
 
     if (!tirtc_session_try_get_active_conn(&conn)) {
-        tirtc_session_note_event("disconnect idle");
+        if (tirtc_connect_abort_attempt()) {
+            /*
+             * Room cancellation can arrive before TiRtcConnect produces a
+             * handle. Invalidate that generation now so the next call is not
+             * rejected as busy; a late successful callback releases itself.
+             */
+            tirtc_session_return_to_listen_mode();
+            tirtc_session_note_event("connect aborted");
+            ESP_LOGI(TAG, "rtc active connect aborted before handle creation");
+        } else {
+            tirtc_session_note_event("disconnect idle");
+        }
         return ESP_OK;
     }
 

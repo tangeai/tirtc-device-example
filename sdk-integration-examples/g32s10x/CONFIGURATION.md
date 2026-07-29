@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | `TIRTC_LINK_WIFI_SSID` | WiFi 名称 | 空字符串会停在“等待 WiFi 配置” |
 | `TIRTC_LINK_WIFI_PASSWORD` | WiFi 密码 | 不会输出到串口 |
-| `TIRTC_LINK_SERVICE_ENDPOINT` | TiRTC 服务入口 | 必须与 SDK 和测试环境一致 |
+| `TIRTC_LINK_SERVICE_ENDPOINT` | TiRTC 服务入口覆盖 | 默认留空并使用 SDK 内置入口；仅自部署或指定联调环境时填写 |
 | `TIRTC_LINK_DEVICE_ID` | 设备 ID | 不得与其他在线设备混用 |
 | `TIRTC_LINK_DEVICE_SECRET` | 设备密钥 | 不得写入日志或提交 Git |
 
@@ -21,8 +21,9 @@
 | 参数 | 默认值 | 可调范围与影响 |
 | --- | ---: | --- |
 | `TIRTC_LINK_AUTO_CONNECT` | `0` | `0` 只接受网页呼入；`1` 启动后主动连接 |
+| `TIRTC_LINK_ENABLE_CONNECT_CACHE` | `1` | `0/1`；缓存主动连接参数，缓存有效时可用空 Token 重连 |
 | `TIRTC_LINK_REMOTE_DEVICE_ID` | 空 | 仅主动连接使用 |
-| `TIRTC_LINK_REMOTE_TOKEN` | 空 | 仅主动连接使用；生产环境应由安全存储提供 |
+| `TIRTC_LINK_REMOTE_TOKEN` | 空 | 首次主动连接使用一次性 Token；缓存未命中或过期时必须重新获取 |
 | `TIRTC_LINK_ENABLE_SAMPLE_MEDIA` | `1` | `0/1`；关闭后只验证连接，不发送演示流 |
 | `TIRTC_LINK_SAMPLE_AUTO_PUBLISH` | `1` | `1` 在订阅命令到达前也可发流；严格订阅驱动时设 `0` |
 | `TIRTC_LINK_SAMPLE_VIDEO_STREAM_ID` | `11` | `0..15`，不能与音频流相同 |
@@ -39,6 +40,9 @@ bash tools/transcode_sample_media.sh <source-video>
 
 网页端可以继续调用 `requestKeyFrame(stream=11)`，但 MJPEG 的每一帧都是独立 JPEG，
 固件会无副作用地忽略该请求，不重置播放游标、不唤醒媒体线程，也不改变发送节拍。
+
+`TIRTC_LINK_ENABLE_CONNECT_CACHE=1` 只影响设备主动连接其他端。缓存按 `remote_id` 保存，TTL
+由服务端返回；收到 `-40011` 时说明缓存未命中或已过期，不能重复使用旧 Token。
 
 ## 内存与背压
 

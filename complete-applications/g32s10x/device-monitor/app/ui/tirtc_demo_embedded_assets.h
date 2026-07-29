@@ -1,0 +1,36 @@
+#ifndef _TIRTC_DEMO_EMBEDDED_ASSETS_H
+#define _TIRTC_DEMO_EMBEDDED_ASSETS_H
+
+#include <stddef.h>
+#include "third_party/lvgl/lvgl/lvgl.h"
+
+typedef struct {
+    const char *name;
+    const lv_img_dsc_t *image;
+} tirtc_demo_embedded_asset_t;
+
+LV_IMG_DECLARE(tirtc_s3_ai_chat_avatar_buddy_img)
+LV_IMG_DECLARE(tirtc_s3_ai_chat_avatar_sprout_img)
+LV_IMG_DECLARE(tirtc_s3_call_contacts_refresh_default_img)
+LV_IMG_DECLARE(tirtc_s3_call_contacts_refresh_pressed_img)
+LV_IMG_DECLARE(tirtc_s3_home_icon_ai_img)
+LV_IMG_DECLARE(tirtc_s3_home_icon_call_img)
+LV_IMG_DECLARE(tirtc_s3_home_icon_settings_img)
+LV_IMG_DECLARE(tirtc_s3_home_icon_view_img)
+LV_IMG_DECLARE(tirtc_s3_home_icon_wechat_img)
+LV_IMG_DECLARE(tirtc_s3_home_text_ai_img)
+LV_IMG_DECLARE(tirtc_s3_home_text_ai_desc_img)
+LV_IMG_DECLARE(tirtc_s3_home_text_call_img)
+LV_IMG_DECLARE(tirtc_s3_home_text_call_desc_img)
+LV_IMG_DECLARE(tirtc_s3_home_text_settings_img)
+LV_IMG_DECLARE(tirtc_s3_home_text_settings_desc_img)
+LV_IMG_DECLARE(tirtc_s3_home_text_title_img)
+LV_IMG_DECLARE(tirtc_s3_home_text_view_img)
+LV_IMG_DECLARE(tirtc_s3_home_text_view_desc_img)
+LV_IMG_DECLARE(tirtc_s3_home_text_wechat_img)
+LV_IMG_DECLARE(tirtc_s3_home_text_wechat_desc_img)
+
+extern const tirtc_demo_embedded_asset_t tirtc_demo_embedded_assets[];
+extern const size_t tirtc_demo_embedded_asset_count;
+
+#endif

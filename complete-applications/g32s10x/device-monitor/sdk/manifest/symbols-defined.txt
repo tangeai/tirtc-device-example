@@ -1,0 +1,1107 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+00000000 B _cbs
+00000000 B _my_resolver
+00000000 B _tg_timezone_
+00000000 B _uk
+00000000 B _webrtc_log_cb
+00000000 B g_app_log_on
+00000000 B g_emit_type
+00000000 B g_force_use_tcp_protocol_for_debug
+00000000 B g_ice_debug_log_buffer
+00000000 B g_tgrtc_debug_mgr
+00000000 B g_user_version
+00000000 D ICE_P2P_HEART_BEAT_TIME_OUT_MS
+00000000 D _arch_name
+00000000 D _cfg
+00000000 D _os_name
+00000000 D _tiRTCLogTag
+00000000 D _tirtc_version_str
+00000000 D g_sctp_sendbuf_size
+00000000 R IKCP_ASK_SEND
+00000000 R IKCP_ASK_TELL
+00000000 R IKCP_CMD_ACK
+00000000 R IKCP_CMD_PUSH
+00000000 R IKCP_CMD_WASK
+00000000 R IKCP_CMD_WINS
+00000000 R IKCP_DEADLINK
+00000000 R IKCP_FASTACK_LIMIT
+00000000 R IKCP_INTERVAL
+00000000 R IKCP_MTU_DEF
+00000000 R IKCP_OVERHEAD
+00000000 R IKCP_PROBE_INIT
+00000000 R IKCP_PROBE_LIMIT
+00000000 R IKCP_RTO_DEF
+00000000 R IKCP_RTO_MAX
+00000000 R IKCP_RTO_MIN
+00000000 R IKCP_RTO_NDL
+00000000 R IKCP_THRESH_INIT
+00000000 R IKCP_THRESH_MIN
+00000000 R IKCP_WND_RCV
+00000000 R IKCP_WND_SND
+00000000 R _build_info
+00000000 T HttpCleanResponse
+00000000 T HttpClientCleanup
+00000000 T HttpConnAttach
+00000000 T HttpConnClose
+00000000 T HttpConnInit
+00000000 T HttpConnInitProxy
+00000000 T HttpConnOpen
+00000000 T HttpConnSend
+00000000 T HttpConnSendChunk
+00000000 T HttpConnWaitRead
+00000000 T HttpRecvResponse
+00000000 T HttpRecvResponseEx
+00000000 T HttpRecvResponseWithCB
+00000000 T HttpSendHead
+00000000 T HttpSimpleRequest
+00000000 T LogBin
+00000000 T Logf
+00000000 T LogfClose
+00000000 T LogfConfig
+00000000 T LogfGetLevel
+00000000 T LogfN
+00000000 T LogfSetCallback
+00000000 T LogfSetLevel
+00000000 T MbedTlsConnInit
+00000000 T Mx_calloc
+00000000 T Mx_free
+00000000 T Mx_malloc
+00000000 T Mx_realloc
+00000000 T Mx_strdup
+00000000 T Mx_strndup
+00000000 T My_calloc
+00000000 T My_free
+00000000 T My_malloc
+00000000 T My_realloc
+00000000 T My_strdup
+00000000 T My_strndup
+00000000 T SA_SocketGetError
+00000000 T SA_SocketSetLinger
+00000000 T SA_SocketSetNBlk
+00000000 T SA_SocketStrError
+00000000 T SA_ThreadCloseHandle
+00000000 T SA_ThreadGetCurrentHandle
+00000000 T SA_ThreadResume
+00000000 T SA_ThreadSuspend
+00000000 T SA_ThreadWaitUntilTerminate
+00000000 T SA_getip
+00000000 T SA_initsai
+00000000 T SA_inprogress
+00000000 T SA_ip2str
+00000000 T SA_is_internet
+00000000 T SA_isfatal
+00000000 T SA_localtime_r
+00000000 T SA_mktime
+00000000 T SA_platInit
+00000000 T SA_pollfd
+00000000 T SA_recv_timed
+00000000 T SA_recvfrom_timed
+00000000 T SA_resolve_host
+00000000 T SA_setlinger
+00000000 T SA_setnblk
+00000000 T SA_sock_newbind
+00000000 T SA_sock_newserver
+00000000 T SA_strncpyz
+00000000 T SA_wait_timed
+00000000 T SA_wait_timed_w
+00000000 T SA_wouldblock
+00000000 T SHA1FinalBits
+00000000 T SHA1Input
+00000000 T SHA1Reset
+00000000 T SHA1Result
+00000000 T SHA224FinalBits
+00000000 T SHA224Input
+00000000 T SHA224Reset
+00000000 T SHA224Result
+00000000 T SHA256FinalBits
+00000000 T SHA256Input
+00000000 T SHA256Reset
+00000000 T SHA256Result
+00000000 T SHA384FinalBits
+00000000 T SHA384Input
+00000000 T SHA384Reset
+00000000 T SHA384Result
+00000000 T SHA512FinalBits
+00000000 T SHA512Input
+00000000 T SHA512Reset
+00000000 T SHA512Result
+00000000 T TcpConnClose
+00000000 T TcpConnConnect
+00000000 T TcpConnWaitRead
+00000000 T TcpConnWaitWriteN
+00000000 T TcpConnect
+00000000 T TcpConnectM
+00000000 T TcpConnectMIp
+00000000 T TcpConnectS
+00000000 T TcpConnectS2
+00000000 T TiRtcConnGetUserData
+00000000 T TiRtcConnSetUserData
+00000000 T TiRtcConnect
+00000000 T TiRtcDisconnect
+00000000 T TiRtcGetBuildInfo
+00000000 T TiRtcGetErrorStr
+00000000 T TiRtcGetSendBufferUsed
+00000000 T TiRtcGetVersion
+00000000 T TiRtcInit
+00000000 T TiRtcLogConfig
+00000000 T TiRtcLogSetCallback
+00000000 T TiRtcLogSetLevel
+00000000 T TiRtcRequestKeyFrame
+00000000 T TiRtcSendAudioStream
+00000000 T TiRtcSendCommand
+00000000 T TiRtcSendMessageStream
+00000000 T TiRtcSendVideoStream
+00000000 T TiRtcServiceRequest
+00000000 T TiRtcSetOption
+00000000 T TiRtcStart
+00000000 T TiRtcStop
+00000000 T TiRtcSubscribeAudio
+00000000 T TiRtcSubscribeVideo
+00000000 T TiRtcUninit
+00000000 T TiRtcUnsubscribeAudio
+00000000 T TiRtcUnsubscribeVideo
+00000000 T TiRtcWhipAccept
+00000000 T TiRtcWhipConnect
+00000000 T USHABlockSize
+00000000 T USHAFinalBits
+00000000 T USHAHashName
+00000000 T USHAHashSize
+00000000 T USHAHashSizeBits
+00000000 T USHAInput
+00000000 T USHAReset
+00000000 T USHAResult
+00000000 T _HttpConnOpen
+00000000 T _is_rfc3986_reserved_char
+00000000 T _lutil_b64_ntop
+00000000 T _lutil_b64_pton
+00000000 T _svcReq_j
+00000000 T _svcReq_s
+00000000 T aesEncryptInPlace
+00000000 T app_enable_log
+00000000 T app_get_current_log_level
+00000000 T app_log
+00000000 T app_log_is_enable
+00000000 T app_log_level
+00000000 T app_log_perf_stat
+00000000 T app_log_setcolor
+00000000 T app_log_time
+00000000 T app_set_log_callback
+00000000 T atomic_get_cmd_sn
+00000000 T calc_crc32
+00000000 T crc32_lsb
+00000000 T crc32_msb
+00000000 T crc32_msb_init
+00000000 T darray_binary_search
+00000000 T darray_clear
+00000000 T darray_count
+00000000 T darray_erase
+00000000 T darray_erase2
+00000000 T darray_find
+00000000 T darray_free
+00000000 T darray_get
+00000000 T darray_init
+00000000 T darray_insert
+00000000 T darray_insert2
+00000000 T darray_insert_sorted
+00000000 T darray_pop_back
+00000000 T darray_pop_front
+00000000 T darray_push_back
+00000000 T decrypt_connect_str
+00000000 T desDecrypt
+00000000 T desDecryptInPlace
+00000000 T desEncryptInPlace
+00000000 T deserialize_c2c_common_header
+00000000 T deserialize_server_notify_ext_data
+00000000 T deserialize_signal_addr_info
+00000000 T deserialize_signal_answer_t
+00000000 T deserialize_signal_c2s_heartbeat_ack
+00000000 T deserialize_signal_c2s_notify_device_events
+00000000 T deserialize_signal_c2s_tunnel_cmd
+00000000 T deserialize_signal_call
+00000000 T deserialize_signal_cmd_header
+00000000 T deserialize_signal_ice_candidate
+00000000 T deserialize_signal_offer_answer
+00000000 T deserialize_signal_string
+00000000 T deserialize_signal_swap_candidate
+00000000 T deserialize_signal_tg_relay_server_info
+00000000 T deserialize_signal_turn_info
+00000000 T deserialize_signal_turn_info_notify
+00000000 T deserialize_turn_list_response_for_check
+00000000 T destroy_peer_connection
+00000000 T destroy_peer_connection_ex
+00000000 T do_http
+00000000 T dtls_connection_create
+00000000 T dtls_connection_destroy
+00000000 T dtls_get_ice_ptr
+00000000 T dtls_get_pid_and_connid
+00000000 T freertos_ThreadCreateWithStackSize
+00000000 T get_package_type
+00000000 T global_sctp_init
+00000000 T hkdf
+00000000 T hkdfExpand
+00000000 T hkdfExtract
+00000000 T hkdfFinalBits
+00000000 T hkdfInput
+00000000 T hkdfReset
+00000000 T hkdfResult
+00000000 T hmac
+00000000 T hmacFinalBits
+00000000 T hmacInput
+00000000 T hmacReset
+00000000 T hmacResult
+00000000 T http_do
+00000000 T http_errstr
+00000000 T http_get
+00000000 T http_get_with_cb
+00000000 T http_method_name
+00000000 T http_parse_url
+00000000 T http_post
+00000000 T http_post_multiparts
+00000000 T http_post_with_cb
+00000000 T http_put
+00000000 T http_set_connector
+00000000 T http_simple_do
+00000000 T http_simple_get
+00000000 T http_util_bin2hex
+00000000 T http_util_hex2bin
+00000000 T http_util_inetp2tm
+00000000 T http_util_time2inetp
+00000000 T http_util_time2inetp_r
+00000000 T http_util_urldecode
+00000000 T http_util_urlencode
+00000000 T ice_add_turn_server_address
+00000000 T ice_agent_active_checklist_count
+00000000 T ice_agent_add_local_candidate
+00000000 T ice_agent_add_remote_candidate
+00000000 T ice_agent_add_remote_candidate_internal
+00000000 T ice_agent_add_remote_peer_reflexive_candidate
+00000000 T ice_agent_allocate
+00000000 T ice_agent_and_channel_refresh
+00000000 T ice_agent_bind
+00000000 T ice_agent_channel_bind
+00000000 T ice_agent_clear_reqs
+00000000 T ice_agent_connect
+00000000 T ice_agent_create
+00000000 T ice_agent_destroy
+00000000 T ice_agent_find_local_candidate
+00000000 T ice_agent_find_remote_candidate
+00000000 T ice_agent_gather
+00000000 T ice_agent_get_nominated_pair_ptr
+00000000 T ice_agent_get_pair_stat_info
+00000000 T ice_agent_get_pid_and_connid
+00000000 T ice_agent_get_select_pair
+00000000 T ice_agent_get_select_pair_type
+00000000 T ice_agent_input
+00000000 T ice_agent_list_local_candidate
+00000000 T ice_agent_list_pair_count
+00000000 T ice_agent_list_pairs
+00000000 T ice_agent_list_remote_candidate
+00000000 T ice_agent_local_candidate_count
+00000000 T ice_agent_notify_select_pair_change
+00000000 T ice_agent_on_selected_pair_change
+00000000 T ice_agent_onrolechanged
+00000000 T ice_agent_remote_candidate_count
+00000000 T ice_agent_send
+00000000 T ice_agent_set_link_param
+00000000 T ice_agent_set_local_auth
+00000000 T ice_agent_set_remote_auth
+00000000 T ice_agent_set_signal_event_stat_cb
+00000000 T ice_agent_setcontrolling
+00000000 T ice_agent_start
+00000000 T ice_agent_stop
+00000000 T ice_agent_stun_check
+00000000 T ice_candidate_attribute
+00000000 T ice_check_list_pair_count
+00000000 T ice_check_list_pairs
+00000000 T ice_checklist_add_candidate_pair
+00000000 T ice_checklist_add_newpair
+00000000 T ice_checklist_cancel
+00000000 T ice_checklist_check_and_try_switch_nominated_pair
+00000000 T ice_checklist_create
+00000000 T ice_checklist_destroy
+00000000 T ice_checklist_get_nominated_pair
+00000000 T ice_checklist_get_pair
+00000000 T ice_checklist_getstatus
+00000000 T ice_checklist_onrolechanged
+00000000 T ice_checklist_start
+00000000 T ice_checklist_trigger
+00000000 T ice_checklist_update_pair_remote_candidate_type
+00000000 T ice_connection_pair_is_connected
+00000000 T ice_create_connection
+00000000 T ice_create_connection_internal
+00000000 T ice_debug_candidate_pair_str
+00000000 T ice_debug_candidate_str
+00000000 T ice_debug_format
+00000000 T ice_debug_output_pairs
+00000000 T ice_destroy_connection
+00000000 T ice_gather_destroy
+00000000 T ice_get_link_param
+00000000 T ice_get_peer_connection_stat_pairs_callback
+00000000 T ice_get_pid_and_connid
+00000000 T ice_has_turn_server_address
+00000000 T ice_link_param_can_use_local_tcp
+00000000 T ice_link_param_can_use_local_udp
+00000000 T ice_link_param_can_use_tgrelay
+00000000 T ice_link_param_can_use_turn
+00000000 T ice_link_param_fast_disconnect
+00000000 T ice_link_param_performance_level
+00000000 T ice_link_param_use_tcpturn
+00000000 T ice_link_param_use_udpturn
+00000000 T ice_pair_to_str
+00000000 T ice_prev_create_connection
+00000000 T ice_stat_pairs_callback
+00000000 T ice_stream_create
+00000000 T ice_stream_destroy
+00000000 T ice_timer_start
+00000000 T ice_timer_stop
+00000000 T ice_timer_valid
+00000000 T ice_turn_server_address_count
+00000000 T ikcp_allocator
+00000000 T ikcp_check_with_lock
+00000000 T ikcp_create
+00000000 T ikcp_flush_with_lock
+00000000 T ikcp_getconv
+00000000 T ikcp_input_with_lock
+00000000 T ikcp_interval
+00000000 T ikcp_log
+00000000 T ikcp_nodelay
+00000000 T ikcp_parse_data
+00000000 T ikcp_peeksize_with_lock
+00000000 T ikcp_qprint
+00000000 T ikcp_recv_with_lock
+00000000 T ikcp_release
+00000000 T ikcp_send_vec_lock_and_encrypt
+00000000 T ikcp_send_with_lock
+00000000 T ikcp_set_stat_fun
+00000000 T ikcp_setmtu
+00000000 T ikcp_setoutput
+00000000 T ikcp_setoutput_ex
+00000000 T ikcp_update_with_lock
+00000000 T ikcp_waitsnd_with_lock
+00000000 T ikcp_wndsize
+00000000 T is_stun_datagram
+00000000 T lutil_b64_ntop
+00000000 T lutil_b64_pton
+00000000 T lutil_my_b64_ntop
+00000000 T lutil_my_b64_pton
+00000000 T md5_hmac
+00000000 T md5_md
+00000000 T my_dump_hex
+00000000 T my_resolve_ipv4
+00000000 T normal_resolver
+00000000 T peer_connection_create
+00000000 T peer_connection_create_v2
+00000000 T peer_connection_debug_check_on_server
+00000000 T peer_connection_debug_check_on_server_conn_deleted
+00000000 T peer_connection_turn_server_check
+00000000 T rtc_async_thread_destroy
+00000000 T rtc_thread_add_stat
+00000000 T rtc_thread_create
+00000000 T rtc_thread_create_not_startthread
+00000000 T rtc_thread_destroy
+00000000 T rtc_thread_loop_once
+00000000 T rtc_thread_stat_name
+00000000 T rtsp_header_range
+00000000 T rtsp_header_rtp_info
+00000000 T rtsp_header_session
+00000000 T rtsp_media_sdp
+00000000 T rtsp_reason_phrase
+00000000 T sdp_a_extmap
+00000000 T sdp_a_fingerprint
+00000000 T sdp_a_fmtp
+00000000 T sdp_a_fmtp_h264
+00000000 T sdp_a_fmtp_h265
+00000000 T sdp_a_fmtp_mpeg4
+00000000 T sdp_a_group
+00000000 T sdp_a_ice_candidate
+00000000 T sdp_a_ice_options
+00000000 T sdp_a_ice_pacing
+00000000 T sdp_a_ice_remote_candidates
+00000000 T sdp_a_mid
+00000000 T sdp_a_msid
+00000000 T sdp_a_orient
+00000000 T sdp_a_rid
+00000000 T sdp_a_rtcp
+00000000 T sdp_a_rtcp_fb
+00000000 T sdp_a_rtpmap
+00000000 T sdp_a_simulcast
+00000000 T sdp_a_ssrc
+00000000 T sdp_a_ssrc_group
+00000000 T sdp_attribute_count
+00000000 T sdp_attribute_find
+00000000 T sdp_attribute_get
+00000000 T sdp_attribute_list
+00000000 T sdp_bandwidth_count
+00000000 T sdp_bandwidth_get_type
+00000000 T sdp_bandwidth_get_value
+00000000 T sdp_connection_get
+00000000 T sdp_connection_get_address
+00000000 T sdp_connection_get_addrtype
+00000000 T sdp_connection_get_network
+00000000 T sdp_destroy
+00000000 T sdp_email_count
+00000000 T sdp_email_get
+00000000 T sdp_media_attribute_find
+00000000 T sdp_media_attribute_list
+00000000 T sdp_media_bandwidth_count
+00000000 T sdp_media_bandwidth_get_type
+00000000 T sdp_media_bandwidth_get_value
+00000000 T sdp_media_count
+00000000 T sdp_media_formats
+00000000 T sdp_media_get_connection
+00000000 T sdp_media_get_connection_address
+00000000 T sdp_media_get_connection_addrtype
+00000000 T sdp_media_get_connection_network
+00000000 T sdp_media_mode
+00000000 T sdp_media_port
+00000000 T sdp_media_proto
+00000000 T sdp_media_type
+00000000 T sdp_option_media_from
+00000000 T sdp_option_media_to
+00000000 T sdp_option_mode_from
+00000000 T sdp_option_mode_to
+00000000 T sdp_option_proto_from
+00000000 T sdp_option_proto_to
+00000000 T sdp_option_setup_from
+00000000 T sdp_option_setup_to
+00000000 T sdp_origin_get
+00000000 T sdp_origin_get_addrtype
+00000000 T sdp_origin_get_network
+00000000 T sdp_parse
+00000000 T sdp_phone_count
+00000000 T sdp_phone_get
+00000000 T sdp_session_get_information
+00000000 T sdp_session_get_name
+00000000 T sdp_timing_count
+00000000 T sdp_timing_get
+00000000 T sdp_timing_repeat_count
+00000000 T sdp_timing_timezone_count
+00000000 T sdp_uri_get
+00000000 T sdp_version_get
+00000000 T send_data_with_retry
+00000000 T serialize_c2c_common_header
+00000000 T serialize_session_report_peer_connectoin_stat_cmd
+00000000 T serialize_signal_addr_info
+00000000 T serialize_signal_answer
+00000000 T serialize_signal_c2s_heartbeat
+00000000 T serialize_signal_c2s_notify_device_events
+00000000 T serialize_signal_c2s_tunnel_cmd
+00000000 T serialize_signal_call
+00000000 T serialize_signal_cmd_header
+00000000 T serialize_signal_ice_candidate
+00000000 T serialize_signal_offer_answer
+00000000 T serialize_signal_report_cmd
+00000000 T serialize_signal_report_string
+00000000 T serialize_signal_string
+00000000 T serialize_signal_swap_candidate
+00000000 T serialize_signal_turn_info
+00000000 T session_callid
+00000000 T session_close
+00000000 T session_close_ex
+00000000 T session_get_deviceid
+00000000 T session_get_remote_deviceid
+00000000 T session_get_remote_version
+00000000 T session_report_data_channel_created
+00000000 T session_report_gathering_state_change
+00000000 T session_report_ice_connection_state_change
+00000000 T session_report_p2p_link_success
+00000000 T session_report_p2p_link_timeout
+00000000 T session_report_peer_connection_stat_info
+00000000 T session_report_peer_connection_state_change
+00000000 T session_report_selected_pair_changed
+00000000 T session_report_signal_state_change
+00000000 T session_report_video_success
+00000000 T session_send_answer
+00000000 T session_send_answer_bymedia
+00000000 T session_send_candidate
+00000000 T session_stat_add_event
+00000000 T sha1_hmac
+00000000 T sha1_md
+00000000 T sha256_hmac
+00000000 T sha256_md
+00000000 T signReq
+00000000 T signal_buffer_object_create
+00000000 T signal_call
+00000000 T signal_call_by_media
+00000000 T signal_channel_tcp_recv
+00000000 T signal_close
+00000000 T signal_close_ex_async_callback
+00000000 T signal_conn_reset_last_heartbeat_ts
+00000000 T signal_connection_c2c_send
+00000000 T signal_connection_c2c_send_internal
+00000000 T signal_connection_clear_pending_heartbeat_request
+00000000 T signal_connection_destroy_tcp_channel
+00000000 T signal_connection_find_request_by_seq
+00000000 T signal_connection_free_c2c_req
+00000000 T signal_connection_free_heartbeat_req
+00000000 T signal_connection_handle_c2c_protocal_message
+00000000 T signal_connection_handle_message
+00000000 T signal_connection_handle_protocal_message
+00000000 T signal_connection_handle_sock_readev
+00000000 T signal_connection_has_pending_heartbeat_request
+00000000 T signal_connection_heartbeat_send
+00000000 T signal_connection_heartbeat_send_internal
+00000000 T signal_connection_init
+00000000 T signal_connection_notify_channel_failed
+00000000 T signal_connection_notify_tcp_channel_failed
+00000000 T signal_connection_poll
+00000000 T signal_connection_raw_send
+00000000 T signal_connection_send_heatbeat
+00000000 T signal_connection_try_tcp_send
+00000000 T signal_connection_uninit
+00000000 T signal_create_conn_heartbeat_request
+00000000 T signal_create_conn_session
+00000000 T signal_create_conn_session_if_not_exist
+00000000 T signal_create_connection_c2c_request
+00000000 T signal_create_parent_session_if_not_exit
+00000000 T signal_create_tcp_channel
+00000000 T signal_create_tcp_channel_with_sock
+00000000 T signal_debug_force_use_tcp
+00000000 T signal_destroy_conn_session
+00000000 T signal_destroy_conn_session_byid
+00000000 T signal_destroy_parent_session
+00000000 T signal_device_report
+00000000 T signal_device_report_p2p_transfer_bytes
+00000000 T signal_find_connection_by_sock
+00000000 T signal_find_connection_byaddr
+00000000 T signal_find_session
+00000000 T signal_get_library_property
+00000000 T signal_handle_destroy_parent_session_msg
+00000000 T signal_init
+00000000 T signal_init_session
+00000000 T signal_is_heartbeat_valid
+00000000 T signal_is_remote_device_callid_deleted
+00000000 T signal_list_turn_servers_for_check
+00000000 T signal_listen
+00000000 T signal_listen_v2
+00000000 T signal_manager_create
+00000000 T signal_manager_create_asyn_function
+00000000 T signal_manager_create_tunnel_remote_device
+00000000 T signal_manager_destroy
+00000000 T signal_manager_destroy_impl
+00000000 T signal_manager_destroy_tunnel_node
+00000000 T signal_manager_destroy_tunnel_remote_device
+00000000 T signal_manager_device_events_notify
+00000000 T signal_manager_get_nattype
+00000000 T signal_manager_get_tunnel_id_node
+00000000 T signal_manager_get_tunnel_remote_device
+00000000 T signal_manager_handle_answer
+00000000 T signal_manager_handle_signal_c2s_tunnel_cmd
+00000000 T signal_manager_handle_turn_server_notify
+00000000 T signal_manager_new_call_session
+00000000 T signal_manager_poll
+00000000 T signal_manager_report_start_stat_info
+00000000 T signal_manager_start
+00000000 T signal_manager_swap_candidate_notify
+00000000 T signal_manager_thread_handle_asyn_req
+00000000 T signal_offer_answer_cmd_to_description
+00000000 T signal_parse_config_json
+00000000 T signal_protocal_get_package_len
+00000000 T signal_protocal_set_package_len
+00000000 T signal_push_req_into_manager
+00000000 T signal_session_call_back_emit
+00000000 T signal_session_call_back_type
+00000000 T signal_session_create_req
+00000000 T signal_session_free_req
+00000000 T signal_session_is_received
+00000000 T signal_session_send_events_to_app
+00000000 T signal_session_set_receive
+00000000 T signal_session_update_state
+00000000 T signal_set_device_type
+00000000 T signal_set_session_cb
+00000000 T signal_set_session_timeout
+00000000 T signal_socket_send_data
+00000000 T signal_string_convert
+00000000 T signal_tcp_channel_failed
+00000000 T signal_tcp_send
+00000000 T signal_tcp_send_vec
+00000000 T signal_timer_start
+00000000 T signal_timer_stop
+00000000 T signal_timer_valid
+00000000 T signal_uninit
+00000000 T signal_uninit_session
+00000000 T socket_accept
+00000000 T socket_accept_by_time
+00000000 T socket_addr_compare
+00000000 T socket_addr_compare_only_ipaddress
+00000000 T socket_addr_from
+00000000 T socket_addr_from_ipv4
+00000000 T socket_addr_init
+00000000 T socket_addr_is_local
+00000000 T socket_addr_is_multicast
+00000000 T socket_addr_len
+00000000 T socket_addr_setport
+00000000 T socket_addr_to
+00000000 T socket_bind
+00000000 T socket_bind_addr
+00000000 T socket_cleanup
+00000000 T socket_close
+00000000 T socket_connect
+00000000 T socket_connect_by_time
+00000000 T socket_connect_host
+00000000 T socket_getbufvec
+00000000 T socket_geterror
+00000000 T socket_getkeepalive
+00000000 T socket_getlinger
+00000000 T socket_getname
+00000000 T socket_getopt_bool
+00000000 T socket_getpeername
+00000000 T socket_getrecvbuf
+00000000 T socket_getrecvtimeout
+00000000 T socket_getreuseaddr
+00000000 T socket_getreuseport
+00000000 T socket_getsendbuf
+00000000 T socket_getsendtimeout
+00000000 T socket_init
+00000000 T socket_ipv4
+00000000 T socket_isip
+00000000 T socket_listen
+00000000 T socket_raw
+00000000 T socket_raw_ipv6
+00000000 T socket_readable
+00000000 T socket_recv
+00000000 T socket_recv_all_by_time
+00000000 T socket_recv_by_time
+00000000 T socket_recvfrom
+00000000 T socket_recvfrom_by_time
+00000000 T socket_select
+00000000 T socket_select_connect
+00000000 T socket_select_read
+00000000 T socket_select_readfds
+00000000 T socket_select_write
+00000000 T socket_select_writefds
+00000000 T socket_send
+00000000 T socket_send_all_by_time
+00000000 T socket_send_by_time
+00000000 T socket_send_v
+00000000 T socket_send_v_all_by_time
+00000000 T socket_sendto
+00000000 T socket_sendto_addr
+00000000 T socket_sendto_by_time
+00000000 T socket_sendto_v
+00000000 T socket_sendto_v_by_time
+00000000 T socket_setbufvec
+00000000 T socket_setcork
+00000000 T socket_setkeepalive
+00000000 T socket_setlinger
+00000000 T socket_setnonblock
+00000000 T socket_setnondelay
+00000000 T socket_setopt_bool
+00000000 T socket_setrecvbuf
+00000000 T socket_setrecvtimeout
+00000000 T socket_setreuseaddr
+00000000 T socket_setreuseport
+00000000 T socket_setsendbuf
+00000000 T socket_setsendtimeout
+00000000 T socket_shutdown
+00000000 T socket_tcp
+00000000 T socket_tcp_ipv6
+00000000 T socket_tcp_listen
+00000000 T socket_tcp_listen_ipv4
+00000000 T socket_udp
+00000000 T socket_udp_bind
+00000000 T socket_udp_bind_addr
+00000000 T socket_udp_bind_ipv4
+00000000 T socket_udp_ipv6
+00000000 T socket_writeable
+00000000 T stun_agent_bind
+00000000 T stun_agent_bind_response
+00000000 T stun_agent_clear_reqs
+00000000 T stun_agent_create
+00000000 T stun_agent_destroy
+00000000 T stun_agent_discard
+00000000 T stun_agent_input2
+00000000 T stun_agent_insert
+00000000 T stun_agent_prev_destroy
+00000000 T stun_agent_remove
+00000000 T stun_agent_request_auth_check
+00000000 T stun_agent_response_auth_check
+00000000 T stun_attr_read
+00000000 T stun_attr_write
+00000000 T stun_credential_setauth
+00000000 T stun_header_read
+00000000 T stun_header_write
+00000000 T stun_message_add_address
+00000000 T stun_message_add_credentials
+00000000 T stun_message_add_data
+00000000 T stun_message_add_error
+00000000 T stun_message_add_fingerprint
+00000000 T stun_message_add_flag
+00000000 T stun_message_add_string
+00000000 T stun_message_add_uint16
+00000000 T stun_message_add_uint32
+00000000 T stun_message_add_uint64
+00000000 T stun_message_add_uint8
+00000000 T stun_message_attr_find
+00000000 T stun_message_attr_list
+00000000 T stun_message_check_fingerprint
+00000000 T stun_message_check_integrity
+00000000 T stun_message_has_fingerprint
+00000000 T stun_message_has_integrity
+00000000 T stun_message_read
+00000000 T stun_message_send
+00000000 T stun_message_write
+00000000 T stun_req_extern_info_ptr
+00000000 T stun_request_addref
+00000000 T stun_request_create
+00000000 T stun_request_getauth
+00000000 T stun_request_getmessage
+00000000 T stun_request_prepare
+00000000 T stun_request_release
+00000000 T stun_request_send
+00000000 T stun_request_setaddr
+00000000 T stun_request_setauth
+00000000 T stun_request_settimeout
+00000000 T stun_response_create
+00000000 T stun_response_destroy
+00000000 T stun_response_send
+00000000 T stun_response_setauth
+00000000 T stun_server_onbind
+00000000 T stun_server_onbindindication
+00000000 T stun_transaction_id
+00000000 T svcReq_j
+00000000 T svcReq_s
+00000000 T svc_connect
+00000000 T svc_connect_whip
+00000000 T svc_req
+00000000 T svc_start
+00000000 T svc_whip_post_offer
+00000000 T tgJSON_AddArrayToObject
+00000000 T tgJSON_AddBoolToObject
+00000000 T tgJSON_AddFalseToObject
+00000000 T tgJSON_AddIntegerToObject
+00000000 T tgJSON_AddItemReferenceToArray
+00000000 T tgJSON_AddItemReferenceToObject
+00000000 T tgJSON_AddItemToArray
+00000000 T tgJSON_AddItemToObject
+00000000 T tgJSON_AddItemToObjectCS
+00000000 T tgJSON_AddNullToObject
+00000000 T tgJSON_AddNumberToObject
+00000000 T tgJSON_AddObjectToObject
+00000000 T tgJSON_AddRawToObject
+00000000 T tgJSON_AddStringToObject
+00000000 T tgJSON_AddTrueToObject
+00000000 T tgJSON_Compare
+00000000 T tgJSON_CreateArray
+00000000 T tgJSON_CreateArrayReference
+00000000 T tgJSON_CreateBool
+00000000 T tgJSON_CreateDoubleArray
+00000000 T tgJSON_CreateFalse
+00000000 T tgJSON_CreateFloatArray
+00000000 T tgJSON_CreateIntArray
+00000000 T tgJSON_CreateInteger
+00000000 T tgJSON_CreateNull
+00000000 T tgJSON_CreateNumber
+00000000 T tgJSON_CreateObject
+00000000 T tgJSON_CreateObjectReference
+00000000 T tgJSON_CreateRaw
+00000000 T tgJSON_CreateString
+00000000 T tgJSON_CreateStringArray
+00000000 T tgJSON_CreateStringReference
+00000000 T tgJSON_CreateTrue
+00000000 T tgJSON_Delete
+00000000 T tgJSON_DeleteItemFromArray
+00000000 T tgJSON_DeleteItemFromObject
+00000000 T tgJSON_DeleteItemFromObjectCaseSensitive
+00000000 T tgJSON_DetachItemFromArray
+00000000 T tgJSON_DetachItemFromObject
+00000000 T tgJSON_DetachItemFromObjectCaseSensitive
+00000000 T tgJSON_DetachItemViaPointer
+00000000 T tgJSON_Duplicate
+00000000 T tgJSON_GetArrayItem
+00000000 T tgJSON_GetArraySize
+00000000 T tgJSON_GetErrorPtr
+00000000 T tgJSON_GetObjectItem
+00000000 T tgJSON_GetObjectItemCaseSensitive
+00000000 T tgJSON_GetStringValue
+00000000 T tgJSON_HasObjectItem
+00000000 T tgJSON_InsertItemInArray
+00000000 T tgJSON_IsArray
+00000000 T tgJSON_IsBool
+00000000 T tgJSON_IsFalse
+00000000 T tgJSON_IsInvalid
+00000000 T tgJSON_IsNull
+00000000 T tgJSON_IsNumber
+00000000 T tgJSON_IsObject
+00000000 T tgJSON_IsRaw
+00000000 T tgJSON_IsString
+00000000 T tgJSON_IsTrue
+00000000 T tgJSON_Minify
+00000000 T tgJSON_Parse
+00000000 T tgJSON_ParseWithLength
+00000000 T tgJSON_ParseWithLengthOpts
+00000000 T tgJSON_ParseWithOpts
+00000000 T tgJSON_Print
+00000000 T tgJSON_PrintBuffered
+00000000 T tgJSON_PrintPreallocated
+00000000 T tgJSON_PrintUnformatted
+00000000 T tgJSON_ReplaceItemInArray
+00000000 T tgJSON_ReplaceItemInObject
+00000000 T tgJSON_ReplaceItemInObjectCaseSensitive
+00000000 T tgJSON_ReplaceItemViaPointer
+00000000 T tgJSON_SetNumberHelper
+00000000 T tgJSON_SetValuestring
+00000000 T tgJSON_Version
+00000000 T tgJSON_free
+00000000 T tgJSON_malloc
+00000000 T tgrtc_debug_emit_msg
+00000000 T tgrtc_debug_free_strings
+00000000 T tgrtc_debug_get_server_cfg
+00000000 T tgrtc_debug_log
+00000000 T tgrtc_debug_module_init
+00000000 T tgrtc_debug_module_set_tunnel
+00000000 T tgrtc_debug_module_uninit
+00000000 T tgrtc_debug_register_listener
+00000000 T tgrtc_debug_reset_log_settings
+00000000 T tgrtc_debug_send
+00000000 T tgrtc_debug_set_remote_debugger
+00000000 T tgrtc_debug_split_string
+00000000 T tgrtc_debug_unregister_listener
+00000000 T tgrtc_is_debug_log_enable
+00000000 T tgrtc_is_debugging
+00000000 T tgrtc_open_debug_tunnel
+00000000 T tgrtc_tunnel_register_receiver
+00000000 T tgrtc_tunnel_send_packet
+00000000 T tgtrp_channel_get_label
+00000000 T tgtrp_channel_get_used_send_buffer_size
+00000000 T tgtrp_channel_new
+00000000 T tgtrp_channel_sendv
+00000000 T tgtrp_channel_set_on_data
+00000000 T tgtrp_close
+00000000 T tgtrp_close_finish_cb
+00000000 T tgtrp_connection_call
+00000000 T tgtrp_connection_destroy
+00000000 T tgtrp_connection_enable_debug
+00000000 T tgtrp_connection_get_info
+00000000 T tgtrp_connection_new
+00000000 T tgtrp_connection_set_on_channel
+00000000 T tgtrp_connection_set_on_error
+00000000 T tgtrp_connection_set_timeout
+00000000 T tgtrp_connection_whip_add_candidate
+00000000 T tgtrp_connection_whip_create_answer_sdp
+00000000 T tgtrp_connection_whip_create_offer_sdp
+00000000 T tgtrp_connection_whip_new
+00000000 T tgtrp_connection_whip_set_candidate_ip
+00000000 T tgtrp_connection_whip_set_remote_sdp
+00000000 T tgtrp_connection_whip_start_connect
+00000000 T tgtrp_get_library_property
+00000000 T tgtrp_init
+00000000 T tgtrp_listen
+00000000 T tgtrp_listener_bind
+00000000 T tgtrp_listener_new
+00000000 T tgtrp_listener_set_opt
+00000000 T tgtrp_notify_peer_connection_thread_close_cb
+00000000 T tgtrp_peer_connection_close_finish_cb
+00000000 T tgtrp_session_close_finish_cb
+00000000 T tgtrp_set_log_callback
+00000000 T tgtrp_set_log_level
+00000000 T tgtrp_uninit
+00000000 T tgwebrct_base64_decode
+00000000 T tgwebrct_base64_encode
+00000000 T tgwebrct_base64_encode_url
+00000000 T tgwebrtc_dtls_init
+00000000 T tgwebrtc_dtls_uninit
+00000000 T tgwebrtc_encryption_decrypt
+00000000 T tgwebrtc_encryption_encrypt
+00000000 T tgwebrtc_encryption_encrypt_partial_buffer
+00000000 T tgwebrtc_encryption_encrypt_vec
+00000000 T tgwebrtc_ice_init
+00000000 T tgwebrtc_ice_uninit
+00000000 T tgwebrtc_init
+00000000 T tgwebrtc_md5_final
+00000000 T tgwebrtc_md5_init
+00000000 T tgwebrtc_md5_update
+00000000 T tgwebrtc_prev_create_connection
+00000000 T tgwebrtc_time_wheel_create
+00000000 T tgwebrtc_time_wheel_destroy
+00000000 T tgwebrtc_twtimer_process
+00000000 T tgwebrtc_twtimer_start
+00000000 T tgwebrtc_twtimer_stop
+00000000 T tgwebrtc_twtimer_valid
+00000000 T tgwebrtc_uninit
+00000000 T time64_format
+00000000 T time64_from
+00000000 T time64_local
+00000000 T time64_now
+00000000 T time64_utc
+00000000 T timed_connect
+00000000 T tirtc_event_short_name
+00000000 T tirtc_signal_events_add
+00000000 T tirtc_signal_events_list
+00000000 T turn_agent_allocate
+00000000 T turn_agent_allocation_find_by_address
+00000000 T turn_agent_allocation_find_by_relay
+00000000 T turn_agent_allocation_insert
+00000000 T turn_agent_allocation_remove
+00000000 T turn_agent_and_channel_refresh
+00000000 T turn_agent_channel_bind
+00000000 T turn_agent_create_permission
+00000000 T turn_agent_refresh
+00000000 T turn_agent_send
+00000000 T turn_allocation_add_channel
+00000000 T turn_allocation_add_permission
+00000000 T turn_allocation_create
+00000000 T turn_allocation_destroy
+00000000 T turn_allocation_find_channel
+00000000 T turn_allocation_find_channel_by_peer
+00000000 T turn_allocation_find_permission
+00000000 T turn_client_allocate_onresponse
+00000000 T turn_client_channel_bind_onresponse
+00000000 T turn_client_create_permission_onresponse
+00000000 T turn_client_onchannel_data
+00000000 T turn_client_ondata
+00000000 T turn_client_refresh_onresponse
+00000000 T turn_try_allocation_refresh
+00000000 T vLogf
+00000000 T webrtc_app_log
+aio-timeout.o:
+app-log.o:
+base64.o:
+common.o:
+crc32.o:
+crc32.o:
+crypto_wrapper.o:
+darray.o:
+dtls_connection.o:
+encryption_algorithm.o:
+hkdf.o:
+hmac.o:
+httpclt.o:
+ice-agent.o:
+ice-candidate.o:
+ice-checklist.o:
+ice-gather.o:
+ice-internal.o:
+ice-stream.o:
+ice_connection.o:
+ikcp.o:
+logfile.o:
+md5.o:
+my_base64.o:
+net_basic.o:
+peer_connection.o:
+platforms.o:
+protocol.o:
+resolver.o:
+rtc_debug.o:
+rtc_thread.o:
+rtsp-header-range.o:
+rtsp-header-rtp-info.o:
+rtsp-header-session.o:
+rtsp-header-transport.o:
+rtsp-media.o:
+rtsp-multicast.o:
+rtsp-reason.o:
+sdp-a-fmtp.o:
+sdp-a-rtpmap.o:
+sdp-a-webrtc.o:
+sdp-options.o:
+sdp.o:
+sha.o:
+sha1.o:
+sha224-256.o:
+sha384-512.o:
+signal_connection.o:
+signal_events.o:
+signal_interface.o:
+signal_manager.o:
+signal_session.o:
+signal_tcp_channel.o:
+signal_udp_channel.o:
+sock.o:
+sockutil.o:
+stun-agent.o:
+stun-attr.o:
+stun-auth.o:
+stun-client.o:
+stun-message.o:
+stun-request.o:
+stun-response.o:
+stun-server.o:
+stun-transid.o:
+svc.o:
+sysnetconfig.o:
+tgJSON.o:
+tgtrp.o:
+tiRTC.o:
+time64.o:
+turn-agent.o:
+turn-allocate.o:
+turn-client.o:
+turn-server.o:
+twtimer.o:

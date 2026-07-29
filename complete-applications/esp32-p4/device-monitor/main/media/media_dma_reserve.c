@@ -9,7 +9,7 @@
 static const char *TAG = "media_dma";
 
 #ifndef CONFIG_APP_DMA_ESCROW_BYTES
-#define CONFIG_APP_DMA_ESCROW_BYTES (64U * 1024U)
+#define CONFIG_APP_DMA_ESCROW_BYTES (96U * 1024U)
 #endif
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;

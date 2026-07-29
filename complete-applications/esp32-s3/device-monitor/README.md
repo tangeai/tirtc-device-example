@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/tangeai/tirtc-device-example/blob/main/LICENSE)
 [![ESP-IDF](https://img.shields.io/badge/ESP--IDF-5.5.4-E7352C?logo=espressif)](https://docs.espressif.com/projects/esp-idf/)
 [![Chip](https://img.shields.io/badge/Chip-ESP32--S3-000000)](https://www.espressif.com/en/products/socs/esp32-s3)
-[![TiRTC SDK](https://img.shields.io/badge/TiRTC%20SDK-2.2.0-1769AA)](https://docs.tange.ai/products/tirtc/overview/what-is-tirtc.html)
+[![TiRTC SDK](https://img.shields.io/badge/TiRTC%20SDK-2.2.0-1769AA)](https://docs.tange.ai/products/tirtc/en/overview/what-is-tirtc.html)
 [![FreeRTOS Tick](https://img.shields.io/badge/FreeRTOS%20Tick-1%20kHz-00A98F)](sdkconfig.defaults)
 
 面向 ESP32-S3 触摸屏设备的 TiRTC 参考工程。它与
@@ -45,35 +45,35 @@
 
 ### 步骤 1：下载当前固件
 
-打开
-[ESP32-S3 v0.7.5 Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-trtc-advanced-v0.7.5)，
-下载：
+打开 [GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases)，
+进入 ESP32-S3 设备端示例 `1.7.6` 对应的 Release，下载：
 
 ```text
-esp32s3-tirtc-device-monitor-full-v0.7.5.bin
+esp32s3-tirtc-device-monitor-full-v1.7.6.bin
 ```
 
-这是写入地址为 `0x0` 的 16 MB 完整镜像。普通体验者不需要分别选择 bootloader、
+这是写入地址为 `0x0` 的完整镜像。普通体验者不需要分别选择 bootloader、
 partition table、app 和 storage。
 
-**完成标志：** 文件名为 `esp32s3-tirtc-device-monitor-full-v0.7.5.bin`，大小为
-`16777216` 字节。名称含 `ota` 的文件不能用于首次完整烧录。
+**完成标志：** 文件名为 `esp32s3-tirtc-device-monitor-full-v1.7.6.bin`，并且
+SHA-256 与同一 Release 中的 `SHA256SUMS.txt` 一致。名称含 `ota` 的文件不能用于
+首次完整烧录。
 
 ### 步骤 2：使用官方网页烧录
 
 1. 用 USB 数据线连接开发板和电脑。
-2. 用 Chrome 或 Edge 打开 [Espressif ESP Launchpad](https://espressif.github.io/esp-launchpad/)。
-3. 进入 DIY 烧录模式并选择开发板串口。
-4. 添加刚下载的完整镜像，地址填写 `0x0`。
+2. 用 Chrome 或 Edge 打开 [Espressif ESP Tool](https://espressif.github.io/esptool-js/)。
+3. 点击 `Connect`，选择开发板串口。
+4. 点击 `Add File` 添加刚下载的完整镜像，`Flash Address` 填写 `0x0`。
 5. 首次使用或设备状态不确定时，先执行“擦除闪存”。
-6. 开始烧录，等待网页明确显示完成。
+6. 点击 `Program`，等待网页明确显示完成。
 7. 按一下开发板 RESET，等待屏幕进入主页。
 
 连接串口失败时，按住 BOOT，点一下 RESET，松开 RESET 后再松开 BOOT，然后重新连接。
 更完整的说明见 [烧录与 OTA](docs/FLASH_AND_OTA_CN.md)。
 
-**完成标志：** ESP Launchpad 明确显示烧录完成；按 RESET 后设备进入主页，设置页显示
-固件版本 `0.7.5`。
+**完成标志：** ESP Tool 明确显示烧录完成；按 RESET 后设备进入主页，设置页显示
+固件版本 `1.7.6`。
 
 ### 步骤 3：连接 Wi-Fi
 
@@ -112,8 +112,8 @@ TiRTC 常驻监听。普通体验者不需要手动输入设备 ID 或设备密�
 
 | 现象 | 先检查 |
 | --- | --- |
-| ESP Launchpad 没有串口 | USB 线是否支持数据、串口是否被其他工具占用、是否进入下载模式 |
-| 烧录后仍显示旧版本 | 是否选择 `full-v0.7.5.bin`、地址是否为 `0x0`、是否按 RESET |
+| ESP Tool 没有串口 | USB 线是否支持数据、串口是否被其他工具占用、是否进入下载模式 |
+| 烧录后仍显示旧版本 | 是否选择 `full-v1.7.6.bin`、地址是否为 `0x0`、是否按 RESET |
 | Wi-Fi 无法连接 | 是否为 2.4 GHz、密码是否正确、路由器是否允许新设备接入 |
 | 没有 6 位验证码 | 是否拿到 IP、系统时间是否同步、设备是否已经绑定 |
 | H5 找不到设备 | 登录账号是否正确、绑定是否成功、设备是否保持在线 |
@@ -145,7 +145,7 @@ TiRTC 常驻监听。普通体验者不需要手动输入设备 ID 或设备密�
 
 | 项目 | 当前值 |
 | --- | --- |
-| 示例版本 | `0.7.5` |
+| 示例版本 | `1.7.6` |
 | 芯片 | ESP32-S3，16 MB Flash，8 MB PSRAM |
 | 开发板 | `LCKFB-SZPI-ESP32-S3-VA` |
 | ESP-IDF | `5.5.4` |
@@ -180,7 +180,7 @@ H5、AI、微信 VoIP、设备互呼和 OTA 的真机验证。
 | `main/protocols` | HTTP、MQTT、RTC 和 TiRTC 适配 |
 | `main/services` | 绑定、在线、H5、AI、微信 VoIP、设备互呼和 OTA |
 | `components/tirtc_sdk` | TiRTC 头文件、静态库和版本契约 |
-| `docs` | 上手、协议对齐、功能流程、架构和发布说明 |
+| `docs` | 上手、协议对齐、功能流程、架构和烧录说明 |
 | `tools` | UI 资源、日志和 Release 打包工具 |
 
 ## 文档地图
@@ -191,7 +191,7 @@ H5、AI、微信 VoIP、设备互呼和 OTA 的真机验证。
 - [烧录与 OTA](docs/FLASH_AND_OTA_CN.md)
 - [设备互呼流程](docs/DEVICE_CALL_FLOW_CN.md)
 - [ThingConnect 协议与功能对齐](docs/THING_CONNECT_ALIGNMENT_CN.md)
-- [0.7.5 发布说明](docs/release/RELEASE_0.7.5_CN.md)
+- [源码来源与验证边界](SOURCE_PROVENANCE.md)
 
 ## 固件发布规则
 

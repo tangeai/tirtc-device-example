@@ -1,8 +1,8 @@
 /*
  * 测试用本地 token 签发。
  *
- * 这段代码把 DevTools CLI 的新版双校验 token 逻辑搬到设备端，便于在没有
- * 业务服务端时快速验证。正式产品不要把 SecretKeyId 或设备密钥固化在固件里。
+ * 这段代码实现公开的连接 token 签名算法，便于在没有业务服务端时快速验证。
+ * 正式产品不要把 SecretKeyId 固化在固件里。
  */
 #include "tirtc_token.h"
 
@@ -28,7 +28,6 @@ static const char *TAG = "tirtc_token";
 #define TOKEN_PAYLOAD_B64_MAX_LEN 768U
 #define TOKEN_BASE64_WORK_MAX_LEN 768U
 #define TOKEN_SIGNATURE_MAX_LEN 64U
-#define TOKEN_SIGN_INPUT_MAX_LEN 896U
 #define TOKEN_DEVICE_ID_MAX_LEN 128U
 
 static bool is_blank_or_placeholder(const char *value, const char *placeholder)
@@ -200,8 +199,6 @@ esp_err_t tirtc_token_fetch_connect(const char *peer_id, char *out_token, size_t
     char nonce_b64[TOKEN_SIGNATURE_MAX_LEN];
     char payload_json[TOKEN_PAYLOAD_JSON_MAX_LEN];
     char payload_b64[TOKEN_PAYLOAD_B64_MAX_LEN];
-    char device_sig[TOKEN_SIGNATURE_MAX_LEN];
-    char sign_input[TOKEN_SIGN_INPUT_MAX_LEN];
     char app_sig[TOKEN_SIGNATURE_MAX_LEN];
     uint8_t nonce[TOKEN_NONCE_BYTES];
     time_t now;
@@ -213,10 +210,9 @@ esp_err_t tirtc_token_fetch_connect(const char *peer_id, char *out_token, size_t
     }
 
     if (is_blank_or_placeholder(TIRTC_TOKEN_ACCESS_ID, "your_token_access_id") ||
-        is_blank_or_placeholder(TIRTC_TOKEN_SECRET_KEY, "your_token_secret_key") ||
-        is_blank_or_placeholder(TIRTC_REMOTE_DEVICE_SECRET_KEY, "peer_device_secret_key"))
+        is_blank_or_placeholder(TIRTC_TOKEN_SECRET_KEY, "your_token_secret_key"))
     {
-        ESP_LOGE(TAG, "请先配置 access_id、secret_key 和目标设备 secret_key");
+        ESP_LOGE(TAG, "请先配置 access_id 和 secret_key");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -269,22 +265,7 @@ esp_err_t tirtc_token_fetch_connect(const char *peer_id, char *out_token, size_t
         return ret;
     }
 
-    ret = hmac_sha256_base64url(TIRTC_REMOTE_DEVICE_SECRET_KEY,
-                                payload_b64,
-                                device_sig,
-                                sizeof(device_sig));
-    if (ret != ESP_OK)
-    {
-        return ret;
-    }
-
-    written = snprintf(sign_input, sizeof(sign_input), "%s.%s", payload_b64, device_sig);
-    if (written < 0 || (size_t)written >= sizeof(sign_input))
-    {
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    ret = hmac_sha256_base64url(TIRTC_TOKEN_SECRET_KEY, sign_input, app_sig, sizeof(app_sig));
+    ret = hmac_sha256_base64url(TIRTC_TOKEN_SECRET_KEY, payload_b64, app_sig, sizeof(app_sig));
     if (ret != ESP_OK)
     {
         return ret;

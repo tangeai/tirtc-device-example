@@ -299,5 +299,7 @@ esp_err_t display_capture_bmp(uint8_t **bmp_data, size_t *bmp_size);
 esp_err_t display_debug_tap(uint16_t x, uint16_t y);
 esp_err_t display_debug_tap_async(uint16_t x, uint16_t y);
 esp_err_t display_debug_scroll_async(uint16_t x, uint16_t y, int16_t dx, int16_t dy);
+esp_err_t display_open_call_page_async(void);
+esp_err_t display_open_call_active_page_async(void);
 esp_err_t display_show_remote_video_frame_rgb565(const uint16_t *pixels, uint16_t width, uint16_t height);
 esp_err_t display_clear_remote_video(void);

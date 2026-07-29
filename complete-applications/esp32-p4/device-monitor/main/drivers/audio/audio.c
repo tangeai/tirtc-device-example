@@ -29,12 +29,14 @@ static const char *TAG = "audio";
 #define AUDIO_CAPTURE_AUTO_GAIN_NOISE_FLOOR_PEAK 192U
 #define AUDIO_CAPTURE_AUTO_GAIN_MAX_Q8   (4U * 256U)
 #define AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8   256U
+#define AUDIO_CAPTURE_AEC_AUTO_GAIN_MAX_Q8 AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8
 #define AUDIO_CAPTURE_AUTO_GAIN_ATTACK_DIV 16U
 #define AUDIO_MAX_CAPTURE_GAIN_DB        30.0f
 #define AUDIO_CAPTURE_LEVEL_LOG_INTERVAL_MS 15000U
 #define AUDIO_CAPTURE_LEVEL_DBFS_FLOOR_X10 (-960)
 #define AUDIO_SPEAKER_POWER_SETTLE_MS     5U
 #define AUDIO_CAPTURE_PRIMARY_CHANNEL HARDWARE_BOARD_AUDIO_ADC_PRIMARY_CHANNEL
+#define AUDIO_CAPTURE_REFERENCE_CHANNEL HARDWARE_BOARD_AUDIO_ADC_REFERENCE_CHANNEL
 #define AUDIO_DEFAULT_CAPTURE_GAIN_PERCENT \
     ((uint8_t)(((HARDWARE_BOARD_AUDIO_DEFAULT_ADC_GAIN_DB) * 100.0f / AUDIO_MAX_CAPTURE_GAIN_DB) + 0.5f))
 /*
@@ -69,6 +71,14 @@ static const char *TAG = "audio";
 
 #if AUDIO_CAPTURE_PRIMARY_CHANNEL >= AUDIO_CAPTURE_HW_INPUT_CHANNELS
 #error "audio capture primary channel must be within hardware input channels"
+#endif
+
+#if AUDIO_CAPTURE_REFERENCE_CHANNEL >= AUDIO_CAPTURE_HW_INPUT_CHANNELS
+#error "audio capture reference channel must be within hardware input channels"
+#endif
+
+#if AUDIO_CAPTURE_REFERENCE_CHANNEL == AUDIO_CAPTURE_PRIMARY_CHANNEL
+#error "audio capture reference channel must differ from the microphone channel"
 #endif
 
 static const audio_format_t s_capture_format = {
@@ -139,6 +149,7 @@ static uint8_t *s_playback_scratch;
 static size_t s_playback_scratch_size;
 static int16_t *s_capture_raw_buffer;
 static int16_t *s_capture_mono_buffer;
+static int16_t *s_capture_reference_buffer;
 static audio_playback_timing_t s_last_playback_timing;
 static bool s_playback_path_ready_logged;
 
@@ -418,6 +429,7 @@ static esp_err_t audio_ensure_capture_buffers(void)
                                          AUDIO_CAPTURE_HW_INPUT_CHANNELS;
     int16_t *raw_buffer = s_capture_raw_buffer;
     int16_t *mono_buffer = s_capture_mono_buffer;
+    int16_t *reference_buffer = s_capture_reference_buffer;
 
     if (raw_buffer == NULL) {
         raw_buffer = audio_calloc_psram(raw_samples_per_frame, sizeof(int16_t));
@@ -436,8 +448,22 @@ static esp_err_t audio_ensure_capture_buffers(void)
         }
     }
 
+    if (reference_buffer == NULL) {
+        reference_buffer = audio_calloc_psram(samples_per_frame, sizeof(int16_t));
+        if (reference_buffer == NULL) {
+            if (s_capture_raw_buffer == NULL) {
+                free(raw_buffer);
+            }
+            if (s_capture_mono_buffer == NULL) {
+                free(mono_buffer);
+            }
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
     s_capture_raw_buffer = raw_buffer;
     s_capture_mono_buffer = mono_buffer;
+    s_capture_reference_buffer = reference_buffer;
     return ESP_OK;
 }
 
@@ -445,8 +471,10 @@ static void audio_release_capture_buffers(void)
 {
     free(s_capture_raw_buffer);
     free(s_capture_mono_buffer);
+    free(s_capture_reference_buffer);
     s_capture_raw_buffer = NULL;
     s_capture_mono_buffer = NULL;
+    s_capture_reference_buffer = NULL;
 }
 
 static void audio_delete_codec_interfaces(const audio_codec_if_t **codec_if,
@@ -660,8 +688,14 @@ static esp_err_t audio_bus_init(void)
     };
 
     i2s_std_slot_config_t slot_cfg =
-        I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
-    slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+        I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
+            I2S_DATA_BIT_WIDTH_16BIT,
+            AUDIO_CAPTURE_HW_INPUT_CHANNELS > 1 ?
+                I2S_SLOT_MODE_STEREO :
+                I2S_SLOT_MODE_MONO);
+    slot_cfg.slot_mask = AUDIO_CAPTURE_HW_INPUT_CHANNELS > 1 ?
+                             I2S_STD_SLOT_BOTH :
+                             I2S_STD_SLOT_LEFT;
 
     i2s_std_config_t rx_std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_CAPTURE_HW_SAMPLE_RATE_HZ),
@@ -861,6 +895,7 @@ static const audio_codec_if_t *audio_create_es8311_codec_if(const hardware_audio
         .invert_mclk = false,
         .invert_sclk = false,
         .hw_gain = hw_gain,
+        .no_dac_ref = false,
     };
 
     return es8311_codec_new(&codec_cfg);
@@ -1041,6 +1076,7 @@ static void audio_capture_task(void *ctx)
     const size_t raw_frame_bytes = raw_samples_per_frame * sizeof(int16_t);
     int16_t *raw_buffer = s_capture_raw_buffer;
     int16_t *mono_buffer = s_capture_mono_buffer;
+    int16_t *reference_buffer = s_capture_reference_buffer;
 #if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
     TickType_t last_level_log_tick = 0;
     uint32_t log_raw_channel_peak[AUDIO_CAPTURE_HW_INPUT_CHANNELS] = {0};
@@ -1061,7 +1097,7 @@ static void audio_capture_task(void *ctx)
 #endif
     uint32_t auto_gain_q8 = AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8;
 
-    if (raw_buffer == NULL || mono_buffer == NULL) {
+    if (raw_buffer == NULL || mono_buffer == NULL || reference_buffer == NULL) {
         ESP_LOGE(TAG, "audio capture buffers alloc failed");
         taskENTER_CRITICAL(&s_audio_lock);
         s_capture_task = NULL;
@@ -1136,6 +1172,8 @@ static void audio_capture_task(void *ctx)
         for (size_t frame_index = 0; frame_index < samples_per_frame; ++frame_index) {
             int32_t primary_sum = 0;
             size_t primary_sample_count = 0;
+            int32_t reference_sum = 0;
+            size_t reference_sample_count = 0;
             for (size_t downsample_index = 0; downsample_index < AUDIO_CAPTURE_DOWNSAMPLE_RATIO; ++downsample_index) {
                 size_t raw_base_index = (frame_index * AUDIO_CAPTURE_DOWNSAMPLE_RATIO + downsample_index) *
                                         AUDIO_CAPTURE_HW_INPUT_CHANNELS;
@@ -1151,16 +1189,27 @@ static void audio_capture_task(void *ctx)
                         primary_sum += raw_sample;
                         primary_sample_count++;
                     }
+                    if (channel_index == AUDIO_CAPTURE_REFERENCE_CHANNEL) {
+                        reference_sum += raw_sample;
+                        reference_sample_count++;
+                    }
                 }
             }
             if (primary_sample_count > 0) {
                 primary_sum /= (int32_t)primary_sample_count;
             }
+            if (reference_sample_count > 0) {
+                reference_sum /= (int32_t)reference_sample_count;
+            }
 
             mono_buffer[frame_index] = (int16_t)primary_sum;
+            reference_buffer[frame_index] = (int16_t)reference_sum;
         }
 
-        audio_echo_cancel_process_capture(mono_buffer, samples_per_frame, &echo_metrics);
+        audio_echo_cancel_process_capture_with_reference(mono_buffer,
+                                                         reference_buffer,
+                                                         samples_per_frame,
+                                                         &echo_metrics);
 #if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
         if (echo_metrics.active) {
             log_echo_active_frames++;
@@ -1198,6 +1247,16 @@ static void audio_capture_task(void *ctx)
         }
 
         uint32_t target_auto_gain_q8 = audio_capture_auto_gain_target_q8(pre_frame_peak, base_gain_q8);
+        if (echo_metrics.reference_active &&
+            target_auto_gain_q8 > AUDIO_CAPTURE_AEC_AUTO_GAIN_MAX_Q8) {
+            /*
+             * ESP-SR already contains nonlinear residual-echo suppression.
+             * Raising its output by up to 4x while the far-end reference is
+             * active makes the remaining echo audible again and can retrigger
+             * cloud ASR, so keep post-AEC digital AGC at unity during overlap.
+             */
+            target_auto_gain_q8 = AUDIO_CAPTURE_AEC_AUTO_GAIN_MAX_Q8;
+        }
         auto_gain_q8 = audio_capture_smooth_auto_gain_q8(auto_gain_q8, target_auto_gain_q8);
 #if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
         log_auto_gain_q8 = auto_gain_q8;
@@ -1512,7 +1571,15 @@ void audio_release(void)
     taskEXIT_CRITICAL(&s_audio_lock);
 
     audio_stop_playback();
-    audio_echo_cancel_deinit();
+    /*
+     * Keep the ESP-SR AEC allocation warm across app switches. Recreating it
+     * on every call adds first-speech latency and makes a long-running media
+     * system repeatedly allocate the same realtime working set.
+     */
+    esp_err_t aec_ret = audio_echo_cancel_set_active(false);
+    if (aec_ret != ESP_OK) {
+        ESP_LOGW(TAG, "suspend AEC failed: %s", esp_err_to_name(aec_ret));
+    }
 
     taskENTER_CRITICAL(&s_audio_lock);
     s_audio_input_prepare_last_err = ESP_OK;
@@ -1942,6 +2009,15 @@ esp_err_t audio_write_rendered_playback(int16_t *data,
                                speaker_volume_percent) /
                               100U);
 
+    /*
+     * Queue the far-end reference before handing the same PCM to I2S. Feeding
+     * it after a blocking DMA write makes the reference trail the acoustic
+     * output and prevents the fixed-delay AEC path from converging reliably.
+     */
+    audio_echo_cancel_feed_playback(data,
+                                    data_len / sizeof(int16_t),
+                                    s_playback_format.channels);
+
     write_start_us = esp_timer_get_time();
     ret = esp_codec_dev_write(s_play_dev_handle, (void *)data, (int)data_len);
     if (ret != ESP_OK) {
@@ -1949,9 +2025,6 @@ esp_err_t audio_write_rendered_playback(int16_t *data,
         goto out;
     }
     write_ms = (uint32_t)((esp_timer_get_time() - write_start_us) / 1000ULL);
-    audio_echo_cancel_feed_playback(data,
-                                    data_len / sizeof(int16_t),
-                                    s_playback_format.channels);
 
     taskENTER_CRITICAL(&s_audio_lock);
     s_audio_stats.speaker_enabled = true;
@@ -2069,7 +2142,16 @@ void audio_get_stats(audio_stats_t *stats)
     if (stats == NULL) {
         return;
     }
+
+    audio_echo_cancel_status_t aec = {0};
     taskENTER_CRITICAL(&s_audio_lock);
     *stats = s_audio_stats;
     taskEXIT_CRITICAL(&s_audio_lock);
+
+    audio_echo_cancel_get_status(&aec);
+    stats->aec_active = aec.active;
+    stats->aec_reference_active = aec.reference_active;
+    stats->aec_process_frames = aec.process_frames;
+    stats->aec_process_us_total = aec.process_us_total;
+    stats->aec_process_us_max = aec.process_us_max;
 }

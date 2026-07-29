@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "tiRTC.h"
+#include "TiRTC/tiRTC.h"
 
 typedef struct {
     /* All callbacks are serialized with TiRTC disconnect by the link layer. */

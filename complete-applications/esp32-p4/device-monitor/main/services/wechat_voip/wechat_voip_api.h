@@ -20,12 +20,6 @@ esp_err_t wechat_voip_api_request_call(const char *api_base,
                                        const char *device_id,
                                        const wechat_voip_auth_user_t *target,
                                        int wx_version_type);
-esp_err_t wechat_voip_api_report_auth(const char *api_base,
-                                      const char *device_id,
-                                      const char *open_id);
-esp_err_t wechat_voip_api_delete_auth(const char *api_base,
-                                      const char *device_id,
-                                      const wechat_voip_auth_user_t *removed);
 
 #ifdef __cplusplus
 }

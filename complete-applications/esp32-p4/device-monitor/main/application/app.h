@@ -108,6 +108,7 @@ typedef struct {
 	uint32_t tx_audio_frames;
 	uint32_t rx_audio_frames;
 	uint16_t tx_video_fps;
+	uint16_t rx_video_fps;
 	uint16_t tx_audio_fps;
 	uint16_t rx_audio_fps;
 	uint16_t tx_video_width;
@@ -116,6 +117,8 @@ typedef struct {
 	uint32_t tx_video_configured_bitrate_kbps;
 	uint32_t tx_video_measured_fps_x10;
 	uint32_t tx_video_measured_bitrate_kbps;
+	uint32_t tx_video_transport_bitrate_kbps;
+	uint32_t rx_video_transport_bitrate_kbps;
 } app_rtc_snapshot_t;
 
 typedef enum {
@@ -190,7 +193,10 @@ typedef struct {
 	bool active;
 	bool listening;
 	bool cloud_speaking;
+	bool video_active;
 	uint32_t tx_audio_frames;
+	uint32_t tx_video_frames;
+	uint32_t tx_video_failures;
 	uint32_t rx_commands;
 	char asr_caption[APP_AI_CHAT_CAPTION_MAX];
 	char tts_caption[APP_AI_CHAT_CAPTION_MAX];

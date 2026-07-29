@@ -14,6 +14,15 @@
 6. 从配置模板建立本机配置，填写 WiFi 和 TiRTC 凭据。
 7. 执行 defconfig、语法检查和完整构建。
 
+TiRTC 头文件按本交付包实际目录包含：
+
+```c
+#include "TiRTC/tiRTC.h"
+```
+
+只链接 `sdk/lib/g32/libTiRTC.a`。该归档已经包含配套 noSCTP WebRTC 对象，不能再重复链接
+`libwebrtc_nosctp.a`。版本、SHA256 和初始化顺序见 [SDK_INTEGRATION.md](SDK_INTEGRATION.md)。
+
 ```bash
 make g32s10x_tirtc_wifi_link_demo_defconfig
 make -j4

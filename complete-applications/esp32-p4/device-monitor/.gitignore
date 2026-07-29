@@ -2,9 +2,15 @@ build*/
 .vscode/
 .agents/
 firmware/
+release_assets/
 managed_components/
 logs/
 sdkconfig.old
+*.bin
+*.elf
+*.map
+*-webflash-*.zip
+*-webinstall-*.zip
 *.pyc
 __pycache__/
 .playwright-cli/

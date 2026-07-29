@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -32,6 +33,9 @@ typedef struct {
 esp_err_t wechat_voip_contacts_init(void);
 void wechat_voip_contacts_reset_for_device(const char *device_id);
 void wechat_voip_contacts_load(const char *device_id);
+void wechat_voip_contacts_replace(const wechat_voip_auth_user_t *users,
+                                  size_t user_count,
+                                  const char *source);
 bool wechat_voip_contacts_remember(const wechat_voip_auth_user_t *user, const char *source);
 bool wechat_voip_contacts_remove(const char *openid, wechat_voip_auth_user_t *removed);
 void wechat_voip_contacts_find(const char *openid, wechat_voip_auth_user_t *target);

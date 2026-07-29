@@ -25,7 +25,7 @@
 #endif
 
 #ifndef APP_CONFIG_RTC_SERVICE_ENDPOINT
-#define APP_CONFIG_RTC_SERVICE_ENDPOINT "https://ep-tirtc.tange365.com"
+#define APP_CONFIG_RTC_SERVICE_ENDPOINT "http://ep-tirtc.tange365.com"
 #endif
 
 #ifndef APP_CONFIG_RTC_DEVICE_ID
@@ -72,6 +72,14 @@
 #define APP_CONFIG_AI_CHAT_ROLE_ID ""
 #endif
 
+#ifndef CONFIG_APP_AI_CHAT_VIDEO_ENABLE
+#define CONFIG_APP_AI_CHAT_VIDEO_ENABLE 1
+#endif
+
+#ifndef APP_CONFIG_AI_CHAT_VIDEO_ENABLE
+#define APP_CONFIG_AI_CHAT_VIDEO_ENABLE CONFIG_APP_AI_CHAT_VIDEO_ENABLE
+#endif
+
 #ifndef CONFIG_APP_AUDIO_AEC_ENABLE
 #define CONFIG_APP_AUDIO_AEC_ENABLE 0
 #endif
@@ -101,7 +109,7 @@
 #endif
 
 #ifndef APP_CONFIG_THING_SERVICE_DISCOVERY_URL
-#define APP_CONFIG_THING_SERVICE_DISCOVERY_URL "https://ep-open.tange-ai.com/services"
+#define APP_CONFIG_THING_SERVICE_DISCOVERY_URL "http://ep-open.tangeopen.com/services"
 #endif
 
 #ifndef APP_CONFIG_DEVICE_BINDING_API_BASE

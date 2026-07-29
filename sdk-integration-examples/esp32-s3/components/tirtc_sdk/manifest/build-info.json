@@ -1,0 +1,19 @@
+{
+  "chip": "esp32s3",
+  "sdk_version": "2.2.1",
+  "target_os": "FreeRTOS / ESP-IDF",
+  "esp_idf": "5.5.4",
+  "toolchain": "xtensa-esp32s3-elf-gcc-14.2.0_20260121",
+  "p2p": "kcp",
+  "ssl": "disabled",
+  "default_endpoint": "http://ep-tirtc.tange365.com",
+  "source_commit": "3a33bf4ae51b3ab9eb246648adb274d0fae32ebf",
+  "version_label": "v2.2.1_tag_3a33bf4ae51b_1khz_http_20260729_105424",
+  "build_contract": "manifest/build-contract.env",
+  "library": {
+    "path": "lib/esp32s3/libTiRTC.a",
+    "size": 4908112,
+    "md5": "f417e769499b8b46b711387013d93125",
+    "sha256": "dc9f869194584fd43fe091f887342d170a1422e657ce1fc2a144c90a3ade1f8e"
+  }
+}

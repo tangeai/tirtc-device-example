@@ -65,6 +65,7 @@ typedef unsigned long ULONG;
 #endif
 
 #include <stdint.h>
+#include <stddef.h>
 
 //typedef long LONG;
 

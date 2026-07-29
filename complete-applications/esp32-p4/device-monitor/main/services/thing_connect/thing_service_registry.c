@@ -18,6 +18,7 @@ static const char *TAG = "thing_services";
 #define THING_SERVICE_DISCOVERY_RESPONSE_MAX 2048
 #define THING_SERVICE_DISCOVERY_RETRY_COUNT  2U
 #define THING_SERVICE_DISCOVERY_RETRY_MS     500U
+#define THING_SERVICE_DISCOVERY_TIMEOUT_MS   5000U
 
 typedef struct {
     char discovery_url[THING_SERVICE_ENDPOINT_MAX_LEN];
@@ -258,7 +259,12 @@ esp_err_t thing_service_registry_refresh(void)
     const thing_http_request_t request = {
         .url = discovery_url,
         .method = "GET",
-        .timeout_ms = 10000U,
+        /*
+         * Discovery has complete configured fallbacks. Keep each attempt
+         * bounded so a half-ready phone hotspot cannot hold device identity
+         * and RTC startup behind a single 10-second TLS connect.
+         */
+        .timeout_ms = THING_SERVICE_DISCOVERY_TIMEOUT_MS,
     };
     for (uint8_t attempt = 0; attempt <= THING_SERVICE_DISCOVERY_RETRY_COUNT; ++attempt) {
         response[0] = '\0';

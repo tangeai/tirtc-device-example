@@ -1,57 +1,87 @@
 # 固件下载与校验
 
-## 为什么固件不放在 Git
+## 下载入口
 
-`.bin` 和 `.zip` 是构建产物。每次版本发布都会生成新的完整镜像，Git 无法像处理源码
-那样有效保存它们的差异。长期提交会让克隆、拉取和 CI 明显变慢，即使后来从当前目录
-删除，旧二进制仍会留在历史中。
+正式源码和固件统一在
+[GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases) 按版本发布。
+Git `main` 保存源码、文档、必要脚本和 SDK 静态库；构建生成的固件、维护包和其他二进制
+附件不进入 Git 历史。
 
-本仓采用以下边界：
+2026-07-30 Release 包含六个项目：
 
-| 内容 | 保存位置 | 用途 |
+| 项目 | 版本 | 发布交付 |
 | --- | --- | --- |
-| 源码、文档、脚本、SDK 静态库 | Git `main` | 开发、审查和可复现构建 |
-| 完整镜像、OTA app、维护包 | GitHub Releases | 长期下载、归档和人工烧录 |
-| OTA manifest 和线上 app | OTA 服务 | 设备在线升级 |
-| 临时 CI 构建结果 | GitHub Actions Artifact | 短期验证，不作为正式入口 |
+| ESP32-S3 最小 TiRTC 集成示例 | `1.2.0` | 源码与 `0x0` 完整镜像 |
+| ESP32-P4 最小 TiRTC 集成示例 | `1.1.1` | 源码与 `0x0` 完整镜像 |
+| G32S10X 最小 TiRTC 集成示例 | `0.8.3` | 源码与 `rtos-with-spl.bin` |
+| ESP32-S3 Device Monitor | `1.7.6` | 源码、`0x0` 完整镜像与 OTA app |
+| ESP32-P4 Device App | `1.2.3` | 源码随统一 Tag 交付 |
+| G32S10X Device Monitor | `0.1.1` | 源码、主固件与两个 YAFFS 镜像 |
 
-GitHub Packages 更适合带包格式和依赖语义的软件包或容器。当前固件面向用户按版本直接
-下载，GitHub Releases 的标签、说明、附件和校验文件更清晰。
+ESP32-P4 Device App `1.2.3` 本次按源码范围发布。其余项目的正式固件由统一公开 commit
+完成干净构建，附件名称、大小、用途、Flash 地址和 SHA-256 以 Release 页面、
+`SHA256SUMS.txt` 和 `release-manifest.json` 为准。
 
-## Release 必备附件
+## 本次资产
 
-每个平台的正式 Release 至少包含：
-
-| 附件 | 面向对象 | 说明 |
+| 项目 | Release 文件 | 烧录用途 |
 | --- | --- | --- |
-| `*-full-vX.Y.Z.bin` | 普通体验者 | 16 MiB 完整镜像，ESP Launchpad 地址 `0x0` |
-| `*-ota-vX.Y.Z.bin` | OTA 维护者 | 只包含 app 分区，不能替代完整首次烧录 |
-| `*-webinstall-vX.Y.Z.zip` | 普通体验者 | 完整镜像和简明烧录说明 |
-| `*-webflash-vX.Y.Z.zip` | 维护者 | bootloader、分区表、app、storage 和 offset |
-| `SHA256SUMS.txt` | 所有人 | 下载完整性校验 |
-| `release-manifest.json` | 校验工具 | 版本、commit、offset、大小和 SHA-256 |
+| ESP32-S3 最小示例 | `esp32s3-tirtc-minimal-full-v1.2.0.bin` | ESP Tool，地址 `0x0` |
+| ESP32-P4 最小示例 | `esp32p4-tirtc-minimal-full-v1.1.1.bin` | ESP Tool，地址 `0x0` |
+| G32S10X 最小示例 | `g32s10x-tirtc-minimal-rtos-with-spl-v0.8.3.bin` | 君正 Cloner 主固件 policy |
+| ESP32-S3 Device Monitor | `esp32s3-tirtc-device-monitor-full-v1.7.6.bin` | ESP Tool，地址 `0x0` |
+| ESP32-S3 Device Monitor | `esp32s3-tirtc-device-monitor-ota-v1.7.6.bin` | OTA app |
+| G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-rtos-with-spl-v0.1.1.bin` | 君正 Cloner 主固件 policy |
+| G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-fs-v0.1.1.yaffs2` | 君正 Cloner 文件系统 policy |
+| G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-data-v0.1.1.yaffs2` | 君正 Cloner 数据 policy |
 
-本次统一源码 Release 还提供五个已完成干净构建的验证固件。它们按 `minimal-app`、
-`device-monitor-app` 或 `rtos-with-spl` 命名，供开发者在对应目标板上继续集成验证；
-首次完整烧录仍应选择与开发板匹配的 `*-full-*.bin`。
+## Release 资产规则
+
+每次 Release 只上传本次版本实际生成并完成校验的资产：
+
+| 内容 | 用途 |
+| --- | --- |
+| 项目固件 | 按项目和目标板提供烧录或集成验证所需的实际构建产物 |
+| `SHA256SUMS.txt` | 校验附件下载完整性 |
+| `release-manifest.json` | 记录统一 Tag/commit、项目来源、版本、文件用途、大小和 SHA-256 |
+
+项目没有生成固件资产时，manifest 记录源码交付形态，不创建占位 BIN，也不沿用其他版本产物。
 
 ## 标签约定
 
-平台和示例名称必须进入标签，避免 S3、P4 同版本互相覆盖：
+六个项目使用一个统一公开 Tag：
 
 ```text
-esp32-s3-trtc-advanced-v0.7.5
-esp32-p4-trtc-advanced-v1.1.0
+tirtc-device-examples-v2026.07.30
 ```
+
+各项目的本地 Tag 和 commit 作为源码来源凭据，记录在
+[版本与证据清单](VERSIONS_CN.md) 和 release manifest 中，不替代统一公开 Tag。
+
+## ESP32-S3/P4 烧录
+
+1. 打开 [Espressif ESP Tool](https://espressif.github.io/esptool-js/)。
+2. 选择 `Connect` 并连接目标开发板串口。
+3. 使用 `Add File` 添加从同一 Release 下载的目标板固件。
+4. 按 Release manifest 或项目说明填写烧录地址。
+5. 首次使用或设备状态不确定时执行 `Erase Flash`。
+6. 选择 `Program`，完成后复位开发板。
+
+固件类型和烧录地址必须以当次 Release 的实际资产说明为准，不能从旧版本文件名推断。
+
+## G32S10X 烧录
+
+G32S10X 使用君正 Cloner。请从同一 Release 获取对应项目资产，并按项目 README、Cloner
+配置和 release manifest 选择固件及烧录布局。君正供应商 SDK、工具链和 Cloner 需要由
+开发者按授权渠道单独获取。
 
 ## 下载后校验
 
-1. 从 [GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases) 选择与开发板
-   和项目版本完全匹配的 Release。
-2. 下载固件和同一 Release 中的 `SHA256SUMS.txt`。
-3. 计算下载文件 SHA-256，并与清单逐字比对。
-4. 首次烧录使用 `*-full-*.bin` 和地址 `0x0`；OTA 文件不能替代完整镜像。
-5. 启动后核对串口或界面显示的应用版本、TiRTC SDK 版本和目标板型。
+1. 从同一 Release 下载目标项目资产、`SHA256SUMS.txt` 和 `release-manifest.json`。
+2. 核对项目、版本、目标板和用途。
+3. 计算附件 SHA-256，并与清单逐字比对。
+4. 核对 manifest 中的统一 Tag/commit、项目来源 Tag/commit 和附件记录。
+5. 烧录后核对设备可读取的应用版本、TiRTC SDK 版本和目标板信息。
 
 PowerShell：
 
@@ -65,7 +95,5 @@ Linux/macOS：
 sha256sum ./downloaded-firmware.bin
 ```
 
-Release 中的 manifest 用于核对 Tag、commit、项目路径、版本、源码文件清单和附件哈希。
-
-静态校验可以证明发布记录之间一致，但不能单独证明 `.bin` 由对应源码构建。二进制来源需要
-可复现构建、受控 CI，或固件内嵌 commit/版本元数据并进行比对。
+静态校验可以证明发布源码、版本记录、Release notes、附件和 manifest 相互一致。若要证明
+固件由指定源码构建，还需要可复现构建，或在固件中嵌入 commit/版本元数据并完成比对。

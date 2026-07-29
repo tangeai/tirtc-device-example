@@ -81,9 +81,43 @@ const char *ai_chat_event_type_name(ai_chat_event_type_t type)
         return "event";
     case AI_CHAT_EVENT_END_SESSION:
         return "end_session";
+    case AI_CHAT_EVENT_DEVICE_ACTION:
+        return "device_action";
     default:
         return "unknown";
     }
+}
+
+static void ai_chat_parse_jsonrpc_id(cJSON *root, ai_chat_event_t *event)
+{
+    cJSON *id = NULL;
+    char *json = NULL;
+    size_t json_len = 0U;
+
+    if (!cJSON_IsObject(root) || event == NULL) {
+        return;
+    }
+
+    id = cJSON_GetObjectItemCaseSensitive(root, "id");
+    if (!cJSON_IsNumber(id) && !cJSON_IsString(id)) {
+        return;
+    }
+
+    if (cJSON_IsNumber(id)) {
+        event->jsonrpc_id = id->valueint;
+    }
+
+    json = cJSON_PrintUnformatted(id);
+    if (json == NULL) {
+        return;
+    }
+
+    json_len = strlen(json);
+    if (json_len > 0U && json_len < sizeof(event->jsonrpc_id_json)) {
+        strlcpy(event->jsonrpc_id_json, json, sizeof(event->jsonrpc_id_json));
+        event->jsonrpc_id_valid = true;
+    }
+    cJSON_free(json);
 }
 
 static void ai_chat_parse_audio_spec(cJSON *object, ai_chat_audio_spec_t *spec)
@@ -111,13 +145,10 @@ static void ai_chat_parse_audio_spec(cJSON *object, ai_chat_audio_spec_t *spec)
 
 static void ai_chat_parse_start_result(cJSON *root, ai_chat_event_t *event)
 {
-    cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "id");
     cJSON *result = cJSON_GetObjectItemCaseSensitive(root, "result");
     cJSON *error = cJSON_GetObjectItemCaseSensitive(root, "error");
 
-    if (cJSON_IsNumber(id)) {
-        event->jsonrpc_id = id->valueint;
-    }
+    ai_chat_parse_jsonrpc_id(root, event);
 
     if (cJSON_IsObject(result)) {
         event->type = AI_CHAT_EVENT_START_OK;
@@ -198,6 +229,136 @@ static void ai_chat_parse_event_data(cJSON *params, ai_chat_event_t *event)
     }
 }
 
+static const char *ai_chat_json_string(cJSON *object, const char *name)
+{
+    if (!cJSON_IsObject(object) || name == NULL) {
+        return NULL;
+    }
+    return cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(object, name));
+}
+
+static cJSON *ai_chat_pick_device_action_payload(cJSON *params)
+{
+    cJSON *payload = NULL;
+
+    if (!cJSON_IsObject(params)) {
+        return NULL;
+    }
+
+    payload = cJSON_GetObjectItemCaseSensitive(params, "data");
+    if (cJSON_IsObject(payload)) {
+        return payload;
+    }
+    payload = cJSON_GetObjectItemCaseSensitive(params, "arguments");
+    if (cJSON_IsObject(payload)) {
+        return payload;
+    }
+    payload = cJSON_GetObjectItemCaseSensitive(params, "args");
+    if (cJSON_IsObject(payload)) {
+        return payload;
+    }
+    payload = cJSON_GetObjectItemCaseSensitive(params, "input");
+    if (cJSON_IsObject(payload)) {
+        return payload;
+    }
+    payload = cJSON_GetObjectItemCaseSensitive(params, "payload");
+    if (cJSON_IsObject(payload)) {
+        return payload;
+    }
+    payload = cJSON_GetObjectItemCaseSensitive(params, "parameters");
+    if (cJSON_IsObject(payload)) {
+        return payload;
+    }
+    return params;
+}
+
+static const char *ai_chat_pick_device_action_string(cJSON *params,
+                                                     cJSON *payload,
+                                                     const char *const *names,
+                                                     size_t name_count)
+{
+    const char *value = NULL;
+
+    for (size_t index = 0U; index < name_count; ++index) {
+        value = ai_chat_json_string(payload, names[index]);
+        if (value != NULL && value[0] != '\0') {
+            return value;
+        }
+        value = ai_chat_json_string(params, names[index]);
+        if (value != NULL && value[0] != '\0') {
+            return value;
+        }
+    }
+    return NULL;
+}
+
+static void ai_chat_parse_device_action(cJSON *root, cJSON *params, ai_chat_event_t *event)
+{
+    static const char *const target_names[] = {
+        "target",
+        "target_device",
+        "target_device_id",
+        "device",
+        "device_id",
+        "device_name",
+        "device_alias",
+        "contact",
+        "contact_name",
+        "name",
+        "alias",
+        "remark",
+        "callee",
+        "callee_device_id",
+        "peer",
+        "peer_id",
+        "nickname",
+    };
+    static const char *const call_type_names[] = {
+        "call_type",
+        "type",
+        "media",
+        "mode",
+    };
+    cJSON *payload = ai_chat_pick_device_action_payload(params);
+    const char *action = NULL;
+
+    event->type = AI_CHAT_EVENT_DEVICE_ACTION;
+    ai_chat_parse_jsonrpc_id(root, event);
+
+    action = ai_chat_json_string(params, "action");
+    if (action == NULL || action[0] == '\0') {
+        action = ai_chat_json_string(params, "name");
+    }
+    if (action == NULL || action[0] == '\0') {
+        action = ai_chat_json_string(params, "tool");
+    }
+    if (action == NULL || action[0] == '\0') {
+        action = ai_chat_json_string(params, "function");
+    }
+    if (action == NULL || action[0] == '\0') {
+        action = ai_chat_json_string(payload, "action");
+    }
+    if (action == NULL || action[0] == '\0') {
+        action = ai_chat_json_string(payload, "tool");
+    }
+    if (action == NULL || action[0] == '\0') {
+        action = ai_chat_json_string(payload, "function");
+    }
+    ai_chat_copy_str(event->action, sizeof(event->action), action);
+    ai_chat_copy_str(event->target,
+                     sizeof(event->target),
+                     ai_chat_pick_device_action_string(params,
+                                                       payload,
+                                                       target_names,
+                                                       sizeof(target_names) / sizeof(target_names[0])));
+    ai_chat_copy_str(event->call_type,
+                     sizeof(event->call_type),
+                     ai_chat_pick_device_action_string(params,
+                                                       payload,
+                                                       call_type_names,
+                                                       sizeof(call_type_names) / sizeof(call_type_names[0])));
+}
+
 esp_err_t ai_chat_events_parse(const void *data, uint32_t len, ai_chat_event_t *event)
 {
     char *json = NULL;
@@ -254,6 +415,8 @@ esp_err_t ai_chat_events_parse(const void *data, uint32_t len, ai_chat_event_t *
         ai_chat_parse_event_data(params, event);
     } else if (strcmp(method, "end_session") == 0) {
         event->type = AI_CHAT_EVENT_END_SESSION;
+    } else if (strcmp(method, "device_action") == 0) {
+        ai_chat_parse_device_action(root, params, event);
     }
 
     cJSON_Delete(root);

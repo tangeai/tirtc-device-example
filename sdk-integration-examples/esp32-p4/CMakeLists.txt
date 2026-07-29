@@ -1,11 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 
-set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/tirtc_sdk")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-set(PROJECT_VER "1.0.2")
+set(PROJECT_VER "1.1.1")
 project(tirtc_esp32p4_wifi_link_demo)
 
-set(FIRMWARE_OUTPUT_DIR "${CMAKE_BINARY_DIR}/firmware" CACHE PATH "Collected firmware output directory")
+set(FIRMWARE_OUTPUT_DIR "${CMAKE_BINARY_DIR}/firmware")
 
 add_custom_target(collect_firmware_outputs ALL
     COMMAND ${CMAKE_COMMAND} -E make_directory "${FIRMWARE_OUTPUT_DIR}"

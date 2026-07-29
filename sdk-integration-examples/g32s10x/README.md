@@ -1,10 +1,18 @@
 # G32S10X 最小 TiRTC 集成示例
 
-这是一个可整体移植、可供客户阅读的君正 G32S10X TiRTC 最小例程：
+这是一个可整体移植、面向普通开发者的君正 G32S10X TiRTC 最小例程。当前网络实现使用
+ATBM WiFi，但项目身份保持为“最小 TiRTC 集成示例”：
 
 ```text
 FreeRTOS -> ATBM WiFi -> lwIP/DNS/NTP -> TiRTC -> MJPEG/PCMA sample
 ```
+
+| 项目 | 当前值 |
+| --- | --- |
+| 示例版本 | `0.8.3` |
+| TiRTC SDK | `2.2.1`，manifest 状态 `candidate` |
+| 君正 SDK | `im_sdk_v0.4.0` |
+| 工具链 | `riscv32-ingenic-g32s10-elf-tools-r1.0.5` |
 
 ## 功能范围
 
@@ -20,12 +28,10 @@ FreeRTOS -> ATBM WiFi -> lwIP/DNS/NTP -> TiRTC -> MJPEG/PCMA sample
 
 1. [ARCHITECTURE.md](ARCHITECTURE.md)：依赖方向、模块职责、线程和连接所有权。
 2. [CONFIGURATION.md](CONFIGURATION.md)：所有用户可调参数、范围和调整建议。
-3. [PORTING.md](PORTING.md)：接入君正 SDK 或替换到其他平台的方法。
-4. `include/tirtc_link.h`：对外控制 API。
-5. `src/tirtc_link.c`：从 WiFi 就绪到 TiRTC 连接的主流程。
-
-供应商 SDK 与工具链要求见 [君正 SDK 要求](SDK_REQUIREMENTS.md)，候选快照的来源状态和验证
-边界见 [来源与验证边界](SOURCE_PROVENANCE.md)。
+3. [SDK_INTEGRATION.md](SDK_INTEGRATION.md)：TiRTC 2.2.1 版本、官方 API 映射和升级点。
+4. [PORTING.md](PORTING.md)：接入君正 SDK 或替换到其他平台的方法。
+5. `include/tirtc_link.h`：对外控制 API。
+6. `src/tirtc_link.c`：从 WiFi 就绪到 TiRTC 连接的主流程。
 
 ## 目录结构
 
@@ -33,7 +39,7 @@ FreeRTOS -> ATBM WiFi -> lwIP/DNS/NTP -> TiRTC -> MJPEG/PCMA sample
 assets/       演示 AVI、预览图和授权说明
 include/      对外 API、用户配置、默认值和平台契约
 src/          会话编排、平台适配、诊断、AVI 解析和媒体发送
-sdk/          TiRTC 公共头文件与 G32 静态库
+sdk/          TiRTC 2.2.1 公共头文件、G32 静态库与构建 manifest
 port/g32/     君正网络、TLS 和基础运行时的必要兼容/告警修复覆盖
 integration/  application、package、defconfig 接线
 tools/        演示素材转码工具
@@ -44,22 +50,29 @@ tests/        无硬件依赖的 AVI 解析和时间戳测试
 `tirtc_link.c` 是 TiRTC 生命周期与连接句柄的唯一所有者。SDK 回调不打印串口，而是把控制事件
 送入固定大小队列交给 worker 输出。
 
+SDK 版本固定为 `2.2.1`。启动日志会输出 `TiRtcGetVersion()` 和
+`TiRtcGetBuildInfo()`；构建门禁会同时核对头文件版本、静态库 SHA256 和交付 manifest。
+
 ## 配置与构建
 
-填写 `include/tirtc_link_config.h` 中的 WiFi、设备 ID 和设备 Secret。将本目录集成到君正
-SDK 后执行：
+填写 `include/tirtc_link_config.h` 中的 WiFi、设备 ID 和设备 Secret。准备一份干净展开的
+君正 SDK 和 G32S10X 工具链，然后在本目录执行：
 
 ```bash
-make g32s10x_tirtc_wifi_link_demo_defconfig
-make -j4
+G32_SDK_ROOT=/path/to/im_sdk/opensource/freertos \
+G32_TOOLCHAIN_BIN=/path/to/g32-toolchain/bin \
+bash scripts/build-in-sdk.sh
 ```
 
-也可以按 [君正 SDK 要求](SDK_REQUIREMENTS.md) 使用 `scripts/build-in-sdk.sh` 把示例复制到
-干净 SDK，并执行同一 defconfig 和构建命令。脚本只从环境变量读取 SDK 与工具链路径。
+脚本把示例和必要的平台覆盖复制到指定 SDK，应用
+`g32s10x_tirtc_wifi_link_demo_defconfig` 并执行完整构建。它拒绝覆盖已存在的同名应用，
+因此每个发布版本应使用干净 SDK 树。固件输出位于 SDK 根目录的 `rtos-with-spl.bin`。
+
+真实配置只保存在开发者本地，不应提交到 Git。
 替换素材时执行 `bash tools/transcode_sample_media.sh <source-video>`。
 
-当前 G32S10X 固件分区为 `8 MiB`。生成 `rtos-with-spl.bin` 后应检查镜像大小并保留升级余量；
-素材位于固件只读区，不会在启动时整段复制到堆。
+当前 G32S10X 固件分区为 `8 MiB`。发布流程会检查固件大小和 SHA-256；素材位于固件只读区，
+不会在启动时整段复制到堆。
 
 ## 真机验收
 

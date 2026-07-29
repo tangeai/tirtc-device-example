@@ -58,6 +58,11 @@ void camera_video_source_request_key_frame(void)
     camera_pipeline_request_key_frame();
 }
 
+void camera_video_source_request_stream_start_key_frame(void)
+{
+    camera_pipeline_request_stream_start_key_frame();
+}
+
 bool camera_video_source_is_running(void)
 {
     return camera_pipeline_is_rtc_video_active();

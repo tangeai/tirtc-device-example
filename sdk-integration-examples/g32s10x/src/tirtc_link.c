@@ -8,7 +8,7 @@
 #include <os/thread.h>
 #include <spinlock.h>
 
-#include "tiRTC.h"
+#include "TiRTC/tiRTC.h"
 #include "tirtc_link.h"
 #include "tirtc_link_config.h"
 #include "tirtc_link_defaults.h"
@@ -16,6 +16,11 @@
 #include "tirtc_sample_avi.h"
 #include "tirtc_sample_media.h"
 #include "tirtc_test_log.h"
+
+#if TIRTC_VERSION_MAJOR != 2 || TIRTC_VERSION_MINOR != 2 || \
+    TIRTC_VERSION_PATCH != 1
+#error "This demo requires the TiRTC 2.2.1 G32S10X SDK package"
+#endif
 
 #define LINK_WORK_SYSTEM_EVENT (1U << 0)
 #define LINK_WORK_ACCEPTED (1U << 1)
@@ -311,8 +316,7 @@ static bool link_pop_disconnect(tirtc_conn_t *connection)
 
 static bool link_tirtc_configured(void)
 {
-    return TIRTC_LINK_SERVICE_ENDPOINT[0] != '\0' &&
-           TIRTC_LINK_DEVICE_ID[0] != '\0' &&
+    return TIRTC_LINK_DEVICE_ID[0] != '\0' &&
            TIRTC_LINK_DEVICE_SECRET[0] != '\0';
 }
 
@@ -524,6 +528,7 @@ static int link_prepare_sdk(const char *client_id)
     uint32_t max_send_buffer = TIRTC_LINK_MAX_SEND_BUFFER;
     int max_connections = 1;
     int network_type = TIRTC_NETCONN_WIFI;
+    int connect_cache = TIRTC_LINK_ENABLE_CONNECT_CACHE;
     int result;
 
     /* The send-buffer option is consumed while TiRtcInit creates runtime. */
@@ -539,17 +544,20 @@ static int link_prepare_sdk(const char *client_id)
     }
     g_sdk_initialized = true;
 
-    result = TiRtcSetOption(TIRTC_OPT_SERVICE_ENDPOINT,
-                            TIRTC_LINK_SERVICE_ENDPOINT,
-                            sizeof(TIRTC_LINK_SERVICE_ENDPOINT));
+    result = 0;
+    if (TIRTC_LINK_SERVICE_ENDPOINT[0] != '\0') {
+        result = TiRtcSetOption(TIRTC_OPT_SERVICE_ENDPOINT,
+                                TIRTC_LINK_SERVICE_ENDPOINT,
+                                (uint32_t)strlen(TIRTC_LINK_SERVICE_ENDPOINT));
+    }
     if (result == 0) {
         result = TiRtcSetOption(TIRTC_OPT_DEVICE_SECRET_KEY,
                                 TIRTC_LINK_DEVICE_SECRET,
-                                sizeof(TIRTC_LINK_DEVICE_SECRET));
+                                (uint32_t)strlen(TIRTC_LINK_DEVICE_SECRET));
     }
     if (result == 0) {
         result = TiRtcSetOption(TIRTC_OPT_CLIENT_ID, client_id,
-                                (uint32_t)strlen(client_id) + 1U);
+                                (uint32_t)strlen(client_id));
     }
     if (result == 0) {
         result = TiRtcSetOption(TIRTC_OPT_MAX_CONNECTIONS, &max_connections,
@@ -558,6 +566,10 @@ static int link_prepare_sdk(const char *client_id)
     if (result == 0) {
         result = TiRtcSetOption(TIRTC_OPT_NETWORK_TYPE, &network_type,
                                 sizeof(network_type));
+    }
+    if (result == 0) {
+        result = TiRtcSetOption(TIRTC_OPT_CONNECT_CACHE, &connect_cache,
+                                sizeof(connect_cache));
     }
     return result;
 }
@@ -586,9 +598,11 @@ static int link_start_sdk(void)
         g_status.state = TIRTC_LINK_STATE_STARTING;
         g_status.last_error = 0;
         link_unlock(flags);
-        printf("[TEST][STEP] TiRTC上线 | sdk=%s buffer=%luKB\n",
+        printf("[TEST][STEP] TiRTC上线 | sdk=%s build=%s buffer=%luKB cache=%s\n",
                TiRtcGetVersion(),
-               (unsigned long)(TIRTC_LINK_MAX_SEND_BUFFER / 1024U));
+               TiRtcGetBuildInfo(),
+               (unsigned long)(TIRTC_LINK_MAX_SEND_BUFFER / 1024U),
+               TIRTC_LINK_ENABLE_CONNECT_CACHE ? "on" : "off");
         begin_ms = systick_get_time_ms();
         result = TiRtcStart(TIRTC_LINK_DEVICE_ID, &g_callbacks);
         if (result == 0) {

@@ -159,6 +159,7 @@ typedef struct {
     uint32_t rtc_tx_audio_frames;
     uint32_t rtc_rx_audio_frames;
     uint16_t rtc_tx_video_fps;
+    uint16_t rtc_rx_video_fps;
     uint16_t rtc_tx_audio_fps;
     uint16_t rtc_rx_audio_fps;
     uint16_t rtc_tx_video_width;
@@ -167,6 +168,8 @@ typedef struct {
     uint32_t rtc_tx_video_configured_bitrate_kbps;
     uint32_t rtc_tx_video_measured_fps_x10;
     uint32_t rtc_tx_video_measured_bitrate_kbps;
+    uint32_t rtc_tx_video_transport_bitrate_kbps;
+    uint32_t rtc_rx_video_transport_bitrate_kbps;
     char tirtc_device_id[DISPLAY_TIRTC_CONFIG_TEXT_MAX];
     char tirtc_device_secret[DISPLAY_TIRTC_CONFIG_TEXT_MAX];
     char tirtc_token_subject[DISPLAY_TIRTC_CONFIG_TOKEN_SUBJECT_MAX];
@@ -205,7 +208,10 @@ typedef struct {
     bool ai_chat_active;
     bool ai_chat_listening;
     bool ai_chat_cloud_speaking;
+    bool ai_chat_video_active;
     uint32_t ai_chat_tx_audio_frames;
+    uint32_t ai_chat_tx_video_frames;
+    uint32_t ai_chat_tx_video_failures;
     uint32_t ai_chat_rx_commands;
     int ai_chat_last_error;
     char ai_chat_asr_caption[DISPLAY_AI_CHAT_CAPTION_MAX];

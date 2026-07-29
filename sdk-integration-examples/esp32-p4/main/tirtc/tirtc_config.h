@@ -14,14 +14,22 @@
 #define TIRTC_DEVICE_SECRET_KEY "your_device_secret"
 #endif
 
+/*
+ * 设备端启动必填的稳定硬件/生产标识。
+ * 同一个 device_id 首次上线后会绑定当次 client_id，后续应保持不变。
+ */
+#ifndef TIRTC_CLIENT_ID
+#define TIRTC_CLIENT_ID "your_client_id"
+#endif
+
+/* AppId 对设备端可选；如业务侧要求设备端上报，可填真实 AppId。 */
+#ifndef TIRTC_APP_ID
+#define TIRTC_APP_ID ""
+#endif
+
 /* BOOT 键触发主动连接的目标设备 ID。 */
 #ifndef TIRTC_REMOTE_DEVICE_ID
 #define TIRTC_REMOTE_DEVICE_ID "peer_device_id"
-#endif
-
-/* 本地签发 token 时需要目标设备的 secret key，仅用于快速验证。 */
-#ifndef TIRTC_REMOTE_DEVICE_SECRET_KEY
-#define TIRTC_REMOTE_DEVICE_SECRET_KEY "peer_device_secret_key"
 #endif
 
 #ifndef TIRTC_AUTO_CONNECT_AFTER_STARTED

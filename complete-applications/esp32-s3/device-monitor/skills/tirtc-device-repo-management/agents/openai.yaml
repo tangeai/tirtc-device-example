@@ -1,4 +1,0 @@
-interface:
-  display_name: "TiRTC 设备示例仓库管理"
-  short_description: "管理 tirtc-device-example 本地仓结构、迁移边界、发布收口和架构梳理入口。"
-  default_prompt: "梳理并维护 TiRTC 设备示例仓库的本地结构、公开仓目录规划、发布检查项和架构边界。"

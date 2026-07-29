@@ -16,6 +16,7 @@
 #define TIRTC_SESSION_SERVICE_CODE_CLIENT_ID_CONFLICT 40305
 #define TIRTC_TOKEN_ACCESS_ID_MAX_LEN 128
 #define TIRTC_TOKEN_SUBJECT_MAX_LEN   64
+#define TIRTC_SESSION_LOCAL_VIDEO_STREAM_ID 11U
 
 typedef enum {
     TIRTC_SESSION_MODE_LISTEN = 0,
@@ -65,6 +66,10 @@ typedef void (*tirtc_session_start_error_cb_t)(int error,
                                                const char *device_id,
                                                const char *client_id,
                                                void *ctx);
+typedef void (*tirtc_session_video_bitrate_required_cb_t)(tirtc_conn_t conn,
+                                                          uint8_t stream_id,
+                                                          uint32_t target_bitrate_bps,
+                                                          void *ctx);
 
 typedef struct {
     tirtc_session_command_cb_t on_command;
@@ -73,7 +78,15 @@ typedef struct {
     tirtc_session_connection_error_cb_t on_connection_error;
     tirtc_session_disconnected_cb_t on_disconnected;
     tirtc_session_start_error_cb_t on_start_error;
+    tirtc_session_video_bitrate_required_cb_t on_video_bitrate_required;
 } tirtc_session_observer_t;
+
+typedef struct {
+    uint8_t stream_id;
+    uint32_t min_bitrate_bps;
+    uint32_t max_bitrate_bps;
+    uint32_t start_bitrate_bps;
+} tirtc_session_video_bitrate_params_t;
 
 typedef struct {
     esp_err_t (*init)(void *ctx);
@@ -81,11 +94,13 @@ typedef struct {
     esp_err_t (*set_capture_enabled)(bool enabled, void *ctx);
     esp_err_t (*set_video_capture_enabled)(bool enabled, void *ctx);
     void (*request_video_key_frame)(void *ctx);
+    void (*request_video_stream_start_key_frame)(void *ctx);
     esp_err_t (*prepare_playback_path)(void *ctx);
     esp_err_t (*submit_remote_audio)(uint8_t media,
                                      uint8_t flags,
                                      const uint8_t *data,
                                      size_t data_len,
+                                     uint32_t pts,
                                      size_t *playback_data_len,
                                      void *ctx);
     esp_err_t (*submit_remote_video)(uint8_t media,
@@ -94,6 +109,7 @@ typedef struct {
                                      size_t data_len,
                                      uint32_t pts,
                                      void *ctx);
+    bool (*remote_video_requires_key_frame)(void *ctx);
     void (*flush)(void *ctx);
 } tirtc_session_media_ops_t;
 
@@ -152,6 +168,7 @@ typedef struct {
     size_t rx_audio_bytes;
     size_t rx_message_bytes;
     size_t send_buffer_used;
+    size_t send_buffer_limit;
     size_t local_video_tx_pool_capacity;
     size_t local_video_tx_largest_slot;
     uint32_t local_video_tx_queue_len;
@@ -175,12 +192,15 @@ typedef struct {
 } tirtc_session_peer_state_t;
 
 esp_err_t tirtc_session_init(const tirtc_session_config_t *config);
+esp_err_t tirtc_session_prewarm_media_pools(void);
 esp_err_t tirtc_session_configure(const tirtc_session_config_t *config);
 esp_err_t tirtc_session_prepare_sdk(void);
 esp_err_t tirtc_session_set_media_bridge(const tirtc_session_media_ops_t *ops, void *ctx);
 void tirtc_session_set_hooks(const tirtc_session_hooks_t *hooks, void *ctx);
 void tirtc_session_set_control_ops(const tirtc_session_control_ops_t *ops, void *ctx);
 esp_err_t tirtc_session_register_observer(const tirtc_session_observer_t *observer, void *ctx);
+esp_err_t tirtc_session_set_video_bitrate_params(
+    const tirtc_session_video_bitrate_params_t *params);
 esp_err_t tirtc_session_start_if_ready(void);
 int tirtc_session_whip_connect(const char *service_desc,
                                const char *token,
@@ -240,11 +260,27 @@ esp_err_t tirtc_session_send_local_video_frame(const uint8_t *data,
                                                uint64_t pts_us,
                                                uint8_t media,
                                                uint8_t flags);
+esp_err_t tirtc_session_set_external_video_active(tirtc_conn_t conn,
+                                                  uint8_t stream_id,
+                                                  bool active);
+esp_err_t tirtc_session_send_external_video_frame(tirtc_conn_t conn,
+                                                  uint8_t stream_id,
+                                                  const uint8_t *data,
+                                                  size_t data_len,
+                                                  uint16_t width,
+                                                  uint16_t height,
+                                                  uint64_t pts_us,
+                                                  uint8_t media,
+                                                  uint8_t flags);
 esp_err_t tirtc_session_send_test_video_frame(const TIRTCFRAMEINFO *frame_info, const uint8_t *data);
 esp_err_t tirtc_session_send_test_audio_pcm_frame(const uint8_t *data,
                                                   size_t data_len,
                                                   const tirtc_session_audio_format_t *format,
                                                   uint64_t pts_us);
+esp_err_t tirtc_session_set_external_media_call_active(tirtc_conn_t conn,
+                                                       bool active,
+                                                       bool local_video_enabled,
+                                                       bool remote_video_enabled);
 esp_err_t tirtc_session_set_external_audio_call_active(tirtc_conn_t conn, bool active);
 esp_err_t tirtc_session_set_session_mode(tirtc_session_mode_t session_mode);
 tirtc_session_mode_t tirtc_session_get_session_mode(void);

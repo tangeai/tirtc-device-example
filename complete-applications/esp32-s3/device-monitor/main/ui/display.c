@@ -11615,6 +11615,43 @@ void display_set_snapshot_provider(display_snapshot_cb_t cb, void *ctx)
     s_snapshot_ctx = ctx;
 }
 
+static void display_open_call_page_async_cb(void *user_data)
+{
+    const bool active_call = (uintptr_t)user_data != 0U;
+
+    if (active_call) {
+        s_call_active_started_us = 0;
+        display_show_call_active_page();
+    } else {
+        display_show_call_page();
+    }
+}
+
+static esp_err_t display_schedule_call_page(bool active_call)
+{
+    if (!s_display_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!lvgl_port_lock(1000)) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    lv_res_t ret = lv_async_call(display_open_call_page_async_cb,
+                                 (void *)(uintptr_t)(active_call ? 1U : 0U));
+    lvgl_port_unlock();
+    return ret == LV_RES_OK ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t display_open_call_page_async(void)
+{
+    return display_schedule_call_page(false);
+}
+
+esp_err_t display_open_call_active_page_async(void)
+{
+    return display_schedule_call_page(true);
+}
+
 static lv_obj_t *display_find_tap_target_locked(const lv_point_t *point)
 {
     lv_obj_t *target = NULL;

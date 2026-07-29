@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "cJSON.h"
 #include "app_memory_policy.h"
@@ -11,6 +12,11 @@
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "mbedtls/base64.h"
 #include "mbedtls/md.h"
 #include "thing_http_client.h"
@@ -21,6 +27,19 @@ static const char *TAG = "ai_chat_token";
 #define AI_CHAT_TOKEN_API_URL_MAX_LEN  224U
 #define AI_CHAT_TOKEN_RESPONSE_MAX_LEN 4096U
 #define AI_CHAT_TOKEN_SHA256_HEX_LEN   65U
+#define AI_CHAT_TOKEN_CACHE_SKEW_US    (60LL * 1000LL * 1000LL)
+#define AI_CHAT_TOKEN_CACHE_FALLBACK_US (5LL * 60LL * 1000LL * 1000LL)
+
+typedef struct {
+    SemaphoreHandle_t lock;
+    ai_chat_join_info_t *join_info;
+    ai_chat_config_t config;
+    int64_t expires_us;
+    bool valid;
+} ai_chat_token_cache_t;
+
+static ai_chat_token_cache_t s_join_cache;
+static portMUX_TYPE s_join_cache_init_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static void *ai_chat_token_calloc_psram(size_t count, size_t size)
 {
@@ -68,6 +87,17 @@ static esp_err_t ai_chat_token_sha256_hex(const char *data,
 
     ai_chat_token_hex_encode(digest, sizeof(digest), out, AI_CHAT_TOKEN_SHA256_HEX_LEN);
     return ESP_OK;
+}
+
+static int64_t ai_chat_token_now_wall_us(void)
+{
+    time_t now = 0;
+
+    time(&now);
+    if (now > 1600000000) {
+        return (int64_t)now * 1000000LL;
+    }
+    return esp_timer_get_time();
 }
 
 static long long ai_chat_token_json_number_i64(const cJSON *object, const char *name)
@@ -187,6 +217,131 @@ static void ai_chat_token_log_token_claims(const char *token)
 
     cJSON_Delete(payload);
     free(payload_json);
+}
+
+static int64_t ai_chat_token_expiry_us(const char *token)
+{
+    char *payload_json = ai_chat_token_decode_jwt_payload(token);
+    int64_t expires_us = ai_chat_token_now_wall_us() + AI_CHAT_TOKEN_CACHE_FALLBACK_US;
+
+    if (payload_json == NULL) {
+        return expires_us;
+    }
+
+    cJSON *payload = cJSON_Parse(payload_json);
+    if (payload != NULL) {
+        long long exp = ai_chat_token_json_number_i64(payload, "exp");
+        if (exp > 1600000000LL) {
+            expires_us = (int64_t)exp * 1000000LL;
+        }
+        cJSON_Delete(payload);
+    }
+    free(payload_json);
+    return expires_us;
+}
+
+static bool ai_chat_token_config_matches(const ai_chat_config_t *lhs,
+                                         const ai_chat_config_t *rhs)
+{
+    return lhs != NULL && rhs != NULL &&
+           lhs->enabled == rhs->enabled &&
+           strcmp(lhs->device_id, rhs->device_id) == 0 &&
+           strcmp(lhs->user_id, rhs->user_id) == 0 &&
+           strcmp(lhs->role_id, rhs->role_id) == 0 &&
+           strcmp(lhs->device_key, rhs->device_key) == 0 &&
+           strcmp(lhs->token_api_base, rhs->token_api_base) == 0;
+}
+
+static esp_err_t ai_chat_token_cache_ensure(void)
+{
+    if (s_join_cache.lock == NULL) {
+        SemaphoreHandle_t new_lock = xSemaphoreCreateMutex();
+        if (new_lock == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+        taskENTER_CRITICAL(&s_join_cache_init_lock);
+        if (s_join_cache.lock == NULL) {
+            s_join_cache.lock = new_lock;
+            new_lock = NULL;
+        }
+        taskEXIT_CRITICAL(&s_join_cache_init_lock);
+        if (new_lock != NULL) {
+            vSemaphoreDelete(new_lock);
+        }
+    }
+    if (s_join_cache.join_info == NULL) {
+        ai_chat_join_info_t *new_join_info =
+            (ai_chat_join_info_t *)ai_chat_token_calloc_psram(1, sizeof(*s_join_cache.join_info));
+        if (new_join_info == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+        taskENTER_CRITICAL(&s_join_cache_init_lock);
+        if (s_join_cache.join_info == NULL) {
+            s_join_cache.join_info = new_join_info;
+            new_join_info = NULL;
+        }
+        taskEXIT_CRITICAL(&s_join_cache_init_lock);
+        free(new_join_info);
+    }
+    return ESP_OK;
+}
+
+static bool ai_chat_token_cache_take(const ai_chat_config_t *config,
+                                     ai_chat_join_info_t *join_info)
+{
+    bool hit = false;
+    int64_t now_us = ai_chat_token_now_wall_us();
+
+    if (config == NULL || join_info == NULL || ai_chat_token_cache_ensure() != ESP_OK) {
+        return false;
+    }
+
+    xSemaphoreTake(s_join_cache.lock, portMAX_DELAY);
+    if (s_join_cache.valid &&
+        ai_chat_token_config_matches(config, &s_join_cache.config) &&
+        s_join_cache.expires_us > now_us + AI_CHAT_TOKEN_CACHE_SKEW_US) {
+        *join_info = *s_join_cache.join_info;
+        memset(s_join_cache.join_info, 0, sizeof(*s_join_cache.join_info));
+        memset(&s_join_cache.config, 0, sizeof(s_join_cache.config));
+        s_join_cache.expires_us = 0;
+        s_join_cache.valid = false;
+        hit = true;
+    } else if (s_join_cache.valid &&
+               (!ai_chat_token_config_matches(config, &s_join_cache.config) ||
+                s_join_cache.expires_us <= now_us + AI_CHAT_TOKEN_CACHE_SKEW_US)) {
+        memset(s_join_cache.join_info, 0, sizeof(*s_join_cache.join_info));
+        memset(&s_join_cache.config, 0, sizeof(s_join_cache.config));
+        s_join_cache.expires_us = 0;
+        s_join_cache.valid = false;
+    }
+    xSemaphoreGive(s_join_cache.lock);
+
+    if (hit) {
+        ESP_LOGI(TAG,
+                 "AI Chat token cache hit: peer_id_len=%u role_id_len=%u token_len=%u",
+                 (unsigned)strlen(join_info->peer_id),
+                 (unsigned)strlen(join_info->role_id),
+                 (unsigned)strlen(join_info->token));
+    }
+    return hit;
+}
+
+static esp_err_t ai_chat_token_cache_store(const ai_chat_config_t *config,
+                                           const ai_chat_join_info_t *join_info)
+{
+    ESP_RETURN_ON_FALSE(config != NULL && join_info != NULL,
+                        ESP_ERR_INVALID_ARG,
+                        TAG,
+                        "invalid token cache args");
+    ESP_RETURN_ON_ERROR(ai_chat_token_cache_ensure(), TAG, "init token cache failed");
+
+    xSemaphoreTake(s_join_cache.lock, portMAX_DELAY);
+    s_join_cache.config = *config;
+    *s_join_cache.join_info = *join_info;
+    s_join_cache.expires_us = ai_chat_token_expiry_us(join_info->token);
+    s_join_cache.valid = true;
+    xSemaphoreGive(s_join_cache.lock);
+    return ESP_OK;
 }
 
 static esp_err_t ai_chat_token_validate_config(const ai_chat_config_t *config)
@@ -422,15 +577,11 @@ cleanup:
     return ret;
 }
 
-esp_err_t ai_chat_token_request_join(const ai_chat_config_t *config, ai_chat_join_info_t *join_info)
+static esp_err_t ai_chat_token_request_join_uncached(const ai_chat_config_t *config,
+                                                     ai_chat_join_info_t *join_info)
 {
     device_auth_token_t *mqtt_token = NULL;
     esp_err_t ret = ESP_OK;
-
-    ESP_RETURN_ON_ERROR(ai_chat_token_validate_config(config), TAG, "invalid AI Chat token config");
-    if (join_info == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
 
     mqtt_token = (device_auth_token_t *)ai_chat_token_calloc_psram(1, sizeof(*mqtt_token));
     if (mqtt_token == NULL) {
@@ -450,4 +601,74 @@ cleanup:
     }
     free(mqtt_token);
     return ret;
+}
+
+esp_err_t ai_chat_token_prefetch_join(const ai_chat_config_t *config)
+{
+    ai_chat_join_info_t *join_info = NULL;
+    esp_err_t ret = ESP_OK;
+
+    ESP_RETURN_ON_ERROR(ai_chat_token_validate_config(config), TAG, "invalid AI Chat token config");
+    ESP_RETURN_ON_ERROR(ai_chat_token_cache_ensure(), TAG, "init token cache failed");
+
+    xSemaphoreTake(s_join_cache.lock, portMAX_DELAY);
+    bool cache_ready = s_join_cache.valid &&
+                       ai_chat_token_config_matches(config, &s_join_cache.config) &&
+                       s_join_cache.expires_us >
+                           ai_chat_token_now_wall_us() + AI_CHAT_TOKEN_CACHE_SKEW_US;
+    xSemaphoreGive(s_join_cache.lock);
+    if (cache_ready) {
+        return ESP_OK;
+    }
+
+    join_info = (ai_chat_join_info_t *)ai_chat_token_calloc_psram(1, sizeof(*join_info));
+    if (join_info == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    ret = ai_chat_token_request_join_uncached(config, join_info);
+    if (ret == ESP_OK) {
+        ret = ai_chat_token_cache_store(config, join_info);
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG,
+                     "AI Chat token prefetched: peer_id_len=%u role_id_len=%u token_len=%u",
+                     (unsigned)strlen(join_info->peer_id),
+                     (unsigned)strlen(join_info->role_id),
+                     (unsigned)strlen(join_info->token));
+        }
+    }
+
+    memset(join_info, 0, sizeof(*join_info));
+    free(join_info);
+    return ret;
+}
+
+esp_err_t ai_chat_token_request_join(const ai_chat_config_t *config,
+                                     ai_chat_join_info_t *join_info)
+{
+    ESP_RETURN_ON_ERROR(ai_chat_token_validate_config(config), TAG, "invalid AI Chat token config");
+    if (join_info == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (ai_chat_token_cache_take(config, join_info)) {
+        return ESP_OK;
+    }
+    return ai_chat_token_request_join_uncached(config, join_info);
+}
+
+void ai_chat_token_invalidate_cache(void)
+{
+    if (s_join_cache.lock == NULL) {
+        return;
+    }
+
+    xSemaphoreTake(s_join_cache.lock, portMAX_DELAY);
+    if (s_join_cache.join_info != NULL) {
+        memset(s_join_cache.join_info, 0, sizeof(*s_join_cache.join_info));
+    }
+    memset(&s_join_cache.config, 0, sizeof(s_join_cache.config));
+    s_join_cache.expires_us = 0;
+    s_join_cache.valid = false;
+    xSemaphoreGive(s_join_cache.lock);
 }

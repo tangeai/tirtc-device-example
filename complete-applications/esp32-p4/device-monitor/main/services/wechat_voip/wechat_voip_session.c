@@ -3,7 +3,8 @@
  *
  * 业务服务器下发入会通知后,本文件保存本次 peer_id/token,
  * 再由界面接听或主动呼叫自动入会触发 WHIP 建连.
- * WHIP 建连后等待 CALL_CONNECTED, 确认通话进入媒体阶段后再启动音视频.
+ * 主动呼叫在 WHIP 入会成功后立即启动媒体; 被叫接听在 CALL_CONNECTED
+ * 确认后启动媒体. 两条路径共用同一个幂等媒体启动工作项.
  */
 #include "wechat_voip_session.h"
 
@@ -44,18 +45,22 @@ enum
     VOIP_RING_TIMEOUT_MS = 35000,
     VOIP_CONNECT_TIMEOUT_MS = 20000,
     VOIP_CONNECTED_WAIT_TIMEOUT_MS = 15000,
-    VOIP_OUTBOUND_CONNECTED_WAIT_TIMEOUT_MS = VOIP_RING_TIMEOUT_MS,
     VOIP_CLOSE_WAIT_TIMEOUT_MS = 1500,
     VOIP_RECALL_GUARD_MS = 1200,
-    VOIP_STATUS_WARN_INTERVAL_MS = 2000,
+    VOIP_STATUS_WARN_INTERVAL_MS = 15000,
     VOIP_MEDIA_STOP_WAIT_MS = 300,
     VOIP_WORK_QUEUE_LEN = 8,
     VOIP_WORK_TASK_STACK = 12288,
     VOIP_WORK_TASK_PRIORITY = 5,
     VOIP_DISCONNECT_DELAY_MS = 120,
+    VOIP_SHUTDOWN_POLL_MS = 20,
+    VOIP_RECENT_ROOM_GUARD_MS = 60000,
     VOIP_WHIP_MIN_INTERNAL_FREE = 32 * 1024,
     VOIP_WHIP_MIN_INTERNAL_LARGEST = 8 * 1024,
     VOIP_WHIP_WARN_INTERNAL_LARGEST = 16 * 1024,
+    VOIP_WHIP_PEER_ID_MAX = 2048,
+    VOIP_WHIP_TOKEN_MAX = 1536,
+    VOIP_WX_SESSION_TOKEN_MAX = 1024,
 };
 
 typedef enum
@@ -72,28 +77,38 @@ typedef struct
 {
     voip_state_t state;
     tirtc_conn_t hconn;
-    char peer_id[2048];
-    char token[1024];
+    char peer_id[VOIP_WHIP_PEER_ID_MAX];
+    char token[VOIP_WHIP_TOKEN_MAX];
     char wx_app_id[64];
     char wx_model_id[64];
-    char wx_session_token[256];
+    char wx_session_token[VOIP_WX_SESSION_TOKEN_MAX];
     char wx_room_id[128];
     char wx_payload[256];
     int64_t deadline_us;
+    uint32_t generation;
     bool outbound_call;
+    bool cancel_on_connect;
+    bool connection_callback_claimed;
+    tirtc_conn_t connection_callback_hconn;
+    bool connection_tracked;
+    bool connected_command_received;
+    bool media_start_pending;
+    bool media_started;
 } voip_session_t;
 
 typedef struct
 {
     char wx_app_id[64];
     char wx_model_id[64];
-    char wx_session_token[256];
+    char wx_session_token[VOIP_WX_SESSION_TOKEN_MAX];
     char wx_room_id[128];
     char wx_payload[256];
 } voip_reject_info_t;
 
 typedef enum
 {
+    VOIP_WORK_START_MEDIA,
+    VOIP_WORK_STOP_MEDIA,
     VOIP_WORK_DISCONNECT,
     VOIP_WORK_HANGUP,
     VOIP_WORK_REJECT,
@@ -103,9 +118,10 @@ typedef struct
 {
     voip_work_type_t type;
     tirtc_conn_t hconn;
+    uint32_t generation;
     tirtc_voip_hangup_reason_t reason;
     bool only_if_current;
-    voip_reject_info_t reject;
+    voip_reject_info_t *reject;
 } voip_work_item_t;
 
 typedef struct
@@ -119,16 +135,23 @@ typedef struct
     uint32_t work_queue_len;
     bool media_running;
     wechat_voip_media_stats_t media;
+    bool rtc_active_connection;
+    bool rtc_call_active;
+    tirtc_session_state_t rtc_state;
     int64_t deadline_left_ms;
     int64_t last_close_ago_ms;
 } voip_status_t;
 
 static SemaphoreHandle_t s_mutex;
+static portMUX_TYPE s_init_lock = portMUX_INITIALIZER_UNLOCKED;
 static EXT_RAM_BSS_ATTR voip_session_t s_session;
 static TaskHandle_t s_answer_worker_task;
 static QueueHandle_t s_work_queue;
 static TaskHandle_t s_work_task;
 static int64_t s_last_close_us;
+static char s_last_close_room_id[sizeof(s_session.wx_room_id)];
+static int64_t s_last_close_room_us;
+static uint32_t s_session_generation;
 static bool s_answer_pending;
 static char s_answer_source[32];
 static uint32_t s_answer_delay_ms;
@@ -142,17 +165,53 @@ static esp_err_t ensure_work_worker(void);
 static esp_err_t enqueue_work(const voip_work_item_t *item);
 static esp_err_t send_reject_info(const voip_reject_info_t *info, tirtc_voip_hangup_reason_t reason);
 static esp_err_t reject_info_later(const voip_reject_info_t *info, tirtc_voip_hangup_reason_t reason);
+static void abort_connected_media_start(tirtc_conn_t hconn,
+                                        uint32_t generation,
+                                        const char *reason);
+static void collect_status(voip_status_t *status);
+static bool status_available_for_ringing(const voip_status_t *status);
+static bool status_ready_for_next_call(const voip_status_t *status);
+static void log_status(const char *reason, const voip_status_t *status, bool warning);
 
 static void ensure_init(void)
 {
-    if (s_mutex != NULL)
+    SemaphoreHandle_t created_mutex = NULL;
+    bool ready = false;
+
+    portENTER_CRITICAL(&s_init_lock);
+    ready = s_mutex != NULL;
+    portEXIT_CRITICAL(&s_init_lock);
+
+    if (!ready)
     {
-        return;
+        created_mutex =
+            xSemaphoreCreateMutexWithCaps(APP_SYNC_CAPS_CONTROL);
+        if (created_mutex == NULL)
+        {
+            portENTER_CRITICAL(&s_init_lock);
+            ready = s_mutex != NULL;
+            portEXIT_CRITICAL(&s_init_lock);
+            configASSERT(ready);
+        }
+
+        if (created_mutex != NULL)
+        {
+            portENTER_CRITICAL(&s_init_lock);
+            if (s_mutex == NULL)
+            {
+                s_mutex = created_mutex;
+                created_mutex = NULL;
+                s_session.state = VOIP_STATE_IDLE;
+            }
+            portEXIT_CRITICAL(&s_init_lock);
+
+            if (created_mutex != NULL)
+            {
+                vSemaphoreDeleteWithCaps(created_mutex);
+            }
+        }
     }
 
-    s_mutex = xSemaphoreCreateMutexWithCaps(APP_SYNC_CAPS_CONTROL);
-    configASSERT(s_mutex != NULL);
-    s_session.state = VOIP_STATE_IDLE;
     (void)ensure_work_worker();
 }
 
@@ -218,6 +277,10 @@ static const char *work_type_name(voip_work_type_t type)
 {
     switch (type)
     {
+    case VOIP_WORK_START_MEDIA:
+        return "启动媒体";
+    case VOIP_WORK_STOP_MEDIA:
+        return "停止媒体";
     case VOIP_WORK_DISCONNECT:
         return "断开";
     case VOIP_WORK_HANGUP:
@@ -242,6 +305,13 @@ static void clear_session_locked(void)
 static void finish_session_locked(void)
 {
     WX_VOIP_TRACEI(TAG, "结束会话: state=%s hconn=%p", state_name(s_session.state), s_session.hconn);
+    if (s_session.wx_room_id[0] != '\0')
+    {
+        copy_str(s_last_close_room_id,
+                 sizeof(s_last_close_room_id),
+                 s_session.wx_room_id);
+        s_last_close_room_us = esp_timer_get_time();
+    }
     clear_session_locked();
     s_last_close_us = esp_timer_get_time();
 }
@@ -261,7 +331,7 @@ static void begin_close_locked(void)
     set_deadline_locked(VOIP_CLOSE_WAIT_TIMEOUT_MS);
 }
 
-static bool connection_is_current(tirtc_conn_t hconn)
+static bool connection_is_current(tirtc_conn_t hconn, uint32_t generation)
 {
     if (hconn == NULL)
     {
@@ -269,12 +339,53 @@ static bool connection_is_current(tirtc_conn_t hconn)
     }
 
     lock_session();
-    bool current = (s_session.hconn == hconn && s_session.state != VOIP_STATE_IDLE);
+    bool current = s_session.hconn == hconn &&
+                   s_session.state != VOIP_STATE_IDLE &&
+                   (generation == 0U || s_session.generation == generation);
     unlock_session();
     return current;
 }
 
-static void disconnect_later(tirtc_conn_t hconn, bool only_if_current)
+static bool connection_handle_reused(tirtc_conn_t hconn, uint32_t generation)
+{
+    if (hconn == NULL || generation == 0U)
+    {
+        return false;
+    }
+
+    lock_session();
+    bool reused = s_session.state != VOIP_STATE_IDLE &&
+                  s_session.hconn == hconn &&
+                  s_session.generation != generation;
+    unlock_session();
+    return reused;
+}
+
+static bool generation_is_latest(uint32_t generation)
+{
+    bool latest = false;
+
+    lock_session();
+    latest = generation == 0U || generation == s_session_generation;
+    unlock_session();
+    return latest;
+}
+
+static bool media_start_is_current(tirtc_conn_t hconn, uint32_t generation)
+{
+    bool current = false;
+
+    lock_session();
+    current = s_session.generation == generation &&
+              s_session.hconn == hconn &&
+              s_session.state == VOIP_STATE_IN_CALL;
+    unlock_session();
+    return current;
+}
+
+static void disconnect_later(tirtc_conn_t hconn,
+                             uint32_t generation,
+                             bool only_if_current)
 {
     if (hconn == NULL)
     {
@@ -282,18 +393,31 @@ static void disconnect_later(tirtc_conn_t hconn, bool only_if_current)
     }
 
     WX_VOIP_TRACEI(TAG,
-                   "投递断开任务: hconn=%p only_if_current=%d",
+                   "投递断开任务: hconn=%p gen=%u only_if_current=%d",
                    hconn,
+                   (unsigned)generation,
                    only_if_current ? 1 : 0);
 
     voip_work_item_t item = {
         .type = VOIP_WORK_DISCONNECT,
         .hconn = hconn,
+        .generation = generation,
         .only_if_current = only_if_current,
     };
     if (enqueue_work(&item) != ESP_OK)
     {
-        ESP_LOGW(TAG, "断开任务投递失败,等待下一次维护");
+        if (!only_if_current)
+        {
+            int rc = tirtc_session_disconnect_connection(hconn);
+            ESP_LOGW(TAG,
+                     "断开任务投递失败,直接提交 SDK 断开: rc=%d hconn=%p",
+                     rc,
+                     hconn);
+        }
+        else
+        {
+            ESP_LOGW(TAG, "断开任务投递失败,等待下一次维护");
+        }
     }
 }
 
@@ -428,6 +552,86 @@ static void fill_reject_info(voip_reject_info_t *info, const voip_session_t *ses
     copy_str(info->wx_payload, sizeof(info->wx_payload), sess->wx_payload);
 }
 
+static void fill_reject_info_from_join(voip_reject_info_t *info, cJSON *payload)
+{
+    const char *peer_id = NULL;
+    const char *app_id = NULL;
+    const char *model_id = NULL;
+    const char *session_token = NULL;
+    const char *room_id = NULL;
+    const char *wx_payload = NULL;
+    char app_id_from_peer[sizeof(info->wx_app_id)] = {0};
+    char model_id_from_peer[sizeof(info->wx_model_id)] = {0};
+
+    if (info == NULL) {
+        return;
+    }
+    memset(info, 0, sizeof(*info));
+    if (!cJSON_IsObject(payload)) {
+        return;
+    }
+
+    peer_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(payload, "peer_id"));
+    app_id = json_string_any(payload, "wx_app_id", "wxa_app_id");
+    model_id = json_string_any(payload, "wx_model_id", "wxa_model_id");
+    session_token = json_string_any(payload, "wx_session_token", "wxa_session_token");
+    room_id = json_string_any(payload, "wx_room_id", "wxa_room_id");
+    wx_payload = json_string_any(payload, "wx_payload", "wxa_payload");
+    if (session_token == NULL || session_token[0] == '\0') {
+        session_token = json_string_any(payload, "wx_server_token", "wxa_server_token");
+    }
+    if ((app_id == NULL || app_id[0] == '\0') && peer_id != NULL) {
+        extract_query_param(peer_id,
+                            "x_wx_app_id",
+                            app_id_from_peer,
+                            sizeof(app_id_from_peer));
+        if (app_id_from_peer[0] == '\0') {
+            extract_query_param(peer_id,
+                                "x_wxa_app_id",
+                                app_id_from_peer,
+                                sizeof(app_id_from_peer));
+        }
+        app_id = app_id_from_peer;
+    }
+    if ((model_id == NULL || model_id[0] == '\0') && peer_id != NULL) {
+        extract_query_param(peer_id,
+                            "x_wx_model_id",
+                            model_id_from_peer,
+                            sizeof(model_id_from_peer));
+        if (model_id_from_peer[0] == '\0') {
+            extract_query_param(peer_id,
+                                "x_wxa_model_id",
+                                model_id_from_peer,
+                                sizeof(model_id_from_peer));
+        }
+        model_id = model_id_from_peer;
+    }
+
+    copy_str(info->wx_app_id, sizeof(info->wx_app_id), app_id);
+    copy_str(info->wx_model_id, sizeof(info->wx_model_id), model_id);
+    copy_str(info->wx_session_token, sizeof(info->wx_session_token), session_token);
+    copy_str(info->wx_room_id, sizeof(info->wx_room_id), room_id);
+    copy_str(info->wx_payload, sizeof(info->wx_payload), wx_payload);
+}
+
+static esp_err_t reject_join_room(cJSON *payload,
+                                  tirtc_voip_hangup_reason_t reason)
+{
+    voip_reject_info_t reject_info = {0};
+
+    ensure_init();
+    fill_reject_info_from_join(&reject_info, payload);
+    if (reject_info.wx_room_id[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return reject_info_later(&reject_info, reason);
+}
+
+esp_err_t wechat_voip_session_reject_join_room_busy(cJSON *payload)
+{
+    return reject_join_room(payload, TIRTC_VOIP_HANGUP_REASON_BUSY);
+}
+
 static esp_err_t send_reject_info(const voip_reject_info_t *info, tirtc_voip_hangup_reason_t reason)
 {
     if (info == NULL)
@@ -472,15 +676,133 @@ static void voip_work_task(void *arg)
                        item.only_if_current ? 1 : 0);
         switch (item.type)
         {
+        case VOIP_WORK_START_MEDIA:
+        {
+            bool current = false;
+
+            lock_session();
+            current = s_session.generation == item.generation &&
+                      s_session.hconn == item.hconn &&
+                      s_session.state == VOIP_STATE_IN_CALL &&
+                      s_session.media_start_pending &&
+                      !s_session.media_started;
+            if (current) {
+                s_session.media_start_pending = false;
+            }
+            unlock_session();
+            if (!current) {
+                WX_VOIP_TRACEI(TAG,
+                               "忽略过期媒体启动: gen=%u hconn=%p",
+                               (unsigned)item.generation,
+                               item.hconn);
+                break;
+            }
+
+            esp_err_t ret = wechat_voip_media_prepare(
+                WECHAT_VOIP_LOCAL_VIDEO_ENABLE != 0,
+                WECHAT_VOIP_REMOTE_VIDEO_ENABLE != 0);
+            if (ret == ESP_OK &&
+                !media_start_is_current(item.hconn, item.generation)) {
+                (void)wechat_voip_media_stop_wait(item.hconn,
+                                                  VOIP_MEDIA_STOP_WAIT_MS);
+                WX_VOIP_TRACEI(TAG,
+                               "媒体准备完成时通话已结束: gen=%u hconn=%p",
+                               (unsigned)item.generation,
+                               item.hconn);
+                break;
+            }
+            if (ret == ESP_OK) {
+                ret = tirtc_session_set_external_media_call_active(
+                    item.hconn,
+                    true,
+                    WECHAT_VOIP_LOCAL_VIDEO_ENABLE != 0,
+                    WECHAT_VOIP_REMOTE_VIDEO_ENABLE != 0);
+            }
+            if (ret == ESP_OK &&
+                !media_start_is_current(item.hconn, item.generation)) {
+                (void)tirtc_session_set_external_media_call_active(
+                    item.hconn,
+                    false,
+                    false,
+                    false);
+                (void)wechat_voip_media_stop_wait(item.hconn,
+                                                  VOIP_MEDIA_STOP_WAIT_MS);
+                WX_VOIP_TRACEI(TAG,
+                               "媒体登记完成时通话已结束: gen=%u hconn=%p",
+                               (unsigned)item.generation,
+                               item.hconn);
+                break;
+            }
+            if (ret == ESP_OK) {
+                ret = wechat_voip_media_start(item.hconn);
+            }
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "微信通话媒体启动失败: %s", esp_err_to_name(ret));
+                (void)tirtc_session_set_external_media_call_active(
+                    item.hconn,
+                    false,
+                    false,
+                    false);
+                (void)wechat_voip_media_stop_wait(item.hconn, VOIP_MEDIA_STOP_WAIT_MS);
+                abort_connected_media_start(item.hconn,
+                                            item.generation,
+                                            "media pipeline start failed");
+                break;
+            }
+
+            lock_session();
+            current = s_session.generation == item.generation &&
+                      s_session.hconn == item.hconn &&
+                      s_session.state == VOIP_STATE_IN_CALL;
+            if (current) {
+                s_session.media_started = true;
+            }
+            unlock_session();
+            if (!current) {
+                (void)wechat_voip_media_stop_wait(item.hconn, VOIP_MEDIA_STOP_WAIT_MS);
+                (void)tirtc_session_set_external_media_call_active(
+                    item.hconn,
+                    false,
+                    false,
+                    false);
+                break;
+            }
+
+            ESP_LOGI(TAG,
+                     "微信双向媒体已启动: audio=pcma/a-law up_video=%d down_video=%d target=%ux%u",
+                     WECHAT_VOIP_LOCAL_VIDEO_ENABLE ? 1 : 0,
+                     WECHAT_VOIP_REMOTE_VIDEO_ENABLE ? 1 : 0,
+                     (unsigned)WECHAT_VOIP_VIDEO_WIDTH,
+                     (unsigned)WECHAT_VOIP_VIDEO_HEIGHT);
+            break;
+        }
+
+        case VOIP_WORK_STOP_MEDIA:
+            if (generation_is_latest(item.generation)) {
+                (void)wechat_voip_media_stop_wait(item.hconn, VOIP_MEDIA_STOP_WAIT_MS);
+            } else {
+                WX_VOIP_TRACEI(TAG,
+                               "忽略过期媒体停止: gen=%u hconn=%p",
+                               (unsigned)item.generation,
+                               item.hconn);
+            }
+            /* The TiRTC disconnect callback has already reset connection and
+             * AEC state. This work item only drains app-owned media resources. */
+            break;
+
         case VOIP_WORK_HANGUP:
             if (item.hconn != NULL)
             {
                 char body[32];
                 int n = snprintf(body, sizeof(body), "{\"reason\":%d}", (int)item.reason);
-                if (connection_is_current(item.hconn))
+                if (connection_is_current(item.hconn, item.generation))
                 {
                     (void)wechat_voip_media_stop_wait(item.hconn, VOIP_MEDIA_STOP_WAIT_MS);
-                    (void)tirtc_session_set_external_audio_call_active(item.hconn, false);
+                    (void)tirtc_session_set_external_media_call_active(
+                        item.hconn,
+                        false,
+                        false,
+                        false);
                     if (n > 0 && n < (int)sizeof(body))
                     {
                         WX_VOIP_TRACEI(TAG,
@@ -491,10 +813,17 @@ static void voip_work_task(void *arg)
                     }
                 }
                 vTaskDelay(pdMS_TO_TICKS(VOIP_DISCONNECT_DELAY_MS));
-                if (connection_is_current(item.hconn))
+                if (connection_is_current(item.hconn, item.generation))
                 {
                     WX_VOIP_TRACEI(TAG, "调用 TiRTC disconnect wrapper: hconn=%p", item.hconn);
                     (void)tirtc_session_disconnect_connection(item.hconn);
+                }
+                else
+                {
+                    WX_VOIP_TRACEI(TAG,
+                                   "忽略过期挂断工作项: gen=%u hconn=%p",
+                                   (unsigned)item.generation,
+                                   item.hconn);
                 }
                 ESP_LOGI(TAG, "微信通话挂断流程已提交");
             }
@@ -503,26 +832,46 @@ static void voip_work_task(void *arg)
         case VOIP_WORK_DISCONNECT:
             if (item.hconn != NULL)
             {
-                if (!item.only_if_current || connection_is_current(item.hconn))
+                bool current = connection_is_current(item.hconn, item.generation);
+                bool safe_to_disconnect =
+                    !connection_handle_reused(item.hconn, item.generation);
+                if (current || (!item.only_if_current && safe_to_disconnect))
                 {
                     (void)wechat_voip_media_stop_wait(item.hconn, VOIP_MEDIA_STOP_WAIT_MS);
-                    (void)tirtc_session_set_external_audio_call_active(item.hconn, false);
+                    if (current) {
+                        (void)tirtc_session_set_external_media_call_active(
+                            item.hconn,
+                            false,
+                            false,
+                            false);
+                    }
                     vTaskDelay(pdMS_TO_TICKS(VOIP_DISCONNECT_DELAY_MS));
-                    if (!item.only_if_current || connection_is_current(item.hconn))
+                    current = connection_is_current(item.hconn, item.generation);
+                    safe_to_disconnect =
+                        !connection_handle_reused(item.hconn, item.generation);
+                    if (current || (!item.only_if_current && safe_to_disconnect))
                     {
-                        ESP_LOGI(TAG, "释放微信通话连接");
+                        WX_VOIP_TRACEI(TAG, "释放微信通话连接");
                         WX_VOIP_TRACEI(TAG, "调用 TiRTC disconnect wrapper: hconn=%p", item.hconn);
                         (void)tirtc_session_disconnect_connection(item.hconn);
                     }
+                }
+                else
+                {
+                    WX_VOIP_TRACEI(TAG,
+                                   "忽略过期断开工作项: gen=%u hconn=%p",
+                                   (unsigned)item.generation,
+                                   item.hconn);
                 }
             }
             break;
 
         case VOIP_WORK_REJECT:
-            if (send_reject_info(&item.reject, item.reason) == ESP_OK)
+            if (send_reject_info(item.reject, item.reason) == ESP_OK)
             {
                 ESP_LOGI(TAG, "%s", item.reason == TIRTC_VOIP_HANGUP_REASON_REJECT ? "已拒接微信来电" : "已取消微信通话");
             }
+            free(item.reject);
             break;
         }
         WX_VOIP_TRACEI(TAG, "工作项处理完成: type=%s", work_type_name(item.type));
@@ -532,6 +881,7 @@ static void voip_work_task(void *arg)
 
 static esp_err_t ensure_work_worker(void)
 {
+    lock_session();
     if (s_work_queue == NULL)
     {
         s_work_queue = xQueueCreateWithCaps(VOIP_WORK_QUEUE_LEN,
@@ -539,6 +889,7 @@ static esp_err_t ensure_work_worker(void)
                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (s_work_queue == NULL)
         {
+            unlock_session();
             ESP_LOGE(TAG, "创建微信 VoIP 工作队列失败");
             return ESP_ERR_NO_MEM;
         }
@@ -546,6 +897,7 @@ static esp_err_t ensure_work_worker(void)
 
     if (s_work_task != NULL)
     {
+        unlock_session();
         return ESP_OK;
     }
 
@@ -559,10 +911,12 @@ static esp_err_t ensure_work_worker(void)
     if (ret != pdPASS)
     {
         s_work_task = NULL;
+        unlock_session();
         ESP_LOGE(TAG, "创建微信 VoIP 工作任务失败");
         return ESP_ERR_NO_MEM;
     }
 
+    unlock_session();
     return ESP_OK;
 }
 
@@ -588,18 +942,30 @@ static esp_err_t enqueue_work(const voip_work_item_t *item)
 
 static esp_err_t reject_info_later(const voip_reject_info_t *info, tirtc_voip_hangup_reason_t reason)
 {
+    if (info == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    voip_reject_info_t *copy =
+        app_memory_alloc_psram(sizeof(*copy));
+    if (copy == NULL)
+    {
+        ESP_LOGW(TAG, "拒接参数申请失败");
+        return ESP_ERR_NO_MEM;
+    }
+    *copy = *info;
+
     voip_work_item_t item = {
         .type = VOIP_WORK_REJECT,
         .reason = reason,
+        .reject = copy,
     };
-    if (info != NULL)
-    {
-        item.reject = *info;
-    }
 
     esp_err_t ret = enqueue_work(&item);
     if (ret != ESP_OK)
     {
+        free(copy);
         ESP_LOGW(TAG, "拒接任务投递失败: %s", esp_err_to_name(ret));
     }
     return ret;
@@ -607,7 +973,7 @@ static esp_err_t reject_info_later(const voip_reject_info_t *info, tirtc_voip_ha
 
 static void on_whip_connect(int error, tirtc_conn_t hconn, void *user_data)
 {
-    (void)user_data;
+    const uint32_t generation = (uint32_t)(uintptr_t)user_data;
     ensure_init();
 
     WX_VOIP_TRACEI(TAG,
@@ -620,10 +986,18 @@ static void on_whip_connect(int error, tirtc_conn_t hconn, void *user_data)
         ESP_LOGE(TAG, "通话连接失败: %d %s", error, TiRtcGetErrorStr(error));
         voip_reject_info_t failed = {0};
         lock_session();
-        fill_reject_info(&failed, &s_session);
-        finish_session_locked();
+        bool current = s_session.generation == generation &&
+                       s_session.state == VOIP_STATE_CONNECTING &&
+                       !s_session.connection_callback_claimed &&
+                       !s_session.connection_tracked;
+        if (current) {
+            fill_reject_info(&failed, &s_session);
+            finish_session_locked();
+        }
         unlock_session();
-        (void)reject_info_later(&failed, TIRTC_VOIP_HANGUP_REASON_EXCEPTION);
+        if (current) {
+            (void)reject_info_later(&failed, TIRTC_VOIP_HANGUP_REASON_EXCEPTION);
+        }
         return;
     }
 
@@ -632,25 +1006,64 @@ static void on_whip_connect(int error, tirtc_conn_t hconn, void *user_data)
         ESP_LOGE(TAG, "通话连接失败: WHIP 返回空连接");
         voip_reject_info_t failed = {0};
         lock_session();
-        fill_reject_info(&failed, &s_session);
-        finish_session_locked();
+        bool current = s_session.generation == generation &&
+                       s_session.state == VOIP_STATE_CONNECTING &&
+                       !s_session.connection_callback_claimed &&
+                       !s_session.connection_tracked;
+        if (current) {
+            fill_reject_info(&failed, &s_session);
+            finish_session_locked();
+        }
         unlock_session();
-        (void)reject_info_later(&failed, TIRTC_VOIP_HANGUP_REASON_EXCEPTION);
+        if (current) {
+            (void)reject_info_later(&failed, TIRTC_VOIP_HANGUP_REASON_EXCEPTION);
+        }
         return;
     }
 
     bool should_accept = false;
+    bool duplicate_callback = false;
     lock_session();
-    if (s_session.state == VOIP_STATE_CONNECTING)
+    if (s_session.generation == generation)
     {
-        should_accept = true;
+        duplicate_callback =
+            s_session.connection_tracked &&
+            s_session.hconn == hconn &&
+            (s_session.state == VOIP_STATE_AWAITING_CONNECTED ||
+             s_session.state == VOIP_STATE_IN_CALL ||
+             s_session.state == VOIP_STATE_CLOSING);
+        if (!duplicate_callback &&
+            s_session.state == VOIP_STATE_CONNECTING &&
+            !s_session.connection_tracked)
+        {
+            if (s_session.connection_callback_claimed)
+            {
+                duplicate_callback =
+                    s_session.connection_callback_hconn == hconn;
+            }
+            else if (s_session.hconn == NULL || s_session.hconn == hconn)
+            {
+                s_session.connection_callback_claimed = true;
+                s_session.connection_callback_hconn = hconn;
+                should_accept = true;
+            }
+        }
     }
     unlock_session();
+
+    if (duplicate_callback)
+    {
+        ESP_LOGD(TAG,
+                 "忽略重复连接成功回调: gen=%u hconn=%p",
+                 (unsigned)generation,
+                 hconn);
+        return;
+    }
 
     if (!should_accept)
     {
         ESP_LOGW(TAG, "连接回调到达时会话已结束,释放连接");
-        disconnect_later(hconn, false);
+        disconnect_later(hconn, generation, false);
         return;
     }
 
@@ -661,36 +1074,88 @@ static void on_whip_connect(int error, tirtc_conn_t hconn, void *user_data)
         (void)TiRtcDisconnect(hconn);
         voip_reject_info_t failed = {0};
         lock_session();
-        fill_reject_info(&failed, &s_session);
-        finish_session_locked();
+        bool current = s_session.generation == generation &&
+                       s_session.state == VOIP_STATE_CONNECTING &&
+                       s_session.connection_callback_claimed &&
+                       s_session.connection_callback_hconn == hconn;
+        if (current) {
+            fill_reject_info(&failed, &s_session);
+            finish_session_locked();
+        }
         unlock_session();
-        (void)reject_info_later(&failed, TIRTC_VOIP_HANGUP_REASON_EXCEPTION);
+        if (current) {
+            (void)reject_info_later(&failed, TIRTC_VOIP_HANGUP_REASON_EXCEPTION);
+        }
         return;
     }
 
     lock_session();
-    if (s_session.state == VOIP_STATE_CONNECTING)
+    if (s_session.state == VOIP_STATE_CONNECTING &&
+        s_session.generation == generation &&
+        s_session.connection_callback_claimed &&
+        s_session.connection_callback_hconn == hconn)
     {
         bool outbound_call = s_session.outbound_call;
+        bool cancel_on_connect = s_session.cancel_on_connect;
+        bool connected_received = s_session.connected_command_received;
         WX_VOIP_TRACEI(TAG,
-                       "WHIP 连接成功: old_state=%s hconn=%p outbound=%d",
+                       "WHIP 连接成功: old_state=%s hconn=%p outbound=%d cancel=%d connected=%d",
                        state_name(s_session.state),
                        hconn,
-                       outbound_call ? 1 : 0);
+                       outbound_call ? 1 : 0,
+                       cancel_on_connect ? 1 : 0,
+                       connected_received ? 1 : 0);
         s_session.hconn = hconn;
-        s_session.state = VOIP_STATE_AWAITING_CONNECTED;
-        set_deadline_locked(outbound_call
-                                ? VOIP_OUTBOUND_CONNECTED_WAIT_TIMEOUT_MS
-                                : VOIP_CONNECTED_WAIT_TIMEOUT_MS);
+        s_session.connection_callback_claimed = false;
+        s_session.connection_callback_hconn = NULL;
+        s_session.connection_tracked = true;
+        s_session.state = cancel_on_connect ? VOIP_STATE_CLOSING :
+                          (outbound_call || connected_received) ? VOIP_STATE_IN_CALL :
+                                          VOIP_STATE_AWAITING_CONNECTED;
+        s_session.media_start_pending =
+            (outbound_call || connected_received) && !cancel_on_connect;
+        set_deadline_locked(cancel_on_connect ? VOIP_CLOSE_WAIT_TIMEOUT_MS :
+                            (outbound_call || connected_received) ? 0 :
+                                            VOIP_CONNECTED_WAIT_TIMEOUT_MS);
         unlock_session();
 
-        ESP_LOGI(TAG,
-                 "%s",
-                 outbound_call ? "主动呼叫已入会,等待微信接听确认" : "通话连接已建立,等待接通确认");
+        if (cancel_on_connect) {
+            voip_work_item_t item = {
+                .type = VOIP_WORK_HANGUP,
+                .hconn = hconn,
+                .generation = generation,
+                .reason = TIRTC_VOIP_HANGUP_REASON_MANUAL,
+            };
+            ESP_LOGI(TAG, "已取消的主动呼叫完成入会,发送 0x2001 后断开");
+            if (enqueue_work(&item) != ESP_OK) {
+                disconnect_later(hconn, generation, true);
+            }
+        } else if (outbound_call || connected_received) {
+            voip_work_item_t item = {
+                .type = VOIP_WORK_START_MEDIA,
+                .hconn = hconn,
+                .generation = generation,
+            };
+            ESP_LOGI(TAG,
+                     "%s,立即启动双向媒体",
+                     outbound_call ? "主动呼叫已入会" :
+                                     "被叫接通确认先到,WHIP 入会已完成");
+            if (enqueue_work(&item) != ESP_OK) {
+                ESP_LOGE(TAG, "微信通话媒体启动任务投递失败");
+                abort_connected_media_start(hconn,
+                                            generation,
+                                            "media work queue full");
+            }
+        } else {
+            ESP_LOGI(TAG, "被叫通话连接已建立,等待 0x2000 接通确认");
+        }
         return;
     }
-    if ((s_session.state == VOIP_STATE_AWAITING_CONNECTED || s_session.state == VOIP_STATE_IN_CALL) &&
-        s_session.hconn == hconn)
+    if (s_session.connection_tracked &&
+        (s_session.state == VOIP_STATE_AWAITING_CONNECTED ||
+         s_session.state == VOIP_STATE_IN_CALL) &&
+        s_session.hconn == hconn &&
+        s_session.generation == generation)
     {
         voip_state_t state = s_session.state;
         unlock_session();
@@ -700,7 +1165,7 @@ static void on_whip_connect(int error, tirtc_conn_t hconn, void *user_data)
     unlock_session();
 
     ESP_LOGW(TAG, "连接回调到达时会话已结束,释放连接");
-    disconnect_later(hconn, false);
+    disconnect_later(hconn, generation, false);
 }
 
 static esp_err_t answer_current_call(const char *source)
@@ -740,6 +1205,17 @@ static esp_err_t answer_current_call(const char *source)
                  (int)rtc_stats.state);
         return ESP_ERR_INVALID_STATE;
     }
+    if (rtc_stats.active_connection || rtc_stats.call_active ||
+        rtc_stats.state == TIRTC_SESSION_STATE_CONNECTED ||
+        rtc_stats.state == TIRTC_SESSION_STATE_MEDIA_BOOTSTRAPPING)
+    {
+        ESP_LOGW(TAG,
+                 "微信接听等待 RTC 资源释放: state=%u active=%d call=%d",
+                 (unsigned)rtc_stats.state,
+                 rtc_stats.active_connection ? 1 : 0,
+                 rtc_stats.call_active ? 1 : 0);
+        return ESP_ERR_INVALID_STATE;
+    }
 
     lock_session();
     if (s_session.state != VOIP_STATE_RINGING)
@@ -766,11 +1242,14 @@ static esp_err_t answer_current_call(const char *source)
                    (unsigned)strlen(snapshot.peer_id),
                    (unsigned)strlen(snapshot.token));
     int64_t start_us = esp_timer_get_time();
-    ESP_LOGI(TAG,
-             "WHIP submit begin external: service_desc_len=%u token_len=%u",
-             (unsigned)strlen(snapshot.peer_id),
-             (unsigned)strlen(snapshot.token));
-    int rc = tirtc_session_whip_connect_external(snapshot.peer_id, snapshot.token, on_whip_connect, NULL);
+    WX_VOIP_TRACEI(TAG,
+                   "WHIP submit begin external: service_desc_len=%u token_len=%u",
+                   (unsigned)strlen(snapshot.peer_id),
+                   (unsigned)strlen(snapshot.token));
+    int rc = tirtc_session_whip_connect_external(snapshot.peer_id,
+                                                  snapshot.token,
+                                                  on_whip_connect,
+                                                  (void *)(uintptr_t)snapshot.generation);
     int64_t cost_ms = (esp_timer_get_time() - start_us) / 1000;
     WX_VOIP_TRACEI(TAG, "TiRTC WHIP external 返回: rc=%d cost=%lldms", rc, (long long)cost_ms);
     if (rc == 0)
@@ -781,10 +1260,17 @@ static esp_err_t answer_current_call(const char *source)
     ESP_LOGE(TAG, "提交通话连接失败: %d %s", rc, TiRtcGetErrorStr(rc));
     voip_reject_info_t failed = {0};
     lock_session();
-    fill_reject_info(&failed, &s_session);
-    finish_session_locked();
+    bool current = s_session.generation == snapshot.generation &&
+                   s_session.state == VOIP_STATE_CONNECTING &&
+                   !s_session.connection_tracked;
+    if (current) {
+        fill_reject_info(&failed, &s_session);
+        finish_session_locked();
+    }
     unlock_session();
-    (void)reject_info_later(&failed, TIRTC_VOIP_HANGUP_REASON_EXCEPTION);
+    if (current) {
+        (void)reject_info_later(&failed, TIRTC_VOIP_HANGUP_REASON_EXCEPTION);
+    }
     return ESP_FAIL;
 }
 
@@ -801,7 +1287,8 @@ static void answer_task(void *arg)
     delay_ms = s_answer_delay_ms;
     unlock_session();
 
-    /* 主呼收到入会参数后立即 WHIP，接听和挂断继续由 0x2000/0x2001 驱动。 */
+    /* 主呼收到入会参数后立即 WHIP，成功后直接开媒体；被叫仍由
+     * 0x2000 确认接通，两种角色都由 0x2001 收口。 */
     if (delay_ms > 0)
     {
         WX_VOIP_TRACEI(TAG, "接听任务等待房间稳定: source=%s delay=%ums", source, (unsigned)delay_ms);
@@ -947,7 +1434,9 @@ static esp_err_t start_answer_task(const char *source, uint32_t delay_ms)
     return ESP_OK;
 }
 
-esp_err_t wechat_voip_session_handle_join_room(cJSON *root, bool auto_answer)
+esp_err_t wechat_voip_session_handle_join_room(cJSON *root,
+                                               bool auto_answer,
+                                               bool cancel_on_connect)
 {
     ensure_init();
 
@@ -957,7 +1446,10 @@ esp_err_t wechat_voip_session_handle_join_room(cJSON *root, bool auto_answer)
         return ESP_ERR_INVALID_ARG;
     }
 
-    WX_VOIP_TRACEI(TAG, "开始处理入会消息: auto=%d", auto_answer ? 1 : 0);
+    WX_VOIP_TRACEI(TAG,
+                   "开始处理入会消息: auto=%d cancel=%d",
+                   auto_answer ? 1 : 0,
+                   cancel_on_connect ? 1 : 0);
     WX_VOIP_TRACEI(TAG, "入会消息已解析");
 
     const char *peer_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "peer_id"));
@@ -997,12 +1489,16 @@ esp_err_t wechat_voip_session_handle_join_room(cJSON *root, bool auto_answer)
     if (peer_id == NULL || peer_id[0] == '\0' || token == NULL || token[0] == '\0')
     {
         ESP_LOGE(TAG, "来电消息缺少连接信息");
+        (void)reject_join_room(root, TIRTC_VOIP_HANGUP_REASON_EXCEPTION);
         return ESP_ERR_INVALID_ARG;
     }
     size_t peer_id_len = strlen(peer_id);
     size_t token_len = strlen(token);
+    size_t session_token_len = session_token != NULL ? strlen(session_token) : 0U;
     bool peer_id_truncated = peer_id_len >= sizeof(s_session.peer_id);
     bool token_truncated = token_len >= sizeof(s_session.token);
+    bool session_token_truncated =
+        session_token_len >= sizeof(s_session.wx_session_token);
 
     WX_VOIP_TRACEI(TAG,
                    "入会连接信息: peer_id_len=%u token_len=%u room_id=%s app_id=%s model_id=%s session_token_len=%u",
@@ -1011,30 +1507,45 @@ esp_err_t wechat_voip_session_handle_join_room(cJSON *root, bool auto_answer)
                    room_id && room_id[0] ? room_id : "(空)",
                    app_id && app_id[0] ? app_id : "(空)",
                    model_id && model_id[0] ? model_id : "(空)",
-                   session_token ? (unsigned)strlen(session_token) : 0);
+                   (unsigned)session_token_len);
     ESP_LOGI(TAG,
-             "微信入会参数: room=%s peer_id_len=%u token_len=%u app_id=%s model_id=%s truncated=%d/%d",
+             "微信入会参数: room=%s peer_id_len=%u token_len=%u app_id=%s model_id=%s truncated=%d/%d/%d",
              room_id && room_id[0] ? room_id : "(空)",
              (unsigned)peer_id_len,
              (unsigned)token_len,
              app_id && app_id[0] ? app_id : "(空)",
              model_id && model_id[0] ? model_id : "(空)",
              peer_id_truncated ? 1 : 0,
-             token_truncated ? 1 : 0);
-    if (peer_id_truncated || token_truncated)
+             token_truncated ? 1 : 0,
+             session_token_truncated ? 1 : 0);
+    if (peer_id_truncated || token_truncated || session_token_truncated)
     {
         ESP_LOGE(TAG,
-                 "微信入会连接信息过长,已拒绝保存: peer_id_len=%u/%u token_len=%u/%u",
+                 "微信入会连接信息过长,已拒绝保存: peer_id_len=%u/%u token_len=%u/%u session_token_len=%u/%u",
                  (unsigned)peer_id_len,
                  (unsigned)sizeof(s_session.peer_id),
                  (unsigned)token_len,
-                 (unsigned)sizeof(s_session.token));
+                 (unsigned)sizeof(s_session.token),
+                 (unsigned)session_token_len,
+                 (unsigned)sizeof(s_session.wx_session_token));
+        (void)reject_join_room(root, TIRTC_VOIP_HANGUP_REASON_EXCEPTION);
         return ESP_ERR_INVALID_SIZE;
     }
     WX_VOIP_TRACEI(TAG, "准备保存入会信息");
 
+    voip_status_t status;
+    collect_status(&status);
+    if (!status_available_for_ringing(&status))
+    {
+        log_status("微信入会前检查", &status, true);
+        esp_err_t reject_ret =
+            wechat_voip_session_reject_join_room_busy(root);
+        return reject_ret == ESP_OK ? ESP_ERR_INVALID_STATE : reject_ret;
+    }
+
     if (!lock_session_wait("保存入会信息", 1000))
     {
+        (void)wechat_voip_session_reject_join_room_busy(root);
         return ESP_ERR_TIMEOUT;
     }
     if (s_session.state != VOIP_STATE_IDLE)
@@ -1061,17 +1572,45 @@ esp_err_t wechat_voip_session_handle_join_room(cJSON *root, bool auto_answer)
     copy_str(s_session.wx_session_token, sizeof(s_session.wx_session_token), session_token);
     copy_str(s_session.wx_room_id, sizeof(s_session.wx_room_id), room_id);
     copy_str(s_session.wx_payload, sizeof(s_session.wx_payload), wx_payload);
+    uint32_t generation = ++s_session_generation;
+    s_session.generation = generation;
     s_session.outbound_call = auto_answer;
+    s_session.cancel_on_connect = cancel_on_connect;
     s_session.state = VOIP_STATE_RINGING;
     set_deadline_locked(VOIP_RING_TIMEOUT_MS);
     unlock_session();
 
-    WX_VOIP_TRACEI(TAG, "入会信息已保存: auto=%d", auto_answer ? 1 : 0);
+    WX_VOIP_TRACEI(TAG,
+                   "入会信息已保存: auto=%d cancel=%d",
+                   auto_answer ? 1 : 0,
+                   cancel_on_connect ? 1 : 0);
 
     if (auto_answer)
     {
-        ESP_LOGI(TAG, "主动呼叫入会参数已收到,立即 WHIP 建连,等待微信 0x2000/0x2001");
-        return start_answer_task("主动呼叫入会", VOIP_ACTIVE_ANSWER_DELAY_MS);
+        WX_VOIP_TRACEI(TAG, "主动呼叫入会参数已收到,准备 WHIP 建连");
+        esp_err_t answer_ret =
+            start_answer_task("主动呼叫入会", VOIP_ACTIVE_ANSWER_DELAY_MS);
+        if (answer_ret == ESP_OK)
+        {
+            return ESP_OK;
+        }
+
+        voip_reject_info_t failed = {0};
+        lock_session();
+        bool current = s_session.generation == generation &&
+                       s_session.state == VOIP_STATE_RINGING;
+        if (current)
+        {
+            fill_reject_info(&failed, &s_session);
+            finish_session_locked();
+        }
+        unlock_session();
+        if (current)
+        {
+            (void)reject_info_later(&failed,
+                                    TIRTC_VOIP_HANGUP_REASON_EXCEPTION);
+        }
+        return answer_ret;
     }
 
     ESP_LOGI(TAG, "收到微信来电,等待界面接听");
@@ -1184,6 +1723,8 @@ bool wechat_voip_session_is_closing(void)
 
 static void collect_status(voip_status_t *status)
 {
+    tirtc_session_stats_t rtc = {0};
+
     if (status == NULL)
     {
         return;
@@ -1209,6 +1750,10 @@ static void collect_status(voip_status_t *status)
     status->work_queue_len = s_work_queue ? (uint32_t)uxQueueMessagesWaiting(s_work_queue) : 0;
     wechat_voip_media_get_stats(&status->media);
     status->media_running = status->media.running;
+    tirtc_session_get_stats(&rtc);
+    status->rtc_active_connection = rtc.active_connection;
+    status->rtc_call_active = rtc.call_active;
+    status->rtc_state = rtc.state;
 }
 
 static bool status_ready_for_next_call(const voip_status_t *status)
@@ -1221,7 +1766,65 @@ static bool status_ready_for_next_call(const voip_status_t *status)
            !status->work_busy &&
            status->work_queue_len == 0 &&
            !status->media_running &&
+           !status->rtc_active_connection &&
+           !status->rtc_call_active &&
+           status->rtc_state != TIRTC_SESSION_STATE_STARTING &&
+           status->rtc_state != TIRTC_SESSION_STATE_CONNECTED &&
+           status->rtc_state != TIRTC_SESSION_STATE_MEDIA_BOOTSTRAPPING &&
+           status->rtc_state != TIRTC_SESSION_STATE_DISCONNECTING &&
            (status->last_close_ago_ms < 0 || status->last_close_ago_ms >= VOIP_RECALL_GUARD_MS);
+}
+
+static bool status_available_for_ringing(const voip_status_t *status)
+{
+    /*
+     * Ringing only reserves signalling state. RTC may still be starting; the
+     * answer worker waits for it instead of rejecting a valid incoming call.
+     */
+    return status != NULL &&
+           status->state == VOIP_STATE_IDLE &&
+           status->hconn == NULL &&
+           !status->answer_pending &&
+           status->answer_task == NULL &&
+           !status->work_busy &&
+           status->work_queue_len == 0 &&
+           !status->media_running &&
+           !status->rtc_active_connection &&
+           !status->rtc_call_active &&
+           status->rtc_state != TIRTC_SESSION_STATE_CONNECTED &&
+           status->rtc_state != TIRTC_SESSION_STATE_MEDIA_BOOTSTRAPPING &&
+           status->rtc_state != TIRTC_SESSION_STATE_DISCONNECTING &&
+           (status->last_close_ago_ms < 0 ||
+            status->last_close_ago_ms >= VOIP_RECALL_GUARD_MS);
+}
+
+static bool status_resources_released(const voip_status_t *status)
+{
+    return status != NULL &&
+           status->state == VOIP_STATE_IDLE &&
+           status->hconn == NULL &&
+           !status->answer_pending &&
+           status->answer_task == NULL &&
+           !status->work_busy &&
+           status->work_queue_len == 0 &&
+           !status->media_running &&
+           !status->rtc_active_connection &&
+           !status->rtc_call_active &&
+           status->rtc_state != TIRTC_SESSION_STATE_CONNECTED &&
+           status->rtc_state != TIRTC_SESSION_STATE_MEDIA_BOOTSTRAPPING &&
+           status->rtc_state != TIRTC_SESSION_STATE_DISCONNECTING;
+}
+
+static bool status_local_resources_released(const voip_status_t *status)
+{
+    return status != NULL &&
+           status->state == VOIP_STATE_IDLE &&
+           status->hconn == NULL &&
+           !status->answer_pending &&
+           status->answer_task == NULL &&
+           !status->work_busy &&
+           status->work_queue_len == 0 &&
+           !status->media_running;
 }
 
 static void log_status(const char *reason, const voip_status_t *status, bool warning)
@@ -1236,7 +1839,7 @@ static void log_status(const char *reason, const voip_status_t *status, bool war
         ESP_LOGW(TAG,
                  "通话资源%s: %s state=%s hconn=%p answer_task=%p answer_pending=%d "
                  "work_busy=%d work=%s workq=%u media=%d media_tx=%llu drop=%lu fail=%lu "
-                 "deadline=%lldms last_close=%lldms",
+                 "rtc=%u/%d/%d deadline=%lldms last_close=%lldms",
                  status_ready_for_next_call(status) ? "已就绪" : "未就绪",
                  reason ? reason : "状态检查",
                  state_name(status->state),
@@ -1250,30 +1853,37 @@ static void log_status(const char *reason, const voip_status_t *status, bool war
                  (unsigned long long)status->media.tx_frames,
                  (unsigned long)status->media.dropped_frames,
                  (unsigned long)status->media.tx_failures,
+                 (unsigned)status->rtc_state,
+                 status->rtc_active_connection ? 1 : 0,
+                 status->rtc_call_active ? 1 : 0,
                  (long long)status->deadline_left_ms,
                  (long long)status->last_close_ago_ms);
         return;
     }
 
-    ESP_LOGI(TAG,
-             "通话资源%s: %s state=%s hconn=%p answer_task=%p answer_pending=%d "
-             "work_busy=%d work=%s workq=%u media=%d media_tx=%llu drop=%lu fail=%lu "
-             "deadline=%lldms last_close=%lldms",
-             status_ready_for_next_call(status) ? "已就绪" : "未就绪",
-             reason ? reason : "状态检查",
-             state_name(status->state),
-             status->hconn,
-             status->answer_task,
-             status->answer_pending ? 1 : 0,
-             status->work_busy ? 1 : 0,
-             work_type_name(status->work_type),
-             (unsigned)status->work_queue_len,
-             status->media_running ? 1 : 0,
-             (unsigned long long)status->media.tx_frames,
-             (unsigned long)status->media.dropped_frames,
-             (unsigned long)status->media.tx_failures,
-             (long long)status->deadline_left_ms,
-             (long long)status->last_close_ago_ms);
+    WX_VOIP_TRACEI(
+        TAG,
+        "通话资源%s: %s state=%s hconn=%p answer_task=%p answer_pending=%d "
+        "work_busy=%d work=%s workq=%u media=%d media_tx=%llu drop=%lu fail=%lu "
+        "rtc=%u/%d/%d deadline=%lldms last_close=%lldms",
+        status_ready_for_next_call(status) ? "已就绪" : "未就绪",
+        reason ? reason : "状态检查",
+        state_name(status->state),
+        status->hconn,
+        status->answer_task,
+        status->answer_pending ? 1 : 0,
+        status->work_busy ? 1 : 0,
+        work_type_name(status->work_type),
+        (unsigned)status->work_queue_len,
+        status->media_running ? 1 : 0,
+        (unsigned long long)status->media.tx_frames,
+        (unsigned long)status->media.dropped_frames,
+        (unsigned long)status->media.tx_failures,
+        (unsigned)status->rtc_state,
+        status->rtc_active_connection ? 1 : 0,
+        status->rtc_call_active ? 1 : 0,
+        (long long)status->deadline_left_ms,
+        (long long)status->last_close_ago_ms);
 }
 
 bool wechat_voip_session_ready_for_next_call(bool log_detail)
@@ -1290,13 +1900,126 @@ bool wechat_voip_session_ready_for_next_call(bool log_detail)
     return ready;
 }
 
+bool wechat_voip_session_is_current_room(const char *room_id)
+{
+    bool current = false;
+
+    if (room_id == NULL || room_id[0] == '\0')
+    {
+        return false;
+    }
+
+    ensure_init();
+    lock_session();
+    current = s_session.state != VOIP_STATE_IDLE &&
+              s_session.wx_room_id[0] != '\0' &&
+              strcmp(room_id, s_session.wx_room_id) == 0;
+    unlock_session();
+    return current;
+}
+
+bool wechat_voip_session_is_recent_room(const char *room_id)
+{
+    bool recent = false;
+    int64_t now_us = esp_timer_get_time();
+
+    if (room_id == NULL || room_id[0] == '\0')
+    {
+        return false;
+    }
+
+    ensure_init();
+    lock_session();
+    recent = s_last_close_room_id[0] != '\0' &&
+             strcmp(room_id, s_last_close_room_id) == 0 &&
+             s_last_close_room_us > 0 &&
+             now_us - s_last_close_room_us <=
+                 (int64_t)VOIP_RECENT_ROOM_GUARD_MS * 1000;
+    unlock_session();
+    return recent;
+}
+
+esp_err_t wechat_voip_session_cancel_outbound_on_connect(void)
+{
+    tirtc_conn_t hconn = NULL;
+    uint32_t generation = 0;
+    bool hangup_now = false;
+
+    ensure_init();
+    lock_session();
+    if (s_session.state == VOIP_STATE_IDLE || !s_session.outbound_call)
+    {
+        unlock_session();
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_session.cancel_on_connect = true;
+    s_session.media_start_pending = false;
+    hconn = s_session.hconn;
+    generation = s_session.generation;
+    if (s_session.connection_tracked &&
+        hconn != NULL &&
+        s_session.state != VOIP_STATE_CLOSING)
+    {
+        begin_close_locked();
+        hangup_now = true;
+    }
+    unlock_session();
+
+    if (!hangup_now)
+    {
+        ESP_LOGI(TAG, "主动外呼已标记取消,等待 WHIP 连接后发送 0x2001");
+        return ESP_OK;
+    }
+
+    wechat_voip_media_stop(hconn);
+    voip_work_item_t item = {
+        .type = VOIP_WORK_HANGUP,
+        .hconn = hconn,
+        .generation = generation,
+        .reason = TIRTC_VOIP_HANGUP_REASON_MANUAL,
+    };
+    if (enqueue_work(&item) != ESP_OK)
+    {
+        disconnect_later(hconn, generation, true);
+    }
+    return ESP_OK;
+}
+
+esp_err_t wechat_voip_session_wait_until_released(uint32_t timeout_ms)
+{
+    const int64_t deadline_us =
+        esp_timer_get_time() + (int64_t)timeout_ms * 1000;
+
+    ensure_init();
+    while (true)
+    {
+        voip_status_t status;
+        collect_status(&status);
+        if (status_resources_released(&status))
+        {
+            return ESP_OK;
+        }
+        if (timeout_ms == 0U || esp_timer_get_time() >= deadline_us)
+        {
+            log_status("等待微信通话资源释放超时", &status, true);
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(VOIP_SHUTDOWN_POLL_MS));
+    }
+}
+
 void wechat_voip_session_dump_status(const char *reason)
 {
     ensure_init();
 
     voip_status_t status;
     collect_status(&status);
-    log_status(reason, &status, !status_ready_for_next_call(&status));
+    bool ready = status_ready_for_next_call(&status);
+    if (!ready) {
+        s_last_status_warn_us = esp_timer_get_time();
+    }
+    log_status(reason, &status, !ready);
 }
 
 void wechat_voip_session_maintenance(void)
@@ -1306,8 +2029,10 @@ void wechat_voip_session_maintenance(void)
     int64_t now_us = esp_timer_get_time();
     voip_state_t state = VOIP_STATE_IDLE;
     tirtc_conn_t hconn = NULL;
+    uint32_t generation = 0;
     int64_t deadline_us = 0;
     voip_work_item_t item = {0};
+    voip_reject_info_t reject_info = {0};
 
     lock_session();
     bool expired = (s_session.state != VOIP_STATE_IDLE &&
@@ -1315,10 +2040,11 @@ void wechat_voip_session_maintenance(void)
                     now_us >= s_session.deadline_us);
     state = s_session.state;
     hconn = s_session.hconn;
+    generation = s_session.generation;
     deadline_us = s_session.deadline_us;
     if (expired && hconn == NULL)
     {
-        fill_reject_info(&item.reject, &s_session);
+        fill_reject_info(&reject_info, &s_session);
     }
     if (expired)
     {
@@ -1341,7 +2067,13 @@ void wechat_voip_session_maintenance(void)
     {
         voip_status_t status;
         collect_status(&status);
-        if (!status_ready_for_next_call(&status) &&
+        /*
+         * The shared RTC can legitimately be occupied by device-call, IPC or
+         * AI Chat while WeChat is idle. Maintenance should warn only about
+         * resources owned by this WeChat session; the full readiness check is
+         * still used when a new WeChat call actually starts.
+         */
+        if (!status_local_resources_released(&status) &&
             status.state == VOIP_STATE_IDLE &&
             now_us - s_last_status_warn_us >= (int64_t)VOIP_STATUS_WARN_INTERVAL_MS * 1000)
         {
@@ -1362,7 +2094,7 @@ void wechat_voip_session_maintenance(void)
     {
         ESP_LOGW(TAG, "微信通话关闭等待超时,重试断开");
         wechat_voip_media_stop(hconn);
-        disconnect_later(hconn, true);
+        disconnect_later(hconn, generation, true);
         return;
     }
 
@@ -1371,17 +2103,19 @@ void wechat_voip_session_maintenance(void)
     {
         item.type = VOIP_WORK_HANGUP;
         item.hconn = hconn;
+        item.generation = generation;
         item.reason = TIRTC_VOIP_HANGUP_REASON_TIMEOUT;
         (void)enqueue_work(&item);
         return;
     }
 
-    item.type = VOIP_WORK_REJECT;
-    item.reason = TIRTC_VOIP_HANGUP_REASON_TIMEOUT;
-    (void)enqueue_work(&item);
+    (void)reject_info_later(&reject_info,
+                            TIRTC_VOIP_HANGUP_REASON_TIMEOUT);
 }
 
-static void abort_connected_media_start(tirtc_conn_t hconn, const char *reason)
+static void abort_connected_media_start(tirtc_conn_t hconn,
+                                        uint32_t generation,
+                                        const char *reason)
 {
     if (hconn == NULL)
     {
@@ -1389,17 +2123,22 @@ static void abort_connected_media_start(tirtc_conn_t hconn, const char *reason)
     }
 
     ESP_LOGW(TAG, "微信通话媒体启动失败,释放连接: %s", reason != NULL ? reason : "unknown");
-    wechat_voip_media_stop(hconn);
-    (void)tirtc_session_set_external_audio_call_active(hconn, false);
+    (void)wechat_voip_media_stop_wait(hconn, VOIP_MEDIA_STOP_WAIT_MS);
+    (void)tirtc_session_set_external_media_call_active(hconn,
+                                                       false,
+                                                       false,
+                                                       false);
 
     lock_session();
-    if (s_session.hconn == hconn && s_session.state != VOIP_STATE_IDLE)
+    if (s_session.generation == generation &&
+        s_session.hconn == hconn &&
+        s_session.state != VOIP_STATE_IDLE)
     {
         begin_close_locked();
     }
     unlock_session();
 
-    disconnect_later(hconn, true);
+    disconnect_later(hconn, generation, true);
 }
 
 bool wechat_voip_session_on_command(tirtc_conn_t hconn, uint32_t cmdw, const void *data, uint32_t len)
@@ -1430,6 +2169,7 @@ bool wechat_voip_session_on_command(tirtc_conn_t hconn, uint32_t cmdw, const voi
         ESP_LOGD(TAG, "通话命令先于连接回调到达 hconn=%p cmdw=0x%08x",
                  hconn, (unsigned)cmdw);
     }
+    uint32_t command_generation = s_session.generation;
     unlock_session();
 
     if (hconn != current)
@@ -1446,27 +2186,88 @@ bool wechat_voip_session_on_command(tirtc_conn_t hconn, uint32_t cmdw, const voi
     if (voip_cmd_is(cmdw, TIRTC_VOIP_CALL_CONNECTED))
     {
         bool already_in_call = false;
-        bool should_start_media = false;
+        bool should_queue_media = false;
+        bool wait_for_whip_callback = false;
+        bool cancel_on_connect = false;
+        bool cancel_already_queued = false;
         voip_state_t command_state = VOIP_STATE_IDLE;
+        uint32_t generation = 0;
 
         lock_session();
+        if (s_session.generation != command_generation ||
+            s_session.hconn != hconn ||
+            s_session.state == VOIP_STATE_IDLE)
+        {
+            unlock_session();
+            ESP_LOGD(TAG,
+                     "忽略过期接通命令: gen=%u hconn=%p",
+                     (unsigned)command_generation,
+                     hconn);
+            return false;
+        }
         command_state = s_session.state;
         already_in_call = (s_session.state == VOIP_STATE_IN_CALL);
-        if (s_session.state == VOIP_STATE_AWAITING_CONNECTED || s_session.state == VOIP_STATE_CONNECTING)
+        generation = command_generation;
+        cancel_on_connect = s_session.cancel_on_connect;
+        if (s_session.state == VOIP_STATE_CONNECTING ||
+            s_session.state == VOIP_STATE_AWAITING_CONNECTED ||
+            s_session.state == VOIP_STATE_IN_CALL) {
+            s_session.connected_command_received = true;
+        }
+        if (cancel_on_connect && s_session.state == VOIP_STATE_CLOSING) {
+            cancel_already_queued = true;
+        } else if (cancel_on_connect && s_session.connection_tracked &&
+                   (s_session.state == VOIP_STATE_AWAITING_CONNECTED ||
+                    s_session.state == VOIP_STATE_IN_CALL)) {
+            begin_close_locked();
+        } else if (cancel_on_connect &&
+                   s_session.state == VOIP_STATE_CONNECTING) {
+            wait_for_whip_callback = true;
+        } else if (s_session.state == VOIP_STATE_AWAITING_CONNECTED ||
+                   (s_session.state == VOIP_STATE_CONNECTING &&
+                    s_session.connection_tracked))
         {
             s_session.state = VOIP_STATE_IN_CALL;
+            s_session.media_start_pending = true;
             set_deadline_locked(0);
-            should_start_media = true;
+            should_queue_media = true;
+        } else if (s_session.state == VOIP_STATE_CONNECTING) {
+            wait_for_whip_callback = true;
         }
         unlock_session();
 
-        if (already_in_call)
-        {
-            WX_VOIP_TRACEI(TAG, "忽略重复 CALL_CONNECTED: hconn=%p", hconn);
+        if (cancel_on_connect) {
+            if (cancel_already_queued) {
+                return true;
+            }
+            if (wait_for_whip_callback) {
+                ESP_LOGI(TAG, "取消确认先于 WHIP 回调到达,等待连接登记后发送 0x2001");
+                return true;
+            }
+            voip_work_item_t item = {
+                .type = VOIP_WORK_HANGUP,
+                .hconn = hconn,
+                .generation = generation,
+                .reason = TIRTC_VOIP_HANGUP_REASON_MANUAL,
+            };
+            (void)enqueue_work(&item);
             return true;
         }
 
-        if (!should_start_media)
+        if (wait_for_whip_callback) {
+            ESP_LOGI(TAG, "0x2000 先于 WHIP 回调到达,等待连接登记后启动媒体");
+            return true;
+        }
+
+        if (already_in_call)
+        {
+            WX_VOIP_TRACEI(TAG,
+                           "CALL_CONNECTED 重复到达,媒体状态保持不变: hconn=%p",
+                           hconn);
+            return true;
+        }
+
+        if (!should_queue_media)
         {
             ESP_LOGW(TAG,
                      "忽略非等待状态的 CALL_CONNECTED: state=%s hconn=%p",
@@ -1475,34 +2276,16 @@ bool wechat_voip_session_on_command(tirtc_conn_t hconn, uint32_t cmdw, const voi
             return true;
         }
 
-        ESP_LOGI(TAG, "微信通话已接通");
-        WX_VOIP_TRACEI(TAG, "收到 CALL_CONNECTED,启动媒体: hconn=%p", hconn);
-        esp_err_t media_ret = wechat_voip_media_start(hconn);
-        if (media_ret != ESP_OK)
-        {
-            ESP_LOGW(TAG, "微信真实音频启动失败: %s", esp_err_to_name(media_ret));
-            abort_connected_media_start(hconn, "real audio start failed");
-            return true;
-        }
-        esp_err_t video_ret = tirtc_session_set_local_video_send_enabled(
-            WECHAT_VOIP_LOCAL_VIDEO_ENABLE != 0);
-        if (video_ret != ESP_OK)
-        {
-            ESP_LOGW(TAG, "微信本机视频策略应用失败: %s", esp_err_to_name(video_ret));
-        }
-        esp_err_t rtc_ret = tirtc_session_set_external_audio_call_active(hconn, true);
-        if (rtc_ret != ESP_OK)
-        {
-            ESP_LOGW(TAG, "微信通话态同步失败: %s", esp_err_to_name(rtc_ret));
-            (void)tirtc_session_set_local_video_send_enabled(false);
-            abort_connected_media_start(hconn, "rtc state sync failed");
-        }
-        else if (WECHAT_VOIP_LOCAL_VIDEO_ENABLE)
-        {
-            ESP_LOGI(TAG,
-                     "微信本机 H264 视频主动上行已启用: target=%ux%u",
-                     (unsigned)WECHAT_VOIP_VIDEO_WIDTH,
-                     (unsigned)WECHAT_VOIP_VIDEO_HEIGHT);
+        voip_work_item_t item = {
+            .type = VOIP_WORK_START_MEDIA,
+            .hconn = hconn,
+            .generation = generation,
+        };
+        ESP_LOGI(TAG, "微信被叫已接通,提交双向媒体启动");
+        if (enqueue_work(&item) != ESP_OK) {
+            abort_connected_media_start(hconn,
+                                        generation,
+                                        "media work queue full");
         }
         return true;
     }
@@ -1510,6 +2293,7 @@ bool wechat_voip_session_on_command(tirtc_conn_t hconn, uint32_t cmdw, const voi
     if (voip_cmd_is(cmdw, TIRTC_VOIP_HANGUP))
     {
         int reason = -1;
+        uint32_t hangup_generation = 0;
         if (data != NULL && len > 0)
         {
             char buf[96];
@@ -1542,18 +2326,23 @@ bool wechat_voip_session_on_command(tirtc_conn_t hconn, uint32_t cmdw, const voi
                        (unsigned)len);
 
         lock_session();
-        if (s_session.hconn == hconn)
+        if (s_session.generation != command_generation ||
+            s_session.hconn != hconn ||
+            s_session.state == VOIP_STATE_IDLE)
         {
-            begin_close_locked();
+            unlock_session();
+            ESP_LOGD(TAG,
+                     "忽略过期挂断命令: gen=%u hconn=%p",
+                     (unsigned)command_generation,
+                     hconn);
+            return false;
         }
-        else
-        {
-            finish_session_locked();
-        }
+        hangup_generation = command_generation;
+        begin_close_locked();
         unlock_session();
 
-        (void)tirtc_session_set_external_audio_call_active(hconn, false);
-        disconnect_later(hconn, true);
+        wechat_voip_media_stop(hconn);
+        disconnect_later(hconn, hangup_generation, true);
         return true;
     }
 
@@ -1570,10 +2359,12 @@ bool wechat_voip_session_on_conn_error(tirtc_conn_t hconn, int error)
                    hconn,
                    error);
 
+    uint32_t generation = 0;
     lock_session();
     bool mine = (hconn != NULL && hconn == s_session.hconn);
     if (mine)
     {
+        generation = s_session.generation;
         finish_session_locked();
     }
     unlock_session();
@@ -1585,8 +2376,7 @@ bool wechat_voip_session_on_conn_error(tirtc_conn_t hconn, int error)
 
     ESP_LOGW(TAG, "微信通话连接错误: %d %s", error, TiRtcGetErrorStr(error));
     wechat_voip_media_stop(hconn);
-    (void)tirtc_session_set_external_audio_call_active(hconn, false);
-    disconnect_later(hconn, false);
+    disconnect_later(hconn, generation, false);
     return true;
 }
 
@@ -1596,10 +2386,12 @@ bool wechat_voip_session_on_disconnected(tirtc_conn_t hconn)
 
     WX_VOIP_TRACEI(TAG, "会话断开回调: hconn=%p", hconn);
 
+    uint32_t generation = 0;
     lock_session();
     bool mine = (hconn != NULL && hconn == s_session.hconn);
     if (mine)
     {
+        generation = s_session.generation;
         finish_session_locked();
     }
     unlock_session();
@@ -1607,9 +2399,18 @@ bool wechat_voip_session_on_disconnected(tirtc_conn_t hconn)
     if (mine)
     {
         wechat_voip_media_stop(hconn);
-        (void)tirtc_session_set_external_audio_call_active(hconn, false);
+        voip_work_item_t item = {
+            .type = VOIP_WORK_STOP_MEDIA,
+            .hconn = hconn,
+            .generation = generation,
+        };
+        if (enqueue_work(&item) != ESP_OK) {
+            ESP_LOGW(TAG, "断开后的媒体清理任务投递失败");
+        }
         ESP_LOGI(TAG, "微信通话已断开");
-        wechat_voip_session_dump_status("断开回调后");
+        /* Media cleanup is asynchronous after the disconnect callback. Give
+         * it one quiet interval before reporting a genuinely stuck resource. */
+        s_last_status_warn_us = esp_timer_get_time();
     }
 
     return mine;
@@ -1622,11 +2423,14 @@ bool wechat_voip_session_cancel_by_room(const char *room_id)
     WX_VOIP_TRACEI(TAG, "微信取消事件: room=%s", room_id && room_id[0] ? room_id : "(空)");
 
     tirtc_conn_t hconn = NULL;
+    uint32_t generation = 0;
+    bool already_closing = false;
     char current_room_id[sizeof(s_session.wx_room_id)] = {0};
 
     lock_session();
     bool active = (s_session.state != VOIP_STATE_IDLE);
     hconn = s_session.hconn;
+    generation = s_session.generation;
     copy_str(current_room_id, sizeof(current_room_id), s_session.wx_room_id);
     bool room_match = true;
     if (active && current_room_id[0] != '\0')
@@ -1638,7 +2442,11 @@ bool wechat_voip_session_cancel_by_room(const char *room_id)
     {
         if (s_session.hconn != NULL)
         {
-            begin_close_locked();
+            already_closing = s_session.state == VOIP_STATE_CLOSING;
+            if (!already_closing)
+            {
+                begin_close_locked();
+            }
         }
         else
         {
@@ -1661,10 +2469,16 @@ bool wechat_voip_session_cancel_by_room(const char *room_id)
 
     if (hconn != NULL)
     {
-        wechat_voip_media_stop(hconn);
-        (void)tirtc_session_set_external_audio_call_active(hconn, false);
-        disconnect_later(hconn, true);
-        ESP_LOGI(TAG, "微信侧已结束当前通话");
+        if (!already_closing)
+        {
+            wechat_voip_media_stop(hconn);
+            disconnect_later(hconn, generation, true);
+            ESP_LOGI(TAG, "微信侧已结束当前通话");
+        }
+        else
+        {
+            ESP_LOGD(TAG, "微信通话已在关闭,忽略重复取消");
+        }
     }
     else
     {
@@ -1680,29 +2494,36 @@ void wechat_voip_session_hangup(void)
 
     voip_state_t state = VOIP_STATE_IDLE;
     tirtc_conn_t hconn = NULL;
+    uint32_t generation = 0;
     voip_work_item_t item = {0};
+    voip_reject_info_t reject_info = {0};
 
     lock_session();
     bool active = (s_session.state != VOIP_STATE_IDLE);
     state = s_session.state;
     hconn = s_session.hconn;
+    generation = s_session.generation;
     if (active && hconn == NULL)
     {
-        fill_reject_info(&item.reject, &s_session);
+        fill_reject_info(&reject_info, &s_session);
     }
     WX_VOIP_TRACEI(TAG,
                    "本地请求挂断: active=%d state=%s hconn=%p",
                    active ? 1 : 0,
                    state_name(state),
                    hconn);
+    if (!active)
+    {
+        unlock_session();
+        return;
+    }
     if (active && s_session.state == VOIP_STATE_CLOSING)
     {
         unlock_session();
-        ESP_LOGI(TAG, "微信通话正在关闭");
-        wechat_voip_session_dump_status("重复挂断");
+        WX_VOIP_TRACEI(TAG, "微信通话正在关闭,忽略重复挂断");
         return;
     }
-    if (active && s_session.hconn != NULL)
+    if (s_session.hconn != NULL)
     {
         begin_close_locked();
     }
@@ -1712,30 +2533,29 @@ void wechat_voip_session_hangup(void)
     }
     unlock_session();
 
-    if (!active)
-    {
-        return;
-    }
-
     if (hconn != NULL)
     {
         item.type = VOIP_WORK_HANGUP;
         item.hconn = hconn;
+        item.generation = generation;
         item.reason = TIRTC_VOIP_HANGUP_REASON_MANUAL;
         if (enqueue_work(&item) != ESP_OK)
         {
             ESP_LOGW(TAG, "挂断任务投递失败,等待维护重试");
-            wechat_voip_media_stop(hconn);
-            (void)tirtc_session_set_external_audio_call_active(hconn, false);
+            (void)wechat_voip_media_stop_wait(hconn, VOIP_MEDIA_STOP_WAIT_MS);
+            (void)tirtc_session_set_external_media_call_active(hconn,
+                                                               false,
+                                                               false,
+                                                               false);
         }
         return;
     }
 
-    item.type = VOIP_WORK_REJECT;
-    item.reason = state == VOIP_STATE_RINGING
-                                             ? TIRTC_VOIP_HANGUP_REASON_REJECT
-                                             : TIRTC_VOIP_HANGUP_REASON_MANUAL;
-    if (enqueue_work(&item) == ESP_OK)
+    tirtc_voip_hangup_reason_t reason =
+        state == VOIP_STATE_RINGING
+            ? TIRTC_VOIP_HANGUP_REASON_REJECT
+            : TIRTC_VOIP_HANGUP_REASON_MANUAL;
+    if (reject_info_later(&reject_info, reason) == ESP_OK)
     {
         ESP_LOGI(TAG, "%s", state == VOIP_STATE_RINGING ? "已拒接微信来电" : "已取消微信通话");
     }

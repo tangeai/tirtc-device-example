@@ -44,6 +44,7 @@ typedef void (*ai_chat_media_active_cb_t)(bool active, void *ctx);
 
 typedef struct {
     bool enabled;
+    bool video_enabled;
     char device_id[AI_CHAT_DEVICE_ID_MAX];
     char user_id[AI_CHAT_USER_ID_MAX];
     char role_id[AI_CHAT_ROLE_ID_MAX];
@@ -66,8 +67,11 @@ typedef struct {
     bool active;
     bool listening;
     bool cloud_speaking;
+    bool video_active;
     uint32_t tx_audio_frames;
     uint32_t tx_audio_failures;
+    uint32_t tx_video_frames;
+    uint32_t tx_video_failures;
     uint32_t rx_commands;
     char role_id[AI_CHAT_ROLE_ID_MAX];
     char session_id[AI_CHAT_SESSION_ID_MAX];

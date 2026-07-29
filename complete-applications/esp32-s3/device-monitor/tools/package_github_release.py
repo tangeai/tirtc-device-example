@@ -75,7 +75,7 @@ def main() -> int:
     if built_version != args.version:
         raise SystemExit(f"version mismatch: requested={args.version} build={built_version}")
 
-    tag = args.tag or f"esp32-s3-trtc-advanced-v{args.version}"
+    tag = args.tag or f"esp32-s3-device-monitor-v{args.version}"
     output = (args.output or project / "artifacts" / "github-releases" / tag).resolve()
     if output == project or output == build:
         raise SystemExit("refusing to use the project or build root as output")
@@ -110,7 +110,7 @@ def main() -> int:
     )
     (maintenance / "README_FLASH_CN.md").write_text(
         "# 维护者多地址烧录包\n\n"
-        "普通体验者请使用 Release 根目录的 0x0 完整镜像和 Espressif ESP Launchpad。\n"
+        "普通体验者请使用 Release 根目录的 0x0 完整镜像和 Espressif ESP Tool。\n"
         "本目录只用于维护者排障，地址以 `flash_args.txt` 为准。\n",
         encoding="utf-8",
         newline="\n",
@@ -143,11 +143,12 @@ def main() -> int:
 
     install_readme = output / "README_INSTALL_CN.md"
     install_readme.write_text(
-        "# ESP Launchpad 烧录\n\n"
+        "# Espressif ESP Tool 烧录\n\n"
         f"- 固件版本：`{args.version}`\n"
         f"- 选择文件：`{full_image.name}`\n"
         "- 烧录地址：`0x0`\n"
-        "- 网页工具：https://espressif.github.io/esp-launchpad/\n\n"
+        "- 网页工具：https://espressif.github.io/esptool-js/\n"
+        "- 操作：`Connect` -> `Add File` -> `Flash Address 0x0` -> `Program`\n\n"
         "首次烧录建议先擦除闪存。烧录完成后按 RESET，按设备提示连接 2.4 GHz Wi-Fi，"
         "再到 https://mqtt-demo.tange-ai.com/ 输入设备显示的 6 位验证码。\n",
         encoding="utf-8",
@@ -171,7 +172,7 @@ def main() -> int:
         "schema": 1,
         "tag": tag,
         "platform": "esp32-s3",
-        "example": "trtc-advanced",
+        "example": "device-monitor",
         "version": args.version,
         "project": project_description.get("project_name"),
         "source_commit": source_commit,

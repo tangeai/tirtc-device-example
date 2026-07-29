@@ -1,6 +1,9 @@
 build*/
+firmware/
 .vscode/
 managed_components/
 dependencies.lock
 *.pyc
 __pycache__/
+main/local_config.h
+sdkconfig.old

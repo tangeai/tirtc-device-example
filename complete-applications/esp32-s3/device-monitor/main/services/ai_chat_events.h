@@ -10,6 +10,10 @@
 #define AI_CHAT_EVENT_DATA_MAX   256U
 #define AI_CHAT_ERROR_TEXT_MAX   128U
 #define AI_CHAT_CODEC_MAX        16U
+#define AI_CHAT_JSONRPC_ID_MAX   96U
+#define AI_CHAT_DEVICE_ACTION_NAME_MAX      64U
+#define AI_CHAT_DEVICE_ACTION_TARGET_MAX    128U
+#define AI_CHAT_DEVICE_ACTION_CALL_TYPE_MAX 16U
 
 typedef enum {
     AI_CHAT_EVENT_UNKNOWN = 0,
@@ -22,6 +26,7 @@ typedef enum {
     AI_CHAT_EVENT_INTERRUPT,
     AI_CHAT_EVENT_CUSTOM_EVENT,
     AI_CHAT_EVENT_END_SESSION,
+    AI_CHAT_EVENT_DEVICE_ACTION,
 } ai_chat_event_type_t;
 
 typedef struct {
@@ -34,6 +39,7 @@ typedef struct {
 typedef struct {
     ai_chat_event_type_t type;
     int jsonrpc_id;
+    bool jsonrpc_id_valid;
     int error_code;
     int caption_type;
     int mode;
@@ -41,6 +47,10 @@ typedef struct {
     int64_t utterance_id;
     bool is_final;
     char session_id[AI_CHAT_SESSION_ID_MAX];
+    char jsonrpc_id_json[AI_CHAT_JSONRPC_ID_MAX];
+    char action[AI_CHAT_DEVICE_ACTION_NAME_MAX];
+    char target[AI_CHAT_DEVICE_ACTION_TARGET_MAX];
+    char call_type[AI_CHAT_DEVICE_ACTION_CALL_TYPE_MAX];
     char text[AI_CHAT_CAPTION_TEXT_MAX];
     char event_data[AI_CHAT_EVENT_DATA_MAX];
     char error_message[AI_CHAT_ERROR_TEXT_MAX];

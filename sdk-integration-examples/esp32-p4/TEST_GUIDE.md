@@ -9,8 +9,8 @@
 - 1 到 2 块 ESP32-P4 开发板，板卡带 PSRAM，Host Wi-Fi 可用。
 - Windows 电脑已安装 ESP-IDF 5.5.4，并可在 ESP-IDF PowerShell 中执行 `idf.py`。
 - 可访问公网的 2.4 GHz Wi-Fi。
-- 每块设备对应的 `device_id` 和 `device_secret`。
-- 如需板对板验证，A 设备需要知道 B 设备的 `device_id/device_secret`，B 设备也需要知道 A 设备的 `device_id/device_secret`。
+- 每块设备对应的 `device_id`、`device_secret` 和稳定 `client_id`。
+- 如需板对板验证，A 设备需要知道 B 设备的 `device_id`，B 设备也需要知道 A 设备的 `device_id`。
 - 本地签发 token 所需的 `access_id` 和 `secret_key`。
 - 工程自带 `send_video.h264` 和 `send_audio.pcma`，烧录时会作为 SPIFFS 分区一起写入设备。
 
@@ -34,9 +34,10 @@
 ```c
 #define TIRTC_DEVICE_ID "your_device_id"
 #define TIRTC_DEVICE_SECRET_KEY "your_device_secret"
+#define TIRTC_CLIENT_ID "your_client_id"
+#define TIRTC_APP_ID ""
 
 #define TIRTC_REMOTE_DEVICE_ID "peer_device_id"
-#define TIRTC_REMOTE_DEVICE_SECRET_KEY "peer_device_secret_key"
 
 #define TIRTC_AUTO_PUSH_LOCAL_MEDIA_ON_CONNECT 1
 
@@ -46,12 +47,14 @@
 
 `TIRTC_AUTO_PUSH_LOCAL_MEDIA_ON_CONNECT` 默认为 `1`，连接建立后立即推送本机 H264/PCMA；如需等待对端订阅后再推送本机测试媒体，可改为 `0`。
 
+`TIRTC_CLIENT_ID` 是 TiRTC C SDK 2.2.x 设备端启动必填项，必须是 1 到 64 个可打印 ASCII 字符，并且同一个 `device_id` 后续启动应保持不变。`TIRTC_APP_ID` 对设备端可选。
+
 板对板验证时，两块板需要互相配置为对端：
 
 | 设备 | 本机配置 | 对端配置 |
 |---|---|---|
-| A 设备 | A 的 `device_id/device_secret` | B 的 `device_id/device_secret` |
-| B 设备 | B 的 `device_id/device_secret` | A 的 `device_id/device_secret` |
+| A 设备 | A 的 `device_id/device_secret/client_id` | B 的 `device_id` |
+| B 设备 | B 的 `device_id/device_secret/client_id` | A 的 `device_id` |
 
 验证时建议只按其中一侧的 BOOT 键，避免两边同时发起连接。
 
@@ -86,7 +89,8 @@ idf.py -p COMx flash monitor
 
 - Wi-Fi 能获取 IP。
 - 系统时间同步成功。
-- TiRTC SDK 版本打印为 `0.1.4`。
+- TiRTC SDK 版本打印为 `2.2.1`。
+- TiRTC 构建信息已打印。
 - 设备进入在线状态。
 
 预期日志示例：
@@ -94,11 +98,12 @@ idf.py -p COMx flash monitor
 ```text
 Wi-Fi 已连接
 系统时间同步完成
-TiRTC 版本: 0.1.4
+TiRTC 版本: 2.2.1
+TiRTC 构建信息: {"chip":"esp32p4",...}
 TiRTC 发送缓冲: 131072 bytes
 TiRTC 服务地址: http://ep-tirtc.tange365.com
 本地测试媒体已就绪: H264=... bytes PCMA=... bytes
-TiRTC 启动请求已提交: device_id=...
+TiRTC 启动请求已提交: device_id=... client_id=...
 TiRTC 已上线，可接收入站连接，也可主动连接远端设备
 ```
 
@@ -207,7 +212,7 @@ TiRTC 连接断开 hconn=...
 |---|---|
 | Wi-Fi 未连接 | 检查 `APP_WIFI_SSID`、`APP_WIFI_PASSWORD`、2.4 GHz 网络和信号强度 |
 | 时间同步未完成 | 检查网络是否可访问公网 NTP 服务 |
-| TiRTC 未上线 | 检查 `TIRTC_DEVICE_ID`、`TIRTC_DEVICE_SECRET_KEY` 和服务地址 |
+| TiRTC 未上线 | 检查 `TIRTC_DEVICE_ID`、`TIRTC_DEVICE_SECRET_KEY`、`TIRTC_CLIENT_ID` 和服务地址 |
 | 主动连接未建立 | 检查 `TIRTC_REMOTE_DEVICE_ID`、对端在线状态和 token 签发参数 |
 | 没有音视频发送 | 检查 `storage` 分区是否已烧录，以及是否出现 `[TX][video]`、`[TX][audio]` 发送日志 |
 | 只能发送不能接收 | 检查对端是否发送媒体，以及本机是否已订阅对端音视频 |

@@ -2,13 +2,32 @@
 
 本工程演示 ESP32-P4 设备通过 Wi-Fi 接入 TiRTC，完成设备上线、远端呼入、BOOT 按键主动连接、H264 视频发送、PCMA 音频发送和连接断开。
 
-TiRTC 产品能力可参考官网文档：[TiRTC 产品介绍](https://docs.tange.ai/products/tirtc/overview/what-is-tirtc.html)。
+接入前先从 [设备端 SDK 下载](https://docs.tange.ai/products/tirtc/en/download.html)
+获取目标平台包，并参考
+[设备端接入](https://docs.tange.ai/products/tirtc/en/guides/device-integration.html)、
+[连接](https://docs.tange.ai/products/tirtc/en/guides/connection.html)、
+[实时音视频](https://docs.tange.ai/products/tirtc/en/guides/real-time-audio-video.html)
+和 [C API Reference](https://docs.tange.ai/products/tirtc/en/api-reference/c.html)。
+
+## 当前版本
+
+- Demo：`1.1.1`
+- 源码：tag `v1.1.1`，commit `0f36ddbb053d09c52efcd66cb7e4eb8cd113ee32`
+- TiRTC SDK：`2.2.1`
+- SDK commit：`3a33bf4ae51b3ab9eb246648adb274d0fae32ebf`
+- ESP-IDF：`5.5.4`
+- 工具链：`riscv32-esp-elf-gcc-14.2.0_20260121`
+- `libTiRTC.a` SHA256：
+  `a8eadc99e97e9d6fcc7d871963d3456484ed3625469804a7ff6718218b117d65`
+
+源码与 SDK 的导入范围、哈希和验证边界见
+[来源与验证边界](SOURCE_PROVENANCE.md)。
 
 ## 功能概览
 
 - 设备启动后自动连接 Wi-Fi。
 - 联网后通过 SNTP 同步系统时间。
-- 使用设备 ID 和设备密钥调用 `TiRtcStart()` 上线。
+- 设置设备密钥和 `client_id` 后，使用设备 ID 调用 `TiRtcStart()` 上线。
 - 支持远端呼入连接。
 - 支持 BOOT 按键切换连接状态：未连接时主动连接目标设备，已连接时主动断开。
 - 连接建立后默认主动推送本地 H264 视频和 PCMA 音频。
@@ -20,9 +39,8 @@ TiRTC 产品能力可参考官网文档：[TiRTC 产品介绍](https://docs.tang
 ```text
 tirtc_esp32p4_wifi_link_demo
 ├─ components/tirtc_sdk/              TiRTC SDK 头文件和 ESP32-P4 静态库
+├─ components/tirtc_sdk/manifest/     SDK 构建信息、符号清单和构建契约
 ├─ dependencies.lock                  ESP-IDF managed component 版本锁定文件
-├─ firmware/                          已编译好的烧录产物
-├─ PACKAGE_CONTENTS.md                包内容说明
 ├─ main/app_main.c                    示例主流程
 ├─ main/app_config.h                  Wi-Fi 和 BOOT 键配置
 ├─ main/app_version.h                 示例版本信息
@@ -50,9 +68,10 @@ tirtc_esp32p4_wifi_link_demo
 ```c
 #define TIRTC_DEVICE_ID "your_device_id"
 #define TIRTC_DEVICE_SECRET_KEY "your_device_secret"
+#define TIRTC_CLIENT_ID "your_client_id"
+#define TIRTC_APP_ID ""
 
 #define TIRTC_REMOTE_DEVICE_ID "peer_device_id"
-#define TIRTC_REMOTE_DEVICE_SECRET_KEY "peer_device_secret_key"
 
 #define TIRTC_AUTO_PUSH_LOCAL_MEDIA_ON_CONNECT 1
 
@@ -60,9 +79,13 @@ tirtc_esp32p4_wifi_link_demo
 #define TIRTC_TOKEN_SECRET_KEY "your_token_secret_key"
 ```
 
+`TIRTC_CLIENT_ID` 是 TiRTC C SDK 2.2.x 设备端启动必填项，应使用 1 到 64 个可打印 ASCII 字符，并在同一个 `device_id` 后续启动中保持稳定。可使用生产序列号、MAC、ICCID、IMEI 或芯片标识。
+
+`TIRTC_APP_ID` 对设备端可选；如业务侧要求设备端上报 AppId，可填写真实值。
+
 `TIRTC_AUTO_PUSH_LOCAL_MEDIA_ON_CONNECT` 用于控制连接建立后的本机推流行为：默认值 `1` 表示主动连接或远端呼入建立后立即推送本机 H264/PCMA；设为 `0` 时，等待对端订阅后再推送本机 H264/PCMA。
 
-`TIRTC_REMOTE_DEVICE_SECRET_KEY`、`TIRTC_TOKEN_ACCESS_ID` 和 `TIRTC_TOKEN_SECRET_KEY` 仅用于本地生成主动连接 token。量产固件建议改为由业务服务端签发 token，再下发给设备使用。
+`TIRTC_TOKEN_ACCESS_ID` 和 `TIRTC_TOKEN_SECRET_KEY` 仅用于本地生成主动连接 token。量产固件建议改为由业务服务端完成授权判断和 token 签发，再下发给客户端或设备使用。
 
 ## 编译环境
 
@@ -82,7 +105,7 @@ tirtc_esp32p4_wifi_link_demo
 idf.py build
 ```
 
-首次编译时，ESP-IDF 会根据 `main/idf_component.yml` 和 `dependencies.lock` 获取并锁定 P4 Wi-Fi 相关 managed components。工程根目录下的 `firmware/` 已包含随包提供的最新烧录产物。
+首次编译时，ESP-IDF 会根据 `main/idf_component.yml` 和 `dependencies.lock` 获取并锁定 P4 Wi-Fi 相关 managed components。
 
 烧录并查看串口日志：
 
@@ -97,18 +120,17 @@ idf.py -p COMx flash monitor
 设备正常启动后，串口会看到类似日志：
 
 ```text
-TiRTC ESP32-P4 Wi-Fi Link Demo v1.0.2 release=2026-06-24 sdk=0.1.4
+TiRTC ESP32-P4 Wi-Fi Link Demo v1.1.1 release=2026-07-30 sdk=2.2.1
 Wi-Fi 已连接
 系统时间同步完成
-TiRTC 版本: 0.1.4
+TiRTC 版本: 2.2.1
+TiRTC 构建信息: {"chip":"esp32p4",...}
 TiRTC 发送缓冲: 131072 bytes
 TiRTC 服务地址: http://ep-tirtc.tange365.com
 本地测试媒体已就绪: H264=... bytes PCMA=... bytes
-TiRTC 启动请求已提交: device_id=...
+TiRTC 启动请求已提交: device_id=... client_id=...
 TiRTC 已上线，可接收入站连接，也可主动连接远端设备
 ```
-
-首行是当前固件保留的旧启动日志标识，不作为公开项目名称或目录类别。
 
 ## 主动连接流程
 
@@ -161,13 +183,10 @@ int ret = TiRtcSendAudioStream(conn, &frame, packet);
 - 默认关闭 Wi-Fi 省电，优先保证音视频链路稳定。
 - 本地 token 签发只用于快速验证；量产固件建议改为业务服务端签发。
 - `libTiRTC.a` 已放在 `components/tirtc_sdk/lib/esp32p4/`，工程会自动链接。
-- 当前 `libTiRTC.a` 为 ESP32-P4 KCP 单库包，已包含 tgtrp/KCP 底层对象，接入工程不需要额外链接 `libwebrtc_nosctp.a`。
-- SDK 初始化流程会先执行平台层初始化，再创建 TiRTC/tgtrp 运行资源。
+- 当前 `libTiRTC.a` 为 ESP32-P4 KCP 单库包，接入工程只链接 `components/tirtc_sdk/` 即可。
+- SDK 2.2.1 的 P4 FreeRTOS 线程栈使用 PSRAM，减少内部 RAM 占用；工程已保留 1 ms FreeRTOS tick。
+- 设备端启动前必须设置 `TIRTC_OPT_CLIENT_ID`；本示例通过 `TIRTC_CLIENT_ID` 配置并在 `TiRtcStart()` 前设置。
+- 音视频 stream_id 使用 `10` 音频、`11` 视频，和官方示例约定保持一致。
 - 测试媒体文件会通过 SPIFFS 随工程一起烧录，分区名为 `storage`。
 - 示例包仅保留占位配置，不包含真实 Wi-Fi、设备 ID、access_id 或 secret_key。
 - 更完整的验证步骤见 [TEST_GUIDE.md](TEST_GUIDE.md)。
-
-## 候选来源
-
-本目录来自含 TiRTC 头文件和静态库未提交修改的源工作树。当前版本声明与静态库契约仍需发布前
-复核，复制范围和未验证边界见 [来源与验证边界](SOURCE_PROVENANCE.md)。

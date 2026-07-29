@@ -1,43 +1,50 @@
 # 版本与证据清单
 
-本文件把“代码来自哪里”“使用什么 SDK”“是否构建过”“是否在真机验证过”分开记录。
-历史证据不会自动继承为目录整理后的新证据。
+本文件把源码来源、TiRTC SDK、统一构建、Release 资产和目标板证据分开记录。开发侧
+本地 Tag 锁定各项目来源版本；统一公开 commit 锁定筛选后的源码与文档，正式干净构建生成
+Release 资产并由 manifest 记录。
 
-## 发布候选基线
+## 2026-07-30 Release
 
-| 项目 | 发布仓路径 | 版本 | TiRTC SDK | 来源基线 | 来源状态 |
-| --- | --- | --- | --- | --- | --- |
-| ESP32-S3 最小 TiRTC 集成示例 | `sdk-integration-examples/esp32-s3` | `1.1.1` | `2.2.1` | `94c5b3348169c8c3813f8be755869fbecdb95957` | 源工作树非干净，20 项状态；候选已脱敏并按二进制 BuildInfo 校正版本 |
-| ESP32-P4 最小 TiRTC 集成示例 | `sdk-integration-examples/esp32-p4` | `1.0.2` | `0.1.4` | `8651471f8bbde59659922986d97f8f5735597c1e` | 源工作树非干净，SDK 头文件与静态库有未提交修改 |
-| G32S10X 最小 TiRTC 集成示例 | `sdk-integration-examples/g32s10x` | `0.8.1` | `2.2.0` | `697f21aec1ab956fdf38b2d8c28c127e818eb73c` | 源工作树非干净，18 项状态；只复制公开交付单元 |
-| ESP32-S3 Device Monitor | `complete-applications/esp32-s3/device-monitor` | `0.7.5` | `2.2.0`，BuildInfo commit `1df9e045a9dc` | 发布仓 commit `31eb69399ffe8732ff48a4ca0f4f322934a376a7` | 从原路径 `esp32-s3/trtc-advanced` 移入新分类 |
-| ESP32-P4 Device Monitor | `complete-applications/esp32-p4/device-monitor` | `1.1.0` | `2.2.0` | 发布仓 commit `31eb69399ffe8732ff48a4ca0f4f322934a376a7` | 从原路径 `esp32-p4/trtc-advanced` 移入新分类 |
+| 分类 | 项目 | 发布仓路径 | 版本 | TiRTC SDK | 来源 Tag | 来源 commit |
+| --- | --- | --- | --- | --- | --- | --- |
+| 最小示例 | ESP32-S3 最小 TiRTC 集成示例 | `sdk-integration-examples/esp32-s3` | `1.2.0` | `2.2.1` | `v1.2.0` | `44b24a5` |
+| 最小示例 | ESP32-P4 最小 TiRTC 集成示例 | `sdk-integration-examples/esp32-p4` | `1.1.1` | `2.2.1` | `v1.1.1` | `0f36ddb` |
+| 最小示例 | G32S10X 最小 TiRTC 集成示例 | `sdk-integration-examples/g32s10x` | `0.8.3` | `2.2.1` | `v0.8.3` | `b2abc22` |
+| 完整应用 | ESP32-S3 Device Monitor | `complete-applications/esp32-s3/device-monitor` | `1.7.6` | `2.2.0` | `v1.7.6` | `04dfca5` |
+| 完整应用 | ESP32-P4 Device App | `complete-applications/esp32-p4/device-monitor` | `1.2.3` | `2.3.0` | `esp32-p4-device-app-v1.2.3` | `c1af1eb` |
+| 完整应用 | G32S10X Device Monitor | `complete-applications/g32s10x/device-monitor` | `0.1.1` | `2.2.1` | `v0.1.1` | `5630152` |
 
-最小 TiRTC 集成示例使用复制时的源工作树当前文件，不是只导出 HEAD。每个示例的
-`SOURCE_PROVENANCE.md` 记录了具体筛选范围和边界。
+六个来源版本均按开发侧正式本地 Tag 和 commit 交接。统一仓在纳入源码时应核对 Tag 指向、
+真实 diff、公开文件范围、版本字段和文档说明，不能只依据修改说明推断发布内容。
 
-## 证据分层
+G32S10X 两个项目使用的 SDK manifest 将 `delivery_status` 标记为 `candidate`；统一仓固定其
+`2.2.1` 版本、source commit 和静态库 SHA-256，不把该状态改写为正式 SDK 包。
 
-| 项目 | 静态契约 | 构建证据 | 真机证据 | 本次整理后状态 |
+## 发布证据状态
+
+| 项目 | 来源版本 | 统一仓静态核验 | 正式构建 | 交付形态 |
 | --- | --- | --- | --- | --- |
-| ESP32-S3 最小 TiRTC 集成示例 | 头文件与 Tag `v2.2.1` 一致；静态库 BuildInfo 为 `v2.2.1` / `3a33bf4ae51b` | ESP-IDF `5.5.4` 干净构建通过 | 源工程有历史说明 | 供目标板集成验证 |
-| ESP32-P4 最小 TiRTC 集成示例 | 静态库与归档正式包 SHA-256 一致；头文件只有 `stddef.h` 兼容补丁 | ESP-IDF `5.5.4` 干净构建通过 | 源工程有历史说明 | 供目标板集成验证 |
-| G32S10X 最小 TiRTC 集成示例 | 版本、G32 静态库与供应商 SDK 要求已记录 | `im_sdk_v0.4.0` 隔离干净副本构建通过 | 以本次构建证据为基线 | 供目标板集成验证 |
-| ESP32-S3 Device Monitor | SDK 版本、静态库 SHA-256、ESP-IDF 版本已记录 | ESP-IDF `5.5.4` 干净构建通过 | 整理前版本有历史发布与设备体验资料 | 供目标板继续验证 |
-| ESP32-P4 Device Monitor | SDK 版本、静态库 SHA-256、ESP-IDF 版本已记录 | ESP-IDF `5.5.4` 干净构建通过 | 当前版本以本次构建证据为基线 | 供目标板继续验证 |
+| ESP32-S3 最小 TiRTC 集成示例 `1.2.0` | Tag/commit 已锁定 | 目录、版本、SDK、来源和凭据门禁通过 | ESP-IDF `5.5.4` 干净构建 | 源码与 `0x0` 完整镜像 |
+| ESP32-P4 最小 TiRTC 集成示例 `1.1.1` | Tag/commit 已锁定 | 目录、版本、SDK、来源和凭据门禁通过 | ESP-IDF `5.5.4` 干净构建 | 源码与 `0x0` 完整镜像 |
+| G32S10X 最小 TiRTC 集成示例 `0.8.3` | Tag/commit 已锁定 | 目录、版本、SDK、来源和凭据门禁通过 | IM SDK `v0.4.0` 干净构建 | 源码与 `rtos-with-spl.bin` |
+| ESP32-S3 Device Monitor `1.7.6` | Tag/commit 已锁定 | 目录、版本、SDK、来源和凭据门禁通过 | ESP-IDF `5.5.4` 干净构建 | 源码、完整镜像与 OTA app |
+| ESP32-P4 Device App `1.2.3` | Tag/commit 已锁定 | 目录、版本、SDK、来源和凭据门禁通过 | 源码范围 | 源码随统一 Tag 交付 |
+| G32S10X Device Monitor `0.1.1` | Tag/commit 已锁定 | 目录、版本、SDK、来源和凭据门禁通过 | IM SDK `v0.4.0` 干净构建 | 源码、主固件与两个 YAFFS 镜像 |
 
-静态契约说明头文件、静态库、版本文件和目标平台的组合；干净构建进一步证明源码、ABI 和
-链接闭环。目标板功能验收以对应开发板、固件哈希、串口日志或测试记录为准。
+目标板烧录、联网和业务验证使用独立证据层。Release 中的构建资产用于开发者在目标板上
+继续验证和集成，不把干净构建结果写成板级功能结论。
 
-## G32S10X 完整应用边界
+## 一致性契约
 
-G32S10X 最小 TiRTC 集成示例已经纳入。G32S10X 完整应用仍依赖内部来源、供应商 SDK、
-WSL 构建树和补丁收口，本次不纳入公开源码。
+本次 `release-manifest.json` 记录：
 
-完整应用公开前至少需要：
+- 统一发布 Tag 和 commit。
+- 六个项目的发布仓路径、来源 Tag、来源 commit、版本和 TiRTC SDK。
+- 发布仓源码文件清单及 SHA-256。
+- 实际上传附件的文件名、用途、大小和 SHA-256。
+- 固件项目的构建环境、命令、产物用途、Flash 地址和校验值；项目没有固件资产时记录
+  源码交付形态。
 
-- 明确供应商 SDK、工具链、Cloner 和示例代码的公开许可证边界。
-- 把发布源码收口为不依赖本机绝对路径的自包含目录。
-- 锁定 TiRTC SDK 版本、静态库哈希和目标 G32S10X ABI。
-- 在干净 WSL 环境复现构建。
-- 分开记录最小示例与完整应用的真机验证矩阵。
+静态校验可以证明发布源码、版本记录、Release notes、附件和 manifest 相互一致。若要证明
+固件由指定源码构建，还需要可复现构建，或在固件中嵌入 commit/版本元数据并完成比对。

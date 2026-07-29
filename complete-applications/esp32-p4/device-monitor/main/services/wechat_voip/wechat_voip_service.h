@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "esp_err.h"
+#include "wechat_voip_media.h"
 #include "wechat_voip_thing.h"
 
 #ifdef __cplusplus
@@ -18,6 +19,14 @@ typedef enum {
     WECHAT_VOIP_CALL_STATE_CLOSING,
 } wechat_voip_call_state_t;
 
+esp_err_t wechat_voip_service_configure_media_lifecycle(
+    const wechat_voip_media_lifecycle_t *lifecycle,
+    void *ctx);
+esp_err_t wechat_voip_service_set_incoming_policy(
+    wechat_voip_incoming_allowed_cb_t callback,
+    void *ctx);
+esp_err_t wechat_voip_service_start_ingress(void);
+void wechat_voip_service_suspend_ingress(void);
 esp_err_t wechat_voip_service_start(void);
 void wechat_voip_service_stop(void);
 esp_err_t wechat_voip_service_answer(void);

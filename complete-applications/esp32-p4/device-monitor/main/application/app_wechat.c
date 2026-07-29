@@ -1,11 +1,9 @@
 #include "app.h"
 
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "esp_check.h"
-#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
@@ -21,8 +19,6 @@ static const char *TAG = "app_wechat";
 
 #define APP_WECHAT_SCAN_RESTORE_TASK_STACK_SIZE 4096
 #define APP_WECHAT_SCAN_RESTORE_TASK_PRIORITY   3
-#define APP_WECHAT_SCAN_ADD_TASK_STACK_SIZE     4096
-#define APP_WECHAT_SCAN_ADD_TASK_PRIORITY       3
 
 typedef struct {
 	app_scan_preview_cb_t preview_cb;
@@ -31,56 +27,7 @@ typedef struct {
 	bool resources_suspended;
 } app_wechat_contact_scan_state_t;
 
-typedef struct {
-	char open_id[APP_WECHAT_OPEN_ID_MAX];
-} app_wechat_contact_add_task_ctx_t;
-
 static app_wechat_contact_scan_state_t s_wechat_contact_scan;
-
-static void app_wechat_contact_add_task(void *arg)
-{
-	app_wechat_contact_add_task_ctx_t *task_ctx = (app_wechat_contact_add_task_ctx_t *)arg;
-
-	if (task_ctx != NULL && task_ctx->open_id[0] != '\0') {
-		esp_err_t ret = wechat_voip_service_add_contact(task_ctx->open_id);
-		if (ret != ESP_OK) {
-			ESP_LOGW(TAG,
-				 "wechat scanned contact save failed: ret=%s",
-				 esp_err_to_name(ret));
-		} else {
-			ESP_LOGD(TAG, "wechat scanned contact saved");
-		}
-	}
-	free(task_ctx);
-	vTaskDeleteWithCaps(NULL);
-}
-
-static void app_wechat_queue_scanned_contact_save(const char *open_id)
-{
-	if (open_id == NULL || open_id[0] == '\0') {
-		return;
-	}
-
-	app_wechat_contact_add_task_ctx_t *task_ctx =
-		heap_caps_calloc(1, sizeof(*task_ctx), APP_MEMORY_CAPS_CONTROL);
-	if (task_ctx == NULL) {
-		ESP_LOGW(TAG, "wechat scanned contact save task alloc failed");
-		return;
-	}
-	strlcpy(task_ctx->open_id, open_id, sizeof(task_ctx->open_id));
-
-	BaseType_t task_ret = xTaskCreateWithCaps(app_wechat_contact_add_task,
-					  "wechat_add_qr",
-					  APP_WECHAT_SCAN_ADD_TASK_STACK_SIZE,
-					  task_ctx,
-					  APP_WECHAT_SCAN_ADD_TASK_PRIORITY,
-					  NULL,
-					  APP_TASK_STACK_CAPS_INTERNAL);
-	if (task_ret != pdPASS) {
-		ESP_LOGW(TAG, "wechat scanned contact save task create failed");
-		free(task_ctx);
-	}
-}
 
 static void app_wechat_scan_restore_task(void *arg)
 {
@@ -170,15 +117,15 @@ static void app_wechat_scan_result_cb(esp_err_t result,
 			result = ESP_ERR_INVALID_RESPONSE;
 		} else {
 			strlcpy(open_id_buf, contact->open_id, sizeof(open_id_buf));
-			ESP_LOGD(TAG, "wechat contact QR accepted");
+			result = wechat_voip_service_add_contact(open_id_buf);
+			if (result == ESP_OK) {
+				ESP_LOGD(TAG, "authorized wechat contact QR accepted");
+			}
 		}
 	}
 
 	if (result_cb != NULL) {
 		result_cb(result, open_id_buf, raw_payload_buf, result_ctx);
-	}
-	if (result == ESP_OK && open_id_buf[0] != '\0') {
-		app_wechat_queue_scanned_contact_save(open_id_buf);
 	}
 	app_defer_wechat_scan_resources(true);
 	s_wechat_contact_scan = (app_wechat_contact_scan_state_t){0};
@@ -310,7 +257,21 @@ esp_err_t app_wechat_hangup_call(void)
 
 esp_err_t app_wechat_accept_call(void)
 {
-	return wechat_voip_service_answer();
+	esp_err_t ret = ESP_OK;
+
+	if (app_get_active_app() != APP_ID_WECHAT) {
+		ret = app_enter_app(APP_ID_WECHAT);
+		if (ret != ESP_OK) {
+			(void)wechat_voip_service_reject_or_hangup();
+			return ret;
+		}
+	}
+
+	ret = wechat_voip_service_answer();
+	if (ret != ESP_OK) {
+		(void)wechat_voip_service_reject_or_hangup();
+	}
+	return ret;
 }
 
 esp_err_t app_wechat_reject_call(void)

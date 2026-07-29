@@ -46,6 +46,7 @@ typedef esp_err_t (*device_online_build_status_cb_t)(char *buffer,
                                                      void *ctx);
 
 typedef void (*device_online_rebind_required_cb_t)(void *ctx);
+typedef void (*device_online_ready_cb_t)(void *ctx);
 
 typedef struct {
     bool enabled;
@@ -56,9 +57,11 @@ typedef struct {
     device_online_message_cb_t on_message;
     device_online_build_status_cb_t build_status;
     device_online_rebind_required_cb_t on_rebind_required;
+    device_online_ready_cb_t on_online_ready;
     void *ctx;
     void *status_ctx;
     void *rebind_ctx;
+    void *online_ready_ctx;
 } device_online_config_t;
 
 typedef struct {

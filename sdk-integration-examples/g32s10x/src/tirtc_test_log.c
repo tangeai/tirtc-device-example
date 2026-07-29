@@ -1,6 +1,6 @@
 #include <stdio.h>
 
-#include "tiRTC.h"
+#include "TiRTC/tiRTC.h"
 #include "tirtc_link_platform.h"
 #include "tirtc_test_log.h"
 

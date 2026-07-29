@@ -1,0 +1,16 @@
+menuconfig CONFIG_APPLICATION_TIRTC_DEMO
+    bool "TiRTC demo application"
+    depends on CONFIG_LVGL
+    select CONFIG_APPLICATION
+    select CONFIG_APPLICATION_LAUNCHER
+    select CONFIG_APPLICATION_HOME
+    select CONFIG_APPLICATION_STATUS_BAR
+    default n
+
+config CONFIG_APPLICATION_TIRTC_SCREEN_DEBUG
+    bool "TiRTC browser screen debug server"
+    default n
+    help
+      Exposes the current LVGL screen as BMP over HTTP port 8080.
+
+endmenu # CONFIG_APPLICATION_TIRTC_DEMO

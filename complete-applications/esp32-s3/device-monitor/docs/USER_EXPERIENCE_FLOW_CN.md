@@ -185,7 +185,7 @@ sequenceDiagram
 5. 下载、校验和写入完成后，点击重启。
 6. 设备重启后，在设置页确认版本号。
 
-体验时要保证电源稳定，不要在写入阶段断电。OTA 只用于应用固件升级；首次完整烧录仍建议使用 Espressif 官方 ESP Launchpad。
+体验时要保证电源稳定，不要在写入阶段断电。OTA 只用于应用固件升级；首次完整烧录仍建议使用 [Espressif ESP Tool](https://espressif.github.io/esptool-js/)。
 
 ## 12. 一次完整演示脚本
 

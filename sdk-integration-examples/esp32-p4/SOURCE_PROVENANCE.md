@@ -1,43 +1,33 @@
 # 来源与验证边界
 
-## 来源快照
+## 版本身份
 
 | 项目 | 值 |
 | --- | --- |
-| 源工程 | `tirtc_esp32p4_wifi_link_demo` |
-| 源分支 | `master` |
-| 源 HEAD | `8651471f8bbde59659922986d97f8f5735597c1e` |
-| 源工作树 | 非干净，复制时有 2 项未提交修改 |
-| 示例版本声明 | `1.0.2` |
-| TiRTC SDK 版本声明 | `0.1.4` |
-| 候选 `libTiRTC.a` SHA-256 | `DA0A165C062CBB3F2E176AEA2F517E8ECD5FF116F10FB5E9F8C4DB729C1AFE88` |
+| 内部开发仓 | `tirtc_esp32p4_wifi_link_demo` |
+| 来源 tag | `v1.1.1` |
+| 来源 commit | `0f36ddbb053d09c52efcd66cb7e4eb8cd113ee32` |
+| 示例版本 | `1.1.1` |
+| TiRTC SDK | `2.2.1` |
+| SDK source commit | `3a33bf4ae51b3ab9eb246648adb274d0fae32ebf` |
+| SDK 静态库 | `components/tirtc_sdk/lib/esp32p4/libTiRTC.a` |
+| SDK 静态库 SHA-256 | `a8eadc99e97e9d6fcc7d871963d3456484ed3625469804a7ff6718218b117d65` |
 
-未提交修改位于 TiRTC 头文件和 ESP32-P4 静态库。候选使用源工作树当时的当前文件，因此
-不能只按源 HEAD 推断候选内容。
+检查来源时，内部开发仓位于上述 tag 对应 commit。工作树另有未跟踪文件
+`IPC_COORDINATION.md`；该文件不属于 `v1.1.1`，也未导入本候选目录。
 
-收口调查确认候选静态库与 2026-07-01 归档的 ESP32-P4 `0.1.4` 正式交付包逐字节一致：
-SHA-256 为 `DA0A165C062CBB3F2E176AEA2F517E8ECD5FF116F10FB5E9F8C4DB729C1AFE88`。
-`basedef.h` 也与该包一致；`tiRTC.h` 唯一差异是增加标准 `#include <stddef.h>`，用于声明公开
-接口使用的 `size_t`。因此可信契约是 `0.1.4`、source commit `e2c7020`、ESP-IDF `5.5.4`、
-1000 Hz、单一 KCP 静态库。
+## 导入范围
 
-## 公开筛选
+候选目录保留公开接入所需的源码、配置、测试媒体、SDK 头文件、静态库、SDK
+manifest 和 ESP-IDF 依赖锁定信息。构建目录、固件产物、工具链、ESP-IDF
+展开树、真实凭据、本机配置和 Git 元数据不属于公开源码。
 
-已纳入：
-
-- ESP-IDF 工程入口、`main/`、分区表、`sdkconfig`、`sdkconfig.defaults`。
-- `dependencies.lock`。
-- TiRTC SDK 公开头文件、版本文件和 ESP32-P4 静态库。
-- README、版本、测试和交付内容说明。
-
-已排除：
-
-- `build/`、`firmware/`、`managed_components/`。
-- `.git/`、`.agents/`、`.codex/`、`.vscode/`、`.clangd`。
-
-候选配置只保留公开占位值。源工程保持原样。
+SDK manifest 中的临时 ESP-IDF 与构建根目录已替换为
+`<ESP_IDF_ROOT>`、`<SDK_BUILD_ROOT>` 等稳定占位符；该处理只规范化路径，不修改
+符号记录、SDK 头文件、静态库或其哈希。
 
 ## 验证边界
 
-本候选已在 ESP-IDF `5.5.4` 中从空构建目录完成编译和链接，生成的验证固件只保存在
-Git 本地忽略目录。静态库与归档正式包的契约已经核验；尚未执行烧录或真机测试。
+本次发布前准备已静态核对示例 tag/commit、SDK 版本、SDK source commit、库路径
+和 SHA-256，并检查公开路径中不保留临时构建目录。本次未执行编译、烧录或真机
+功能验证；这些证据应在正式发布前的独立验证阶段生成并记录。

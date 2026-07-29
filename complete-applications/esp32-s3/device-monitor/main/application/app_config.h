@@ -85,7 +85,7 @@
 #endif
 
 #ifndef APP_CONFIG_THING_SERVICE_DISCOVERY_URL
-#define APP_CONFIG_THING_SERVICE_DISCOVERY_URL "https://ep-open.tange-ai.com/services"
+#define APP_CONFIG_THING_SERVICE_DISCOVERY_URL "http://ep-open.tangeopen.com/services"
 #endif
 
 #ifndef APP_CONFIG_DEVICE_BINDING_API_BASE

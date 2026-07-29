@@ -172,7 +172,7 @@ extern "C" {
 
 #define TIRTC_VERSION_MAJOR     2
 #define TIRTC_VERSION_MINOR     2
-#define TIRTC_VERSION_PATCH     0
+#define TIRTC_VERSION_PATCH     1
 /* -------------------------------------------------------------------------
  * 错误码
  * ------------------------------------------------------------------------- */

@@ -46,6 +46,44 @@ void *app_memory_calloc_psram(size_t count, size_t size)
     return ptr;
 }
 
+void *app_memory_aligned_alloc_psram(size_t alignment, size_t size, uint32_t extra_caps)
+{
+    void *ptr = NULL;
+
+    if (alignment == 0U || size == 0U) {
+        return NULL;
+    }
+
+    ptr = heap_caps_aligned_alloc(alignment,
+                                  size,
+                                  APP_MEMORY_CAPS_PSRAM | extra_caps);
+    if (ptr == NULL) {
+        app_memory_note_psram_failure();
+    }
+    return ptr;
+}
+
+void *app_memory_aligned_calloc_psram(size_t alignment,
+                                      size_t count,
+                                      size_t size,
+                                      uint32_t extra_caps)
+{
+    void *ptr = NULL;
+
+    if (alignment == 0U || count == 0U || size == 0U || count > (SIZE_MAX / size)) {
+        return NULL;
+    }
+
+    ptr = heap_caps_aligned_calloc(alignment,
+                                   count,
+                                   size,
+                                   APP_MEMORY_CAPS_PSRAM | extra_caps);
+    if (ptr == NULL) {
+        app_memory_note_psram_failure();
+    }
+    return ptr;
+}
+
 void app_memory_get_snapshot(app_memory_snapshot_t *snapshot)
 {
     if (snapshot == NULL) {

@@ -1,5 +1,37 @@
 # 版本变更记录
 
+## 2026.07.30：六项目统一发布
+
+### 版本
+
+- ESP32-S3 最小 TiRTC 集成示例更新为 `1.2.0`，TiRTC SDK `2.2.1`，来源 Tag `v1.2.0`。
+- ESP32-P4 最小 TiRTC 集成示例更新为 `1.1.1`，TiRTC SDK `2.2.1`，来源 Tag `v1.1.1`。
+- G32S10X 最小 TiRTC 集成示例更新为 `0.8.3`，TiRTC SDK `2.2.1`，来源 Tag `v0.8.3`。
+- ESP32-S3 Device Monitor 更新为 `1.7.6`，TiRTC SDK `2.2.0`，来源 Tag `v1.7.6`。
+- ESP32-P4 Device App 更新为 `1.2.3`，TiRTC SDK `2.3.0`，来源 Tag
+  `esp32-p4-device-app-v1.2.3`。
+- G32S10X Device Monitor 首次纳入完整应用，版本 `0.1.1`，TiRTC SDK `2.2.1`，
+  来源 Tag `v0.1.1`。
+
+### 结构
+
+- 保持 `sdk-integration-examples/`、`complete-applications/` 和 `docs/` 三个对外入口。
+- 三个平台分别提供最小 TiRTC 集成示例和完整应用，共六个公开项目。
+- 统一对外项目表、文档导航、版本来源和固件下载边界。
+
+### 构建与交付
+
+- 六个项目均以开发侧不可移动 Tag 和 commit 作为源码交接基线。
+- 已核对 Tag 指向、真实 diff、版本字段、公开文件范围、文档链接、凭据与 SDK 哈希。
+- 五个固件项目从统一公开 commit 完成正式干净构建，资产通过
+  `release-manifest.json` 和 `SHA256SUMS.txt` 绑定。
+- ESP32-P4 Device App `1.2.3` 本次按源码范围交付。
+- 固件构建产物只通过
+  [GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases) 分发，
+  不进入 Git 历史。
+- ESP32-S3/P4 统一使用
+  [Espressif ESP Tool](https://espressif.github.io/esptool-js/)；G32S10X 使用君正 Cloner。
+
 ## 2026.07.28：设备示例统一发布
 
 ### 新增

@@ -1,0 +1,19 @@
+{
+  "chip": "esp32p4",
+  "sdk_version": "2.2.1",
+  "target_os": "FreeRTOS / ESP-IDF",
+  "esp_idf": "5.5.4",
+  "toolchain": "riscv32-esp-elf-gcc-14.2.0_20260121",
+  "p2p": "kcp",
+  "ssl": "disabled",
+  "default_endpoint": "http://ep-tirtc.tange365.com",
+  "source_commit": "3a33bf4ae51b3ab9eb246648adb274d0fae32ebf",
+  "version_label": "v2.2.1_tag_3a33bf4ae51b_1khz_http_20260729_103435",
+  "build_contract": "manifest/build-contract.env",
+  "library": {
+    "path": "lib/esp32p4/libTiRTC.a",
+    "size": 2944540,
+    "md5": "d2c0755049868129c42de5ca72de686a",
+    "sha256": "a8eadc99e97e9d6fcc7d871963d3456484ed3625469804a7ff6718218b117d65"
+  }
+}

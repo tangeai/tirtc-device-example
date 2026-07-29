@@ -41,8 +41,9 @@ static void *device_call_calloc_control(size_t count, size_t size)
 #define DEVICE_CALL_TASK_PRIORITY          5
 #define DEVICE_CALL_RING_TIMEOUT_MS        30000U
 #define DEVICE_CALL_RTC_READY_TIMEOUT_MS   10000U
+/* Keep the business wait slightly longer than the TiRTC connect watchdog. */
 #define DEVICE_CALL_CONNECT_TIMEOUT_MS     40000U
-#define DEVICE_CALL_POLL_INTERVAL_MS       100U
+#define DEVICE_CALL_POLL_INTERVAL_MS       20U
 #define DEVICE_CALL_ONLINE_READY_TIMEOUT_MS 30000U
 
 typedef enum {
@@ -268,6 +269,9 @@ static void device_call_set_message_locked(const char *message)
 
 static void device_call_set_error_locked(esp_err_t error, const char *message)
 {
+    s_call.request_running = false;
+    s_call.accept_running = false;
+    s_call.switch_disconnect_in_progress = false;
     s_call.state = DEVICE_CALL_STATE_ERROR;
     s_call.last_error = error;
     device_call_set_message_locked(message);
@@ -283,6 +287,14 @@ static void device_call_clear_current_locked(void)
 
 static void device_call_show_pending_or_idle_locked(const char *idle_message)
 {
+    /*
+     * This is the terminal transition for the current room. Worker callbacks
+     * are generation-fenced, so once the generation changes they cannot clear
+     * their ownership flags later. Keep the idle-state invariant here.
+     */
+    s_call.request_running = false;
+    s_call.accept_running = false;
+    s_call.switch_disconnect_in_progress = false;
     device_call_clear_current_locked();
     s_call.last_error = ESP_OK;
     if (s_call.pending_incoming) {
@@ -731,13 +743,17 @@ static esp_err_t device_call_wait_for_connection(uint32_t generation)
         }
         if (stats.state == RTC_TRANSPORT_STATE_ERROR ||
             (!stats.sdk_started && elapsed_ms > DEVICE_CALL_RTC_READY_TIMEOUT_MS)) {
+            esp_err_t wait_ret =
+                stats.last_error == TIRTC_E_TIMEOUTED ? ESP_ERR_TIMEOUT : ESP_FAIL;
             ESP_LOGW(CALL_FLOW_TAG,
-                     "stage=p2p_wait_done gen=%lu elapsed_ms=%u sdk_started=%d state=%u ret=ESP_FAIL",
+                     "stage=p2p_wait_done gen=%lu elapsed_ms=%u sdk_started=%d state=%u sdk_error=%d ret=%s",
                      (unsigned long)generation,
                      (unsigned)elapsed_ms,
                      stats.sdk_started ? 1 : 0,
-                     (unsigned)stats.state);
-            return ESP_FAIL;
+                     (unsigned)stats.state,
+                     stats.last_error,
+                     esp_err_to_name(wait_ret));
+            return wait_ret;
         }
         vTaskDelay(pdMS_TO_TICKS(DEVICE_CALL_POLL_INTERVAL_MS));
         elapsed_ms += DEVICE_CALL_POLL_INTERVAL_MS;
@@ -1006,7 +1022,11 @@ static void device_call_accept_task(void *arg)
         ret = device_call_activate_media(ctx->call_type);
     }
     if (ret != ESP_OK) {
-        device_call_accept_failed(ctx, ret, "peer connection failed", true);
+        device_call_accept_failed(ctx,
+                                  ret,
+                                  ret == ESP_ERR_TIMEOUT ? "peer connection timed out" :
+                                                           "peer connection failed",
+                                  true);
         (void)rtc_transport_disconnect();
         free(ctx);
         vTaskDeleteWithCaps(NULL);
@@ -1921,6 +1941,9 @@ static void device_call_handle_incoming(const cJSON *payload, uint32_t message_g
     bool local_busy = false;
     bool transport_busy = false;
     bool foreground_available = true;
+    bool request_running = false;
+    bool accept_running = false;
+    bool switch_running = false;
 
     if (room_id[0] == '\0' || caller_id[0] == '\0' ||
         strlen(room_id) >= sizeof(s_call.pending_room_id) ||
@@ -1952,6 +1975,10 @@ static void device_call_handle_incoming(const cJSON *payload, uint32_t message_g
                  s_call.switch_disconnect_in_progress ||
                  (s_call.state != DEVICE_CALL_STATE_IDLE &&
                   s_call.state != DEVICE_CALL_STATE_ERROR);
+    state = s_call.state;
+    request_running = s_call.request_running;
+    accept_running = s_call.accept_running;
+    switch_running = s_call.switch_disconnect_in_progress;
     can_accept_incoming = s_call.can_accept_incoming;
     callback_ctx = s_call.callback_ctx;
     device_call_unlock();
@@ -1965,10 +1992,14 @@ static void device_call_handle_incoming(const cJSON *payload, uint32_t message_g
                                                                   room_id,
                                                                   "busy");
         ESP_LOGI(CALL_FLOW_TAG,
-                 "stage=incoming_busy_reject gen=%lu room=%s peer=%s local_busy=%d transport_busy=%d foreground_available=%d ret=%s",
+                 "stage=incoming_busy_reject gen=%lu room=%s peer=%s state=%s request=%d accept=%d switch=%d local_busy=%d transport_busy=%d foreground_available=%d ret=%s",
                  (unsigned long)message_generation,
                  room_id,
                  caller_id,
+                 device_call_state_name(state),
+                 request_running ? 1 : 0,
+                 accept_running ? 1 : 0,
+                 switch_running ? 1 : 0,
                  local_busy ? 1 : 0,
                  transport_busy ? 1 : 0,
                  foreground_available ? 1 : 0,
@@ -1994,16 +2025,24 @@ static void device_call_handle_incoming(const cJSON *payload, uint32_t message_g
                  s_call.switch_disconnect_in_progress ||
                  (s_call.state != DEVICE_CALL_STATE_IDLE &&
                   s_call.state != DEVICE_CALL_STATE_ERROR);
+    state = s_call.state;
+    request_running = s_call.request_running;
+    accept_running = s_call.accept_running;
+    switch_running = s_call.switch_disconnect_in_progress;
     if (local_busy || transport_busy) {
         device_call_unlock();
         esp_err_t reject_ret = device_call_post_room_action_async(DEVICE_CALL_ACTION_REJECT,
                                                                   room_id,
                                                                   "busy");
         ESP_LOGI(CALL_FLOW_TAG,
-                 "stage=incoming_race_busy_reject gen=%lu room=%s peer=%s local_busy=%d transport_busy=%d ret=%s",
+                 "stage=incoming_race_busy_reject gen=%lu room=%s peer=%s state=%s request=%d accept=%d switch=%d local_busy=%d transport_busy=%d ret=%s",
                  (unsigned long)message_generation,
                  room_id,
                  caller_id,
+                 device_call_state_name(state),
+                 request_running ? 1 : 0,
+                 accept_running ? 1 : 0,
+                 switch_running ? 1 : 0,
                  local_busy ? 1 : 0,
                  transport_busy ? 1 : 0,
                  esp_err_to_name(reject_ret));
@@ -2040,6 +2079,7 @@ static void device_call_handle_incoming(const cJSON *payload, uint32_t message_g
 static void device_call_handle_room_cancel(const cJSON *payload, uint32_t message_generation)
 {
     const char *room_id = device_call_json_string(payload, "room_id");
+    const char *reason = device_call_json_string(payload, "reason");
     bool close_transport = false;
 
     if (room_id[0] == '\0') {
@@ -2074,15 +2114,20 @@ static void device_call_handle_room_cancel(const cJSON *payload, uint32_t messag
         device_call_notify_session_ended();
     }
     ESP_LOGI(CALL_FLOW_TAG,
-             "stage=room_cancel_rx room=%s close_transport=%d",
+             "stage=room_cancel_rx room=%s reason=%s close_transport=%d",
              room_id,
+             reason[0] != '\0' ? reason : "-",
              close_transport ? 1 : 0);
-    ESP_LOGI(TAG, "room canceled: room=%s", room_id);
+    ESP_LOGI(TAG,
+             "room canceled: room=%s reason=%s",
+             room_id,
+             reason[0] != '\0' ? reason : "-");
 }
 
 static void device_call_handle_reject(const cJSON *payload, uint32_t message_generation)
 {
     const char *room_id = device_call_json_string(payload, "room_id");
+    const char *reason = device_call_json_string(payload, "reason");
     bool matched = false;
 
     device_call_lock();
@@ -2102,13 +2147,18 @@ static void device_call_handle_reject(const cJSON *payload, uint32_t message_gen
 
     if (matched) {
         ESP_LOGI(CALL_FLOW_TAG,
-                 "stage=call_reject_rx room=%s matched=1 terminal=0",
-                 room_id);
-        ESP_LOGI(TAG, "one outgoing call target rejected: room=%s", room_id);
+                 "stage=call_reject_rx room=%s reason=%s matched=1 terminal=0",
+                 room_id,
+                 reason[0] != '\0' ? reason : "-");
+        ESP_LOGI(TAG,
+                 "one outgoing call target rejected: room=%s reason=%s",
+                 room_id,
+                 reason[0] != '\0' ? reason : "-");
     } else {
         ESP_LOGW(CALL_FLOW_TAG,
-                 "stage=call_reject_rx room=%s matched=0",
-                 room_id[0] != '\0' ? room_id : "-");
+                 "stage=call_reject_rx room=%s reason=%s matched=0",
+                 room_id[0] != '\0' ? room_id : "-",
+                 reason[0] != '\0' ? reason : "-");
     }
 }
 
@@ -2250,9 +2300,30 @@ static bool device_call_on_rtc_command(tirtc_conn_t conn,
     char room_id[96] = {0};
     bool matched = false;
     bool expected = false;
+    bool owns_command = false;
 
     (void)conn;
     (void)ctx;
+
+    if (command != TIRTC_SESSION_CMD_DEVICE_CALL_CONNECTED &&
+        command != TIRTC_SESSION_CMD_DEVICE_CALL_HANGUP) {
+        return false;
+    }
+
+    /*
+     * 0x2000/0x2001 are shared by device calls and WeChat VoIP. An observer
+     * may consume a command only while its own session is active; otherwise
+     * dispatch must continue to the WeChat observer.
+     */
+    device_call_lock();
+    owns_command = s_call.role != DEVICE_CALL_ROLE_NONE &&
+                   (s_call.state == DEVICE_CALL_STATE_OUTGOING ||
+                    s_call.state == DEVICE_CALL_STATE_CONNECTING ||
+                    s_call.state == DEVICE_CALL_STATE_IN_CALL);
+    device_call_unlock();
+    if (!owns_command) {
+        return false;
+    }
 
     if (command == TIRTC_SESSION_CMD_DEVICE_CALL_HANGUP) {
         char active_room[96] = {0};
@@ -2285,9 +2356,6 @@ static bool device_call_on_rtc_command(tirtc_conn_t conn,
                  TIRTC_SESSION_CMD_DEVICE_CALL_HANGUP,
                  active ? 1 : 0);
         return true;
-    }
-    if (command != TIRTC_SESSION_CMD_DEVICE_CALL_CONNECTED) {
-        return false;
     }
     if (data == NULL || data_len == 0U || data_len >= 256U) {
         return true;

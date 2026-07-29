@@ -20,6 +20,7 @@ idf_component_register(
     SRCS
         "app_main.c"
         "application/app.c"
+        "application/app_ai_device_action.c"
         "application/app_ai_chat_config.c"
         "application/app_audio_config.c"
         "application/app_call.c"

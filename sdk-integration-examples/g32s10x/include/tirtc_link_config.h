@@ -14,14 +14,15 @@
 #define TIRTC_LINK_WIFI_PASSWORD ""
 #define TIRTC_LINK_WIFI_CHANNEL 0
 
-/* Required TiRTC device identity and service endpoint. */
+/* TiRTC identity is required. Empty endpoint uses the SDK default service. */
 #define TIRTC_LINK_NTP_SERVER "ntp.aliyun.com"
-#define TIRTC_LINK_SERVICE_ENDPOINT "http://ep-tirtc.tange365.com"
+#define TIRTC_LINK_SERVICE_ENDPOINT ""
 #define TIRTC_LINK_DEVICE_ID ""
 #define TIRTC_LINK_DEVICE_SECRET ""
 
 /* Optional outbound connection. Keep disabled for an inbound-only device. */
 #define TIRTC_LINK_AUTO_CONNECT 0
+#define TIRTC_LINK_ENABLE_CONNECT_CACHE 1
 #define TIRTC_LINK_REMOTE_DEVICE_ID ""
 #define TIRTC_LINK_REMOTE_TOKEN ""
 

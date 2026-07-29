@@ -15,8 +15,9 @@ esp_err_t local_media_stream_prepare(void);
 esp_err_t local_media_stream_start_video(tirtc_conn_t hconn, uint8_t stream_id);
 esp_err_t local_media_stream_start_audio(tirtc_conn_t hconn, uint8_t stream_id);
 void local_media_stream_request_key_frame(tirtc_conn_t hconn);
+void local_media_stream_stop_video(tirtc_conn_t hconn, uint8_t stream_id);
+void local_media_stream_stop_audio(tirtc_conn_t hconn, uint8_t stream_id);
 void local_media_stream_stop(tirtc_conn_t hconn);
-void local_media_stream_stop_and_wait(tirtc_conn_t hconn, uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }

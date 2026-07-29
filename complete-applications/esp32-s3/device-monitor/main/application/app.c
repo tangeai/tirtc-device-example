@@ -13,10 +13,12 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "cJSON.h"
 
+#include "app_ai_device_action.h"
 #include "app_ai_chat_config.h"
 #include "app_audio_config.h"
 #include "app_config.h"
@@ -101,6 +103,7 @@ typedef enum {
 	APP_LIFECYCLE_EVENT_ENTER_APP = 1,
 	APP_LIFECYCLE_EVENT_RETURN_HOME,
 	APP_LIFECYCLE_EVENT_START_APP_SERVICES,
+	APP_LIFECYCLE_EVENT_AI_CHAT_CALL_DEVICE,
 } app_lifecycle_event_type_t;
 
 typedef struct {
@@ -115,6 +118,7 @@ typedef struct {
 typedef struct {
 	app_lifecycle_event_type_t type;
 	app_id_t app_id;
+	char call_target_device_id[APP_CALL_CONTACT_DEVICE_ID_MAX];
 } app_lifecycle_event_t;
 
 typedef struct {
@@ -122,6 +126,8 @@ typedef struct {
 } app_thing_bootstrap_context_t;
 
 static portMUX_TYPE s_app_lifecycle_lock = portMUX_INITIALIZER_UNLOCKED;
+static StaticSemaphore_t s_app_transition_mutex_buffer;
+static SemaphoreHandle_t s_app_transition_mutex;
 static QueueHandle_t s_app_control_queue;
 static TaskHandle_t s_app_control_task;
 static QueueHandle_t s_app_lifecycle_queue;
@@ -168,9 +174,12 @@ static esp_err_t app_configure_thing_service_registry(void)
 }
 
 static esp_err_t app_set_speaker_volume_internal(uint8_t percent, bool persist);
+static esp_err_t app_enter_app_locked(app_id_t app_id);
+static esp_err_t app_return_home_locked(void);
 static esp_err_t app_enter_app_sync(app_id_t app_id);
 static esp_err_t app_return_home_sync(void);
 static esp_err_t app_enqueue_lifecycle_event(app_lifecycle_event_type_t type, app_id_t app_id);
+static esp_err_t app_enqueue_ai_chat_call_lifecycle_event(const char *target_device_id);
 static esp_err_t app_start_app_services(app_id_t app_id);
 static esp_err_t app_prepare_rtc_after_time_sync(const char *reason);
 static esp_err_t app_prepare_rtc_after_config_if_ready(const char *reason);
@@ -207,6 +216,13 @@ static bool app_wechat_incoming_allowed(void *ctx);
 static esp_err_t app_configure_incoming_session_policy(void);
 static void app_device_call_session_ended(void *ctx);
 static void app_release_call_session_resources_if_idle(void);
+static esp_err_t app_ai_chat_device_action_cb(const ai_chat_device_action_t *action,
+					      ai_chat_device_action_result_t *result,
+					      void *ctx);
+static esp_err_t app_ai_chat_device_action_committed_cb(const ai_chat_device_action_t *action,
+						       const ai_chat_device_action_result_t *result,
+						       void *ctx);
+static void app_handle_ai_chat_call_device(const char *target_device_id);
 static void app_request_ai_chat_start_if_idle(const char *reason);
 static void app_begin_ai_chat_start_window(void);
 static void app_schedule_ai_chat_token_prefetch(const char *reason);
@@ -424,6 +440,9 @@ static esp_err_t app_build_ai_chat_config(ai_chat_config_t *config)
 	strlcpy(config->token_api_base,
 		thing_service_registry_ai_api_base(),
 		sizeof(config->token_api_base));
+	config->on_device_action = app_ai_chat_device_action_cb;
+	config->on_device_action_committed = app_ai_chat_device_action_committed_cb;
+	config->device_action_ctx = NULL;
 	if (device_identity_get(&identity) == ESP_OK) {
 		strlcpy(config->device_mac, identity.mac, sizeof(config->device_mac));
 	}
@@ -524,6 +543,92 @@ static esp_err_t app_configure_ai_chat(void)
 
 	ESP_RETURN_ON_ERROR(app_build_ai_chat_config(&config), TAG, "build ai chat config failed");
 	return ai_chat_configure(&config);
+}
+
+static esp_err_t app_ai_chat_device_action_cb(const ai_chat_device_action_t *action,
+					      ai_chat_device_action_result_t *result,
+					      void *ctx)
+{
+	(void)ctx;
+	if (result == NULL) {
+		return ESP_ERR_INVALID_ARG;
+	}
+	if (s_app_lifecycle_queue == NULL ||
+	    s_app_transition_mutex == NULL ||
+	    app_get_active_app() != APP_ID_AI_CHAT) {
+		memset(result, 0, sizeof(*result));
+		strlcpy(result->status, "busy", sizeof(result->status));
+		strlcpy(result->message, "应用正在切换，请稍后再试", sizeof(result->message));
+		return ESP_ERR_INVALID_STATE;
+	}
+	return app_ai_device_action_execute(action, result);
+}
+
+static esp_err_t app_ai_chat_device_action_committed_cb(const ai_chat_device_action_t *action,
+						       const ai_chat_device_action_result_t *result,
+						       void *ctx)
+{
+	(void)action;
+	(void)ctx;
+	if (result == NULL || !result->ok || !result->start_device_call ||
+	    result->target_device_id[0] == '\0') {
+		return ESP_ERR_INVALID_ARG;
+	}
+
+	return app_enqueue_ai_chat_call_lifecycle_event(result->target_device_id);
+}
+
+static void app_handle_ai_chat_call_device(const char *target_device_id)
+{
+	esp_err_t ret = ESP_OK;
+
+	if (target_device_id == NULL ||
+	    strlen(target_device_id) != APP_CALL_CONTACT_DEVICE_ID_LENGTH) {
+		ESP_LOGW(CALL_FLOW_TAG, "stage=ai_call_handoff_rejected reason=invalid_target");
+		return;
+	}
+	if (s_app_transition_mutex == NULL ||
+	    xSemaphoreTake(s_app_transition_mutex, portMAX_DELAY) != pdTRUE) {
+		ESP_LOGE(CALL_FLOW_TAG,
+			 "stage=ai_call_handoff_rejected peer=%s reason=transition_lock",
+			 target_device_id);
+		return;
+	}
+
+	if (app_get_active_app() != APP_ID_AI_CHAT) {
+		ESP_LOGW(CALL_FLOW_TAG,
+			 "stage=ai_call_handoff_rejected peer=%s reason=wrong_owner active=%s",
+			 target_device_id,
+			 app_id_name(app_get_active_app()));
+		ret = ESP_ERR_INVALID_STATE;
+	} else {
+		/*
+		 * This function runs only on app_lifecycle_task. Keep enter + call
+		 * submission in one transition transaction so no other synchronous
+		 * caller can interleave a home/app switch between the two operations.
+		 */
+		ESP_LOGI(CALL_FLOW_TAG, "stage=ai_call_handoff_begin peer=%s", target_device_id);
+		ret = app_enter_app_locked(APP_ID_CALL);
+		if (ret == ESP_OK) {
+			ret = app_call_contact(target_device_id);
+		}
+	}
+	xSemaphoreGive(s_app_transition_mutex);
+
+	if (ret == ESP_OK) {
+		esp_err_t display_ret = display_open_call_active_page_async();
+		if (display_ret != ESP_OK) {
+			ESP_LOGW(CALL_FLOW_TAG,
+				 "stage=ai_call_page_failed page=active ret=%s",
+				 esp_err_to_name(display_ret));
+		}
+	} else if (app_get_active_app() == APP_ID_CALL) {
+		(void)display_open_call_page_async();
+	}
+	ESP_LOGI(CALL_FLOW_TAG,
+		 "stage=ai_call_handoff_done peer=%s ret=%s",
+		 target_device_id,
+		 esp_err_to_name(ret));
 }
 
 static bool app_rtc_device_credentials_available(void)
@@ -1236,6 +1341,9 @@ static void app_lifecycle_task(void *arg)
 				}
 			}
 			break;
+		case APP_LIFECYCLE_EVENT_AI_CHAT_CALL_DEVICE:
+			app_handle_ai_chat_call_device(event.call_target_device_id);
+			break;
 		default:
 			ESP_LOGW(TAG, "unknown lifecycle event: type=%u", (unsigned)event.type);
 			break;
@@ -1245,6 +1353,13 @@ static void app_lifecycle_task(void *arg)
 
 static esp_err_t app_start_control_task(void)
 {
+	if (s_app_transition_mutex == NULL) {
+		s_app_transition_mutex = xSemaphoreCreateMutexStatic(&s_app_transition_mutex_buffer);
+		if (s_app_transition_mutex == NULL) {
+			return ESP_ERR_NO_MEM;
+		}
+	}
+
 	if (s_app_control_queue == NULL) {
 		s_app_control_queue = xQueueCreateWithCaps(APP_CONTROL_QUEUE_LENGTH,
 							   sizeof(app_control_event_t),
@@ -1307,8 +1422,37 @@ static esp_err_t app_enqueue_lifecycle_event(app_lifecycle_event_type_t type, ap
 		.app_id = app_id,
 	};
 
-	xQueueReset(s_app_lifecycle_queue);
+	/*
+	 * The lifecycle queue is the serialization boundary. Resetting it here can
+	 * silently discard an already accepted home/app/action transition.
+	 */
 	return xQueueSendToBack(s_app_lifecycle_queue, &event, 0) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t app_enqueue_ai_chat_call_lifecycle_event(const char *target_device_id)
+{
+	if (s_app_lifecycle_queue == NULL ||
+	    target_device_id == NULL ||
+	    strlen(target_device_id) != APP_CALL_CONTACT_DEVICE_ID_LENGTH) {
+		return ESP_ERR_INVALID_STATE;
+	}
+
+	app_lifecycle_event_t event = {
+		.type = APP_LIFECYCLE_EVENT_AI_CHAT_CALL_DEVICE,
+		.app_id = APP_ID_CALL,
+	};
+	strlcpy(event.call_target_device_id,
+		target_device_id,
+		sizeof(event.call_target_device_id));
+
+	/*
+	 * A successful JSON-RPC action response already promised that this
+	 * asynchronous handoff was accepted. Wait for queue space rather than
+	 * dropping that committed transition.
+	 */
+	return xQueueSendToBack(s_app_lifecycle_queue, &event, portMAX_DELAY) == pdTRUE ?
+		       ESP_OK :
+		       ESP_ERR_TIMEOUT;
 }
 
 static void app_request_rtc_reconfigure_after_settings_change(const char *reason)
@@ -2684,7 +2828,7 @@ void app_run(void)
 	}
 }
 
-static esp_err_t app_enter_app_sync(app_id_t app_id)
+static esp_err_t app_enter_app_locked(app_id_t app_id)
 {
 	if (app_id < APP_ID_HOME || app_id > APP_ID_SYSTEM) {
 		return ESP_ERR_INVALID_ARG;
@@ -2725,7 +2869,7 @@ static esp_err_t app_enter_app_sync(app_id_t app_id)
 	return ESP_OK;
 }
 
-static esp_err_t app_return_home_sync(void)
+static esp_err_t app_return_home_locked(void)
 {
 	app_id_t previous = app_get_active_app();
 
@@ -2739,6 +2883,32 @@ static esp_err_t app_return_home_sync(void)
 	app_set_active_app(APP_ID_HOME);
 	app_schedule_ai_chat_token_prefetch("home");
 	return ESP_OK;
+}
+
+static esp_err_t app_enter_app_sync(app_id_t app_id)
+{
+	if (s_app_transition_mutex == NULL) {
+		return ESP_ERR_INVALID_STATE;
+	}
+	if (xSemaphoreTake(s_app_transition_mutex, portMAX_DELAY) != pdTRUE) {
+		return ESP_ERR_TIMEOUT;
+	}
+	esp_err_t ret = app_enter_app_locked(app_id);
+	xSemaphoreGive(s_app_transition_mutex);
+	return ret;
+}
+
+static esp_err_t app_return_home_sync(void)
+{
+	if (s_app_transition_mutex == NULL) {
+		return ESP_ERR_INVALID_STATE;
+	}
+	if (xSemaphoreTake(s_app_transition_mutex, portMAX_DELAY) != pdTRUE) {
+		return ESP_ERR_TIMEOUT;
+	}
+	esp_err_t ret = app_return_home_locked();
+	xSemaphoreGive(s_app_transition_mutex);
+	return ret;
 }
 
 esp_err_t app_enter_app(app_id_t app_id)

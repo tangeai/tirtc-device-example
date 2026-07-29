@@ -7,8 +7,10 @@
 
 /*
  * ESP32-P4 runtime ownership:
- * - CPU0 carries network/control, camera uplink, and the H264 decoder caller.
- * - CPU1 carries LVGL/audio and the TinyH264 dual-task helper.
+ * - CPU0 carries network/control, camera uplink, and the bounded H264 decoder
+ *   caller. The decoder is allowed to outrank camera/video TX briefly so it
+ *   can preserve the remote H264 reference chain.
+ * - CPU1 carries LVGL/audio and the bounded TinyH264 dual-task helper.
  * - Frame conversion is SMP-migratable because it can run on either CPU and
  *   should consume whichever core has headroom at that instant.
  *

@@ -1,0 +1,6 @@
+*.a binary
+
+# Preserve the checksummed TiRTC SDK package bytes.
+components/tirtc_sdk/include/** -text -whitespace
+components/tirtc_sdk/manifest/** -text -whitespace
+components/tirtc_sdk/VERSION.md -text -whitespace

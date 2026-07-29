@@ -19,6 +19,8 @@
 #define AI_CHAT_STATUS_TEXT_MAX     96U
 #define AI_CHAT_MESSAGE_HISTORY_MAX 100
 #define AI_CHAT_MESSAGE_SNAPSHOT_MAX AI_CHAT_MESSAGE_HISTORY_MAX
+#define AI_CHAT_DEVICE_ACTION_STATUS_MAX 32U
+#define AI_CHAT_DEVICE_ACTION_MESSAGE_MAX 128U
 
 #if AI_CHAT_MESSAGE_HISTORY_MAX > 255
 #error "AI Chat message history count must fit in uint8_t"
@@ -41,6 +43,28 @@ typedef enum {
 } ai_chat_state_t;
 
 typedef struct {
+    char action[AI_CHAT_DEVICE_ACTION_NAME_MAX];
+    char target[AI_CHAT_DEVICE_ACTION_TARGET_MAX];
+    char call_type[AI_CHAT_DEVICE_ACTION_CALL_TYPE_MAX];
+} ai_chat_device_action_t;
+
+typedef struct {
+    bool ok;
+    bool start_device_call;
+    char status[AI_CHAT_DEVICE_ACTION_STATUS_MAX];
+    char message[AI_CHAT_DEVICE_ACTION_MESSAGE_MAX];
+    char target_device_id[AI_CHAT_DEVICE_ACTION_TARGET_MAX];
+    char matched_name[AI_CHAT_DEVICE_ACTION_TARGET_MAX];
+} ai_chat_device_action_result_t;
+
+typedef esp_err_t (*ai_chat_device_action_cb_t)(const ai_chat_device_action_t *action,
+                                                ai_chat_device_action_result_t *result,
+                                                void *ctx);
+typedef esp_err_t (*ai_chat_device_action_committed_cb_t)(const ai_chat_device_action_t *action,
+                                                          const ai_chat_device_action_result_t *result,
+                                                          void *ctx);
+
+typedef struct {
     bool enabled;
     char device_id[AI_CHAT_DEVICE_ID_MAX];
     char user_id[AI_CHAT_USER_ID_MAX];
@@ -48,6 +72,9 @@ typedef struct {
     char device_key[AI_CHAT_SECRET_MAX];
     char device_mac[AI_CHAT_DEVICE_MAC_MAX];
     char token_api_base[AI_CHAT_API_BASE_MAX];
+    ai_chat_device_action_cb_t on_device_action;
+    ai_chat_device_action_committed_cb_t on_device_action_committed;
+    void *device_action_ctx;
 } ai_chat_config_t;
 
 typedef struct {

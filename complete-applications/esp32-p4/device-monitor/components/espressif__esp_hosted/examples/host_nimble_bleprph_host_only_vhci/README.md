@@ -118,12 +118,12 @@ I (451) gpio: GPIO[16]| InputEn: 0| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldo
 I (461) gpio: GPIO[17]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
 I (470) H_API: ** add_esp_wifi_remote_channels **
 I (475) transport: Add ESP-Hosted channel IF[1]: S[0] Tx[0x4000d110] Rx[0x4001b4aa]
-0x4000d110: transport_drv_sta_tx at /home/kysoh/projects/esp_as_mcu_host/examples/bleprph_host_only_vhci/components/esp_hosted/host/drivers/transport/transport_drv.c:208
-0x4001b4aa: esp_wifi_remote_channel_rx at /home/kysoh/projects/esp_as_mcu_host/examples/bleprph_host_only_vhci/managed_components/espressif__esp_wifi_remote/esp_wifi_remote_net.c:19
+0x4000d110: transport_drv_sta_tx at <esp-hosted-source>/examples/bleprph_host_only_vhci/components/esp_hosted/host/drivers/transport/transport_drv.c:208
+0x4001b4aa: esp_wifi_remote_channel_rx at <esp-hosted-source>/examples/bleprph_host_only_vhci/managed_components/espressif__esp_wifi_remote/esp_wifi_remote_net.c:19
 
 I (484) transport: Add ESP-Hosted channel IF[2]: S[0] Tx[0x4000d058] Rx[0x4001b4aa]
-0x4000d058: transport_drv_ap_tx at /home/kysoh/projects/esp_as_mcu_host/examples/bleprph_host_only_vhci/components/esp_hosted/host/drivers/transport/transport_drv.c:238
-0x4001b4aa: esp_wifi_remote_channel_rx at /home/kysoh/projects/esp_as_mcu_host/examples/bleprph_host_only_vhci/managed_components/espressif__esp_wifi_remote/esp_wifi_remote_net.c:19
+0x4000d058: transport_drv_ap_tx at <esp-hosted-source>/examples/bleprph_host_only_vhci/components/esp_hosted/host/drivers/transport/transport_drv.c:238
+0x4001b4aa: esp_wifi_remote_channel_rx at <esp-hosted-source>/examples/bleprph_host_only_vhci/managed_components/espressif__esp_wifi_remote/esp_wifi_remote_net.c:19
 
 I (493) main_task: Started on CPU0
 I (503) main_task: Calling app_main()
