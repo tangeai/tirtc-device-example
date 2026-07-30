@@ -1,0 +1,12 @@
+build*/
+artifacts/
+release_assets/
+.vscode/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+firmware/
+*.pyc
+__pycache__/
+!components/tirtc_sdk/manifest/build-contract.env

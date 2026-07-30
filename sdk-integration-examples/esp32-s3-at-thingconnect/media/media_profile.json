@@ -1,0 +1,27 @@
+{
+  "audio": {
+    "file": "audio_g711a_8khz_mono_20ms_10s_500packets.g711a",
+    "codec": "g711a",
+    "sample_rate_hz": 8000,
+    "channels": 1,
+    "packet_ms": 20,
+    "duration_ms": 10000,
+    "packet_count": 500
+  },
+  "video": {
+    "file": "video_h264_annexb_640x480_15fps_10s_150frames.h264",
+    "codec": "h264",
+    "width": 640,
+    "height": 480,
+    "camera_rotation": 0,
+    "aspect_ratio": 1.3333333333,
+    "object_fit": "contain",
+    "hor_mirror": false,
+    "vert_mirror": false,
+    "fps": 15,
+    "duration_ms": 10000,
+    "frame_count": 150,
+    "uplink_enabled": true,
+    "downlink_enabled": true
+  }
+}

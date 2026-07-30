@@ -7,6 +7,28 @@
 Git `main` 保存源码、文档、必要脚本和 SDK 静态库；构建生成的固件、维护包和其他二进制
 附件不进入 Git 历史。
 
+## ESP32-S3 AT ThingConnect Demo 0.2.0
+
+独立 Release：
+[`esp32-s3-at-thingconnect-v0.2.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-at-thingconnect-v0.2.0)
+
+| 文件 | 用途 | 烧录地址 |
+| --- | --- | --- |
+| `esp32s3-tirtc-at-thingconnect-full-v0.2.0.bin` | ESP32-S3 完整镜像，包含 bootloader、分区表、OTA data、app 和预录媒体 storage | `0x0` |
+| `release-manifest.json` | 发布 commit、源码、SDK、构建、验证范围和资产哈希 | 不烧录 |
+| `SHA256SUMS.txt` | 下载完整性校验 | 不烧录 |
+
+本例不声明 OTA 升级合同，因此不发布单独 OTA app。设备侧配置和业务交互使用串口 AT；
+开发者平台账号登录及 6 位绑定码确认仍在平台 H5 完成。功能和体验步骤见项目
+[README](../sdk-integration-examples/esp32-s3-at-thingconnect/README.md) 与
+[使用说明](../sdk-integration-examples/esp32-s3-at-thingconnect/docs/USER_GUIDE_CN.md)。
+
+完整镜像的各分片地址来自该发布 commit 正式构建生成的 `flasher_args.json`，不能从本页或
+旧版本手工推导。源码静态核验、正式构建、目标板烧录、平台绑定、AI、设备呼叫和真实媒体
+分别记录证据；下载到完整镜像不等于这些运行时能力已经在任意目标板上自动通过。
+
+## 2026-07-30 Unified Release
+
 2026-07-30 Release 包含六个项目：
 
 | 项目 | 版本 | 发布交付 |

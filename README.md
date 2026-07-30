@@ -22,6 +22,7 @@
 | 平台 | 示例 | 版本 | TiRTC SDK | 来源版本 | Release 交付 |
 | --- | --- | --- | --- | --- | --- |
 | ESP32-S3 | [最小 TiRTC 集成示例](sdk-integration-examples/esp32-s3/README.md) | `1.2.0` | `2.2.1` | Tag `v1.2.0` / commit `44b24a5` | 源码与 `0x0` 完整镜像 |
+| ESP32-S3 | [AT ThingConnect 示例](sdk-integration-examples/esp32-s3-at-thingconnect/README.md) | `0.2.0` | `2.2.1` | Public tag `esp32-s3-at-thingconnect-v0.2.0` | 源码与 `0x0` 完整镜像 |
 | ESP32-P4 | [最小 TiRTC 集成示例](sdk-integration-examples/esp32-p4/README.md) | `1.1.1` | `2.2.1` | Tag `v1.1.1` / commit `0f36ddb` | 源码与 `0x0` 完整镜像 |
 | G32S10X | [最小 TiRTC 集成示例](sdk-integration-examples/g32s10x/README.md) | `0.8.3` | `2.2.1` | Tag `v0.8.3` / commit `b2abc22` | 源码与 `rtos-with-spl.bin` |
 
@@ -33,8 +34,10 @@
 | ESP32-P4 | [Device App](complete-applications/esp32-p4/device-monitor/README.md) | `1.2.3` | `2.3.0` | Tag `esp32-p4-device-app-v1.2.3` / commit `c1af1eb` | 本次按源码范围交付 |
 | G32S10X | [Device Monitor](complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | Tag `v0.1.1` / commit `5630152` | 源码、主固件与两个 YAFFS 镜像 |
 
-六个项目的版本、来源 Tag 和 commit 均已锁定。发布资产来自统一源码 commit 的正式干净
-构建，文件用途、大小、Flash 地址和 SHA-256 见当次 `release-manifest.json` 与
+2026-07-30 的六项目统一版本继续由 `tirtc-device-examples-v2026.07.30` 锁定。
+AT ThingConnect 示例使用独立项目 Tag；其开发交接目录没有上游 Git 历史，公开 Tag
+指向的提交就是首个正式源码身份。发布资产来自对应发布提交的正式干净构建，文件用途、
+大小、Flash 地址和 SHA-256 见当次 `release-manifest.json` 与
 [版本与证据清单](docs/VERSIONS_CN.md)。
 
 ## 选择路径
@@ -47,6 +50,9 @@
 - 网络、时间与 TiRTC 生命周期代码。
 - 连接、订阅、音视频测试流和断开示例。
 - 配置、版本、测试说明和来源边界。
+
+AT ThingConnect 示例与 ESP32-S3 最小示例平级，但它不是最小 API 调用集；它适合在不接入
+UI 和板级音视频驱动的情况下，用串口 AT 联调开发者平台绑定、AI 对讲和设备互呼。
 
 示例中的 Wi-Fi、设备 ID、Secret 和 Token 使用空值或占位符。正式产品应从安全存储或业务
 服务端提供凭据与 Token，不应把真实密钥提交到 Git。

@@ -3,9 +3,9 @@
 第一次接入 TiRTC，建议先选择目标平台的最小 TiRTC 集成示例。需要完整交互设备或演示样机时，
 再进入对应平台的完整应用。
 
-本次统一 Release 覆盖 ESP32-S3、ESP32-P4、G32S10X 三个平台，共三个最小 TiRTC 集成示例
-和三个完整应用。六个项目的来源 Tag、commit 和版本均已锁定；五个固件项目从统一源码
-commit 完成正式干净构建，P4 APP 按源码范围交付。
+2026-07-30 统一 Release 覆盖三个最小 TiRTC 集成示例和三个完整应用。ESP32-S3
+AT ThingConnect Demo `0.2.0` 随后以独立项目 Tag 发布，为纯串口 AT 控制的平台绑定、
+AI 对讲和设备互呼提供单独入口。
 
 ## SDK 接入路径
 
@@ -13,10 +13,11 @@ commit 完成正式干净构建，P4 APP 按源码范围交付。
 | --- | --- | --- | --- | --- |
 | 1 | [示例总览](../sdk-integration-examples/README.md) | - | - | 选择目标平台并了解验证边界 |
 | 2 | [ESP32-S3 最小 TiRTC 集成示例](../sdk-integration-examples/esp32-s3/README.md) | `1.2.0` | `2.2.1` | ESP-IDF、芯片本地 Wi-Fi 与 TiRTC 基础链路 |
-| 3 | [ESP32-P4 最小 TiRTC 集成示例](../sdk-integration-examples/esp32-p4/README.md) | `1.1.1` | `2.2.1` | ESP32-C6 Hosted/SDIO 与 P4 TiRTC 接入 |
-| 4 | [G32S10X 最小 TiRTC 集成示例](../sdk-integration-examples/g32s10x/README.md) | `0.8.3` | `2.2.1` | 君正 SDK 集成、ATBM Wi-Fi 与测试媒体流 |
+| 3 | [ESP32-S3 AT ThingConnect 示例](../sdk-integration-examples/esp32-s3-at-thingconnect/README.md) | `0.2.0` | `2.2.1` | 纯 AT 配网、绑定、AI 对讲与设备互呼 |
+| 4 | [ESP32-P4 最小 TiRTC 集成示例](../sdk-integration-examples/esp32-p4/README.md) | `1.1.1` | `2.2.1` | ESP32-C6 Hosted/SDIO 与 P4 TiRTC 接入 |
+| 5 | [G32S10X 最小 TiRTC 集成示例](../sdk-integration-examples/g32s10x/README.md) | `0.8.3` | `2.2.1` | 君正 SDK 集成、ATBM Wi-Fi 与测试媒体流 |
 
-三个示例均包含来源说明。请先阅读项目中的 `SOURCE_PROVENANCE.md`，再根据 README 配置本地
+四个示例均包含来源说明。请先阅读项目中的 `SOURCE_PROVENANCE.md`，再根据 README 配置本地
 凭据、构建并做真机验证。
 
 ## 完整应用路径
@@ -67,6 +68,9 @@ G32S10X 使用君正 Cloner。烧录文件和地址以当次 Release 的校验�
 
 | 文档 | 解决的问题 |
 | --- | --- |
+| [AT ThingConnect 使用说明](../sdk-integration-examples/esp32-s3-at-thingconnect/docs/USER_GUIDE_CN.md) | 纯 AT 配网、绑定、AI 和呼叫操作 |
+| [AI 呼叫设备体验流程](../sdk-integration-examples/esp32-s3-at-thingconnect/docs/EXPERIENCE_FLOW_CN.md) | AI 插件解析联系人并转普通呼叫 |
+| [AT ThingConnect 架构](../sdk-integration-examples/esp32-s3-at-thingconnect/docs/ARCHITECTURE_CN.md) | 控制面、平台、会话和媒体分层 |
 | [架构分层](../complete-applications/esp32-s3/device-monitor/docs/architecture/layering.md) | UI、应用、服务、协议和驱动的职责边界 |
 | [音频与媒体所有权](../complete-applications/esp32-s3/device-monitor/docs/architecture/audio_media_ownership.md) | H5、AI、微信 VoIP、设备互呼如何共享硬件资源 |
 | [AI 对讲](../complete-applications/esp32-s3/device-monitor/docs/ai_chat/README_CN.md) | AI 凭证、WHIP 会话、字幕和媒体链路 |

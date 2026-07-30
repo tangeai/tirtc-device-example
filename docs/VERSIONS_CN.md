@@ -4,6 +4,30 @@
 本地 Tag 锁定各项目来源版本；统一公开 commit 锁定筛选后的源码与文档，正式干净构建生成
 Release 资产并由 manifest 记录。
 
+## ESP32-S3 AT ThingConnect Demo 0.2.0
+
+| 分类 | 项目 | 发布仓路径 | 版本 | TiRTC SDK | 正式源码身份 |
+| --- | --- | --- | --- | --- | --- |
+| 协议示例 | ESP32-S3 AT ThingConnect 示例 | `sdk-integration-examples/esp32-s3-at-thingconnect` | `0.2.0` | `2.2.1` | Public tag `esp32-s3-at-thingconnect-v0.2.0` |
+
+开发交接来自没有 Git 历史的独立源码树，因此不虚构来源 Tag 或 commit。项目级公开 Tag
+所指向的统一仓 commit 是首个正式源码身份；当次 `release-manifest.json` 记录完整 commit、
+源码逐文件 SHA-256、正式构建命令和资产 SHA-256。
+
+本例的 TiRTC SDK build label 为
+`v2.2.1_tag_3a33bf4ae51b_1khz_http_20260729_105424`，ESP32-S3 archive 大小为
+`4908112` 字节，SHA-256 为
+`dc9f869194584fd43fe091f887342d170a1422e657ce1fc2a144c90a3ade1f8e`。
+它与同为 `2.2.1` 的 ESP32-S3 最小示例不是同一字节包，必须按项目各自的 SDK manifest
+和构建契约核对。
+
+| 来源交接 | 统一仓静态核验 | 正式构建 | 交付形态 |
+| --- | --- | --- | --- |
+| 独立源码树快照，公开 Tag 建立正式身份 | 目录、版本、SDK、媒体、文档、凭据和来源边界核验 | ESP-IDF `5.5.4` 隔离干净构建 | 源码与 `0x0` 完整镜像 |
+
+正式构建和串口目标板验证是分开的证据层。完整镜像只用于下载、烧录和继续集成，不把
+编译成功写成平台绑定、AI、呼叫或真实媒体硬件结论。
+
 ## 2026-07-30 Release
 
 | 分类 | 项目 | 发布仓路径 | 版本 | TiRTC SDK | 来源 Tag | 来源 commit |
