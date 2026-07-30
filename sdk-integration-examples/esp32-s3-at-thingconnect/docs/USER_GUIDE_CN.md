@@ -83,6 +83,13 @@ AT+WIFI="<ssid>","<password>"
 密码只用于写入 NVS，不会被查询命令、URC 或证据文件回显。等待：
 
 ```text
++SYSTEM:RESTARTING,<generation>,0,"wifi_config_changed"
+```
+
+该事件表示凭据已经写入并进入计划重启流程。等待设备重启，重新打开 AT
+串口并发送 `AT` 完成同步，再等待：
+
+```text
 +WIFI:ONLINE,...
 ```
 

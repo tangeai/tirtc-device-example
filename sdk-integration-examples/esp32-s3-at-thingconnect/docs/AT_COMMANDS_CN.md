@@ -66,6 +66,7 @@ AT+RESTART
 典型 URC：
 
 ```text
++SYSTEM:RESTARTING,<generation>,0,"wifi_config_changed"
 +WIFI:CONNECTING,<generation>,"ssid","0"
 +WIFI:ONLINE,<generation>,"192.0.2.10","0"
 +BIND:REQUIRED,<generation>,""
@@ -77,6 +78,8 @@ AT+RESTART
 
 Wi-Fi、绑定、平台和 TiRTC URC 都携带当前 generation；平台与 TiRTC
 URC 还携带状态码。主机应按完整字段数解析，不能只匹配前缀后的单个值。
+`AT+WIFI="ssid","password"` 成功写入后必经上述计划重启；主机应重新
+打开并同步 AT 串口，再等待 `+WIFI:ONLINE`，不能在原连接上直接假定上线。
 
 首次没有设备凭据时，收到 `+WIFI:ONLINE` 后必须继续等待
 `+BIND:REQUIRED`，再发送 `AT+BIND=START`。账号登录和 6 位码确认在

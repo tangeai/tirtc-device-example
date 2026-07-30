@@ -147,7 +147,10 @@ python .\tools\at_scenarios.py race-call-cancel `
   --iterations 20 --artifact-dir "${artifactRoot}-race-call-cancel-20"
 ```
 
-`at_scenarios.py` preflight 先用 `AT+BUILD?` 把每块板运行的 app ELF、
+`at_regression.py wifi` 会把 `WIFI_SET` 请求与同 generation 的
+`wifi_config_changed` 计划重启绑定；它只证明配置已写入并进入重启流程。
+紧随其后的 `at_scenarios.py` preflight 负责重新打开串口、等待平台上线，
+再用 `AT+BUILD?` 把每块板运行的 app ELF、
 ESP-IDF 和 TiRTC SDK 与 `--build-dir` 的本地 ELF/manifest 绑定，再进行
 业务测试。这个比对不证明板上的 bootloader、分区表、OTA data 和 storage
 镜像；它们必须由刷写记录和各自 SHA256 补齐。工具还会拒绝复用已有证据

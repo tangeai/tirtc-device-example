@@ -411,7 +411,13 @@ class EvidenceWriter:
 
 
 class AtDevice:
-    def __init__(self, port: str, evidence: EvidenceWriter, baudrate: int = 115200):
+    def __init__(
+        self,
+        port: str,
+        evidence: EvidenceWriter,
+        baudrate: int = 115200,
+        planned_restart_details: Iterable[str] = (),
+    ):
         self.port = port
         self.baudrate = baudrate
         self.evidence = evidence
@@ -430,6 +436,7 @@ class AtDevice:
         self._restart_protocol_errors = 0
         self._expected_restart_events: list[SystemEvent] = []
         self._boot_events: list[SystemEvent] = []
+        self._planned_restart_details = list(planned_restart_details)
         self._transport_error: Exception | None = None
         self._write_lock = threading.Lock()
         self._reader: threading.Thread | None = None
@@ -506,6 +513,8 @@ class AtDevice:
             try:
                 chunk = self._serial.read(256)
             except (OSError, SerialException) as exc:
+                if self._stop.is_set():
+                    return
                 with self._condition:
                     self._transport_failures += 1
                     self._transport_error = exc
@@ -576,10 +585,19 @@ class AtDevice:
                                 detail=detail,
                             )
                             if system_name == "RESTARTING":
+                                planned = (
+                                    valid
+                                    and detail in self._planned_restart_details
+                                )
+                                if planned:
+                                    self._planned_restart_details.remove(detail)
                                 if (
                                     valid
-                                    and detail
-                                    == "tirtc_failed_connect_transport"
+                                    and (
+                                        planned
+                                        or detail
+                                        == "tirtc_failed_connect_transport"
+                                    )
                                 ):
                                     self._expected_restarts += 1
                                     self._expected_restart_events.append(
@@ -639,6 +657,9 @@ class AtDevice:
                 "expected_restarts": self._expected_restarts,
                 "unexpected_restarts": self._unexpected_restarts,
                 "restart_protocol_errors": self._restart_protocol_errors,
+                "pending_planned_restarts": len(
+                    self._planned_restart_details
+                ),
                 "boot_events": len(self._boot_events),
                 "transport_stopped": self._transport_error is not None,
             }
@@ -667,6 +688,7 @@ class AtDevice:
             or health["reconnects"] != expected_reconnects
             or health["unexpected_restarts"] != 0
             or health["restart_protocol_errors"] != 0
+            or health["pending_planned_restarts"] != 0
             or health["expected_restarts"] != expected_restarts
             or health["transport_stopped"]
         )
@@ -932,7 +954,33 @@ def run_wifi(devices: Iterable[AtDevice]) -> None:
     command = f"AT+WIFI={quote_at(ssid)},{quote_at(password)}"
     for device in devices:
         device.synchronize()
-        device.send(command)
+        expected_epoch, before = device.checkpoint()
+        request = device.submit_intent(command, "WIFI_SET")
+
+        def is_wifi_restart(line: AtLine) -> bool:
+            fields = parse_csv_urc(line.text, "+SYSTEM:")
+            if fields is None or len(fields) != 4:
+                return False
+            try:
+                generation = int(fields[1])
+                status = int(fields[2])
+            except ValueError:
+                return False
+            return (
+                fields[0] == "RESTARTING"
+                and generation == request.app_generation
+                and status == 0
+                and fields[3] == "wifi_config_changed"
+            )
+
+        device.wait_for(
+            is_wifi_restart,
+            timeout=10.0,
+            description="planned Wi-Fi configuration restart",
+            after=before,
+            expected_epoch=expected_epoch,
+        )
+        device.close()
 
 
 def parse_args() -> argparse.Namespace:
@@ -955,7 +1003,19 @@ def main() -> int:
     if args.action == "command" and not args.command:
         raise RuntimeError("--command is required for the command action")
     evidence = EvidenceWriter(args.artifact_dir)
-    devices = [AtDevice(port, evidence) for port in args.port]
+    planned_restarts = (
+        ("wifi_config_changed",)
+        if args.action == "wifi"
+        else ()
+    )
+    devices = [
+        AtDevice(
+            port,
+            evidence,
+            planned_restart_details=planned_restarts,
+        )
+        for port in args.port
+    ]
     try:
         for device in devices:
             device.open()
@@ -974,7 +1034,9 @@ def main() -> int:
         else:
             time.sleep(args.duration)
         for device in devices:
-            device.assert_healthy()
+            device.assert_healthy(
+                expected_restarts=1 if args.action == "wifi" else 0
+            )
         evidence.record("summary", "-", f"{args.action}:passed")
         print(f"evidence={evidence.path.resolve()}")
         return 0

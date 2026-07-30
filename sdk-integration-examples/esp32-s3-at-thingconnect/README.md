@@ -59,7 +59,8 @@ OPI PSRAM 是硬件依赖。普通 `malloc/calloc` 以 512 字节为分配阈值
 2. 发送 `AT`，应返回 `OK`。
 3. 发送 `AT+BUILD?`，记录运行 app 与 TiRTC SDK 身份。
 4. 发送 `AT+WIFI="ssid","password"`。
-5. 收到 `+WIFI:ONLINE` 后继续等待
+5. 收到 `+SYSTEM:RESTARTING,<generation>,0,"wifi_config_changed"` 后等待
+   设备重启，重新打开并同步 AT 串口；收到 `+WIFI:ONLINE` 后继续等待
    `+BIND:REQUIRED,<generation>,""`，再发送 `AT+BIND=START`；过早发送会
    因状态尚未进入 `NEED_BINDING` 而被拒绝。
 6. 将 `+BIND:CODE,<generation>,"xxxxxx"` 中的验证码输入开发者平台
