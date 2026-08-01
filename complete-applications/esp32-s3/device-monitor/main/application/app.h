@@ -27,6 +27,7 @@
 #define APP_CALL_CONTACT_REMARK_MAX 64
 #define APP_WECHAT_CONTACT_MAX   3
 #define APP_WECHAT_OPEN_ID_MAX   96
+#define APP_WECHAT_REMARK_MAX    64
 
 typedef enum {
 	APP_RTC_CONFIG_FIELD_DEVICE_ID = 0,
@@ -207,6 +208,7 @@ typedef struct {
 
 typedef struct {
 	char open_id[APP_WECHAT_OPEN_ID_MAX];
+	char remark[APP_WECHAT_REMARK_MAX];
 } app_wechat_contact_t;
 
 typedef enum {
@@ -284,6 +286,7 @@ esp_err_t app_reset_device_binding(void);
 esp_err_t app_set_rtc_server_env(app_rtc_server_env_t env);
 
 esp_err_t app_call_contact(const char *device_id);
+esp_err_t app_call_contact_with_type(const char *device_id, const char *call_type);
 esp_err_t app_add_call_contact(const char *device_id);
 esp_err_t app_respond_call_contact(const char *device_id, bool accept);
 esp_err_t app_update_call_contact_remark(const char *device_id, const char *remark);
@@ -305,6 +308,7 @@ esp_err_t app_reject_call(void);
 esp_err_t app_wechat_call_contact(const char *open_id);
 esp_err_t app_wechat_add_contact(const char *open_id);
 esp_err_t app_wechat_remove_contact(const char *open_id);
+esp_err_t app_wechat_update_contact_remark(const char *open_id, const char *remark);
 esp_err_t app_scan_wechat_contact(void);
 esp_err_t app_start_wechat_contact_scan(app_scan_preview_cb_t preview_cb,
 					app_wechat_contact_scan_result_cb_t result_cb,

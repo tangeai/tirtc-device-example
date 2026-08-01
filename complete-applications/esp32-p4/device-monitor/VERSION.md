@@ -3,13 +3,14 @@
 | 项目 | 内容 |
 | --- | --- |
 | 应用工程 | TiRTC ESP32-P4 Device App |
-| 应用版本 | `1.2.3` |
-| 发布日期 | `2026-07-30` |
-| 来源 Tag | `esp32-p4-device-app-v1.2.3` |
-| 来源 commit | `c1af1eb1bcfa9da4b359ee24d25afb30f75d24b0` |
+| 应用版本 | `1.3.0` |
+| 发布日期 | `2026-07-31` |
+| 来源 Tag | `esp32-p4-device-app-v1.3.0` |
+| 来源 commit | `dacf8e65b25ea4d0282fc9314e46a18607691fb4` |
 | 发布范围 | 源码、必要配置和公开文档 |
 | 目标芯片 | ESP32-P4 |
 | 目标开发板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |
+| 网络架构 | ESP32-P4 host + ESP32-C6 ESP-Hosted/SDIO slave |
 | ESP-IDF | `5.5.4` |
 | TiRTC SDK | `2.3.0` |
 | SDK 来源标识 | ESP32-P4 test package |
@@ -34,7 +35,15 @@
 ## 版本能力
 
 - IPC H264 上行、设备间双向音视频、微信 H264 上行与 MJPEG 下行。
-- AI Chat H264 视频流和音频流分离发送。
+- AI Chat H264 视频流和音频流分离发送，并支持联系人状态查询、设备联系人及微信联系人
+  的音频/视频呼叫。
+- AI 设备动作通过应用生命周期异步路由，呼叫类型从 AI 请求贯通到设备呼叫和微信 VoIP。
+- 微信联系人兼容 `data.contacts`、`data.list` 和字段别名，支持备注更新与权威列表刷新。
+- 设备呼叫和微信 VoIP 场景中，P4 设备向服务端发送 `480x320@15fps` H264；微信下行
+  请求服务端提供 `640x480` MJPEG，并居中 `cover` 显示到 `480x320` 屏幕。
+- IPC 场景保持 `1280x960@20fps`、`4Mbps` H264 上行。微信手机端采集分辨率不由本工程
+  配置，本版本没有把它声明为 720p。
+- 微信远端视频订阅成功后若 `1s` 内没有首个视频包，仅补发一次幂等订阅请求。
 - AEC 使用 codec 同步参考，硬件参考不可用时使用 `80ms` 软件回退。
 - 音频播放使用自适应缓冲控制器。
 - TiRTC 2.3 TGMP 码率反馈接口已经接入；SDK 码率自适应和旧的本地自动弱网降级默认关闭。
@@ -48,5 +57,8 @@
 ## 发布边界
 
 本版本按源码范围交付，不生成或发布 P4 APP BIN。来源选择、公开筛选和静态核验结果见
-[SOURCE_PROVENANCE.md](SOURCE_PROVENANCE.md)。构建、烧录和目标板运行证据与本版本静态
-来源记录分开管理。
+[SOURCE_PROVENANCE.md](SOURCE_PROVENANCE.md)。来源 Tag 固定源码、配置和 SDK 文件；构建
+成功可提供编译与链接证据，烧录、ESP-Hosted/SDIO、联网和业务运行结果由目标板验证单独确认。
+
+从源码构建、烧录和首次联网的完整步骤见
+[开发者上手指南](docs/GETTING_STARTED_CN.md)。

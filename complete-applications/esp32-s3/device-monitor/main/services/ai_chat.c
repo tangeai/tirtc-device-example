@@ -25,6 +25,7 @@
 #include "tiRTC.h"
 
 static const char *TAG = "ai_chat";
+static const char *DIALOG_TAG = "ai_dialog";
 
 #define AI_CHAT_SIGNALING_CMD         0x2100U
 #define AI_CHAT_AUDIO_STREAM_ID       1U
@@ -1030,6 +1031,19 @@ static void ai_chat_device_action_set_result(ai_chat_device_action_result_t *res
     ai_chat_copy_str(result->message, sizeof(result->message), message);
 }
 
+static const char *ai_chat_device_action_route_name(ai_chat_device_action_route_t route)
+{
+    switch (route) {
+    case AI_CHAT_DEVICE_ACTION_ROUTE_DEVICE_CALL:
+        return "device_call";
+    case AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP:
+        return "wechat_voip";
+    case AI_CHAT_DEVICE_ACTION_ROUTE_NONE:
+    default:
+        return "none";
+    }
+}
+
 static int ai_chat_device_action_error_code(const ai_chat_device_action_result_t *result)
 {
     const char *status = result != NULL ? result->status : NULL;
@@ -1038,7 +1052,9 @@ static int ai_chat_device_action_error_code(const ai_chat_device_action_result_t
         return AI_CHAT_DEVICE_ACTION_ERROR_INTERNAL;
     }
     if (strcmp(status, "unsupported") == 0 ||
-        strcmp(status, "unsupported_call_type") == 0) {
+        strcmp(status, "unsupported_call_type") == 0 ||
+        strcmp(status, "unsupported_contact_type") == 0 ||
+        strcmp(status, "wechat_status_unsupported") == 0) {
         return AI_CHAT_DEVICE_ACTION_ERROR_UNSUPPORTED;
     }
     if (strcmp(status, "busy") == 0) {
@@ -1051,10 +1067,13 @@ static int ai_chat_device_action_error_code(const ai_chat_device_action_result_t
         strcmp(status, "network_offline") == 0) {
         return AI_CHAT_DEVICE_ACTION_ERROR_TARGET;
     }
-    if (strcmp(status, "missing_target") == 0) {
+    if (strcmp(status, "missing_target") == 0 ||
+        strcmp(status, "unsupported_status_filter") == 0) {
         return AI_CHAT_DEVICE_ACTION_ERROR_INVALID;
     }
-    if (strcmp(status, "contacts_loading") == 0) {
+    if (strcmp(status, "contacts_loading") == 0 ||
+        strcmp(status, "contacts_unavailable") == 0 ||
+        strcmp(status, "service_loading") == 0) {
         return AI_CHAT_DEVICE_ACTION_ERROR_LOADING;
     }
     return AI_CHAT_DEVICE_ACTION_ERROR_INTERNAL;
@@ -1068,6 +1087,7 @@ static char *ai_chat_build_device_action_result_json(const char *id_json,
     cJSON *payload = NULL;
     cJSON *error = NULL;
     cJSON *data = NULL;
+    cJSON *contacts = NULL;
     char *json = NULL;
 
     if (root == NULL || id_json == NULL || result == NULL) {
@@ -1098,11 +1118,41 @@ static char *ai_chat_build_device_action_result_json(const char *id_json,
         cJSON_AddStringToObject(payload,
                                 "message",
                                 result->message[0] != '\0' ? result->message : "已开始处理");
-        if (result->target_device_id[0] != '\0') {
-            cJSON_AddStringToObject(payload, "target_device_id", result->target_device_id);
+        if (result->call_route != AI_CHAT_DEVICE_ACTION_ROUTE_NONE) {
+            cJSON_AddStringToObject(payload,
+                                    "contact_type",
+                                    ai_chat_device_action_route_name(result->call_route));
+        }
+        if (result->call_type[0] != '\0') {
+            cJSON_AddStringToObject(payload, "call_type", result->call_type);
+        }
+        if (result->call_route == AI_CHAT_DEVICE_ACTION_ROUTE_DEVICE_CALL &&
+            result->target_id[0] != '\0') {
+            cJSON_AddStringToObject(payload, "target_device_id", result->target_id);
         }
         if (result->matched_name[0] != '\0') {
             cJSON_AddStringToObject(payload, "matched_name", result->matched_name);
+        }
+        if (result->has_contacts_result) {
+            cJSON_AddNumberToObject(payload, "count", result->contact_count);
+            contacts = cJSON_AddArrayToObject(payload, "contacts");
+            if (contacts == NULL) {
+                cJSON_Delete(root);
+                return NULL;
+            }
+            for (uint8_t index = 0U; index < result->contact_count; ++index) {
+                const ai_chat_device_action_contact_t *source = &result->contacts[index];
+                cJSON *contact = cJSON_CreateObject();
+
+                if (contact == NULL) {
+                    cJSON_Delete(root);
+                    return NULL;
+                }
+                cJSON_AddStringToObject(contact, "name", source->name);
+                cJSON_AddStringToObject(contact, "device_id", source->device_id);
+                cJSON_AddBoolToObject(contact, "online", source->online);
+                cJSON_AddItemToArray(contacts, contact);
+            }
         }
         cJSON_AddItemToObject(root, "result", payload);
     } else {
@@ -1852,25 +1902,27 @@ static void ai_chat_heartbeat_task(void *ctx)
     ai_chat_delete_current_task_with_caps();
 }
 
-static void ai_chat_send_device_action_failure(tirtc_conn_t conn,
-                                               const char *id_json,
-                                               const char *status,
-                                               const char *message)
+static esp_err_t ai_chat_send_device_action_failure(tirtc_conn_t conn,
+                                                    const char *id_json,
+                                                    const char *status,
+                                                    const char *message)
 {
     ai_chat_device_action_result_t result = {0};
     char *json = NULL;
+    esp_err_t ret = ESP_ERR_INVALID_ARG;
 
     if (conn == NULL || id_json == NULL || id_json[0] == '\0') {
-        return;
+        return ret;
     }
 
     ai_chat_device_action_set_result(&result, false, status, message);
     json = ai_chat_build_device_action_result_json(id_json, &result);
     if (json == NULL) {
-        return;
+        return ESP_ERR_NO_MEM;
     }
-    (void)ai_chat_send_json(conn, json);
+    ret = ai_chat_send_json(conn, json);
     free(json);
+    return ret;
 }
 
 static void ai_chat_device_action_task(void *arg)
@@ -1944,17 +1996,30 @@ static void ai_chat_device_action_task(void *arg)
         free(json);
     }
 
-    ESP_LOGI(TAG,
-             "AI Chat device_action: action=%s target_len=%u status=%s ok=%d send=%s",
+    ESP_LOGI(DIALOG_TAG,
+             "device_action up: rpc_id=%s action=%s ok=%d status=%s route=%s call_type=%s count=%u message=\"%s\" send=%s",
+             action_ctx->jsonrpc_id_json,
              action_ctx->action.action[0] != '\0' ? action_ctx->action.action : "(empty)",
-             (unsigned)strlen(action_ctx->action.target),
-             result.status[0] != '\0' ? result.status : (result.ok ? "ok" : "failed"),
              result.ok ? 1 : 0,
+             result.status[0] != '\0' ? result.status : (result.ok ? "ok" : "failed"),
+             ai_chat_device_action_route_name(result.call_route),
+             result.call_type[0] != '\0' ? result.call_type : "(none)",
+             (unsigned)result.contact_count,
+             result.message[0] != '\0' ? result.message : "",
              esp_err_to_name(ret));
+    for (uint8_t index = 0U; index < result.contact_count; ++index) {
+        ESP_LOGI(DIALOG_TAG,
+                 "device_action contact: rpc_id=%s index=%u name=\"%s\" online=%d",
+                 action_ctx->jsonrpc_id_json,
+                 (unsigned)index,
+                 result.contacts[index].name,
+                 result.contacts[index].online ? 1 : 0);
+    }
 
     if (ret == ESP_OK &&
         result.ok &&
-        result.start_device_call &&
+        result.call_route != AI_CHAT_DEVICE_ACTION_ROUTE_NONE &&
+        result.target_id[0] != '\0' &&
         committed_cb != NULL) {
         /*
          * TiRtcSendCommand has accepted the complete JSON-RPC response at this
@@ -2032,6 +2097,12 @@ static esp_err_t ai_chat_schedule_device_action(tirtc_conn_t conn, const ai_chat
     ai_chat_copy_str(action_ctx->action.call_type,
                      sizeof(action_ctx->action.call_type),
                      event->call_type);
+    ai_chat_copy_str(action_ctx->action.contact_type,
+                     sizeof(action_ctx->action.contact_type),
+                     event->contact_type);
+    ai_chat_copy_str(action_ctx->action.status_filter,
+                     sizeof(action_ctx->action.status_filter),
+                     event->status_filter);
 
     BaseType_t task_ret = xTaskCreatePinnedToCoreWithCaps(ai_chat_device_action_task,
                                                           "ai_action",
@@ -2440,7 +2511,9 @@ finish:
     ai_chat_delete_current_task_with_caps();
 }
 
-static void ai_chat_apply_caption_locked(const ai_chat_event_t *event)
+static bool ai_chat_apply_caption_locked(const ai_chat_event_t *event,
+                                         char *final_text,
+                                         size_t final_text_size)
 {
     ai_chat_caption_merge_trace_t trace = {0};
     char old_text[AI_CHAT_CAPTION_TEXT_MAX];
@@ -2448,13 +2521,18 @@ static void ai_chat_apply_caption_locked(const ai_chat_event_t *event)
     size_t raw_preview_len = 0;
     size_t merged_preview_len = 0;
     bool group_reset = false;
+    bool should_log_final = false;
+
+    if (final_text != NULL && final_text_size > 0U) {
+        final_text[0] = '\0';
+    }
 
     if (event == NULL || event->caption_type < 0 || event->caption_type > 1) {
-        return;
+        return false;
     }
     if (event->text[0] == '\0') {
         ai_chat_set_state_locked(s_ai.state, "empty caption");
-        return;
+        return false;
     }
 
     ai_chat_caption_group_t *group = &s_ai.captions[event->caption_type];
@@ -2495,11 +2573,22 @@ static void ai_chat_apply_caption_locked(const ai_chat_event_t *event)
              group->text);
 
     group->final = event->is_final;
+    if (event->is_final) {
+        int existing_index = ai_chat_find_message_locked(event->caption_type,
+                                                         event->utterance_id,
+                                                         group->text);
+        should_log_final = existing_index < 0 ||
+                           !s_ai.messages[existing_index].final;
+        if (should_log_final && final_text != NULL && final_text_size > 0U) {
+            ai_chat_copy_str(final_text, final_text_size, group->text);
+        }
+    }
     ai_chat_update_message_locked(event->caption_type,
                                   event->utterance_id,
                                   group->text,
                                   event->is_final);
     ai_chat_set_state_locked(s_ai.state, event->is_final ? "caption final" : "caption");
+    return should_log_final;
 }
 
 static bool ai_chat_caption_is_rest_hint(const ai_chat_event_t *event)
@@ -2589,15 +2678,25 @@ static void ai_chat_handle_event(tirtc_conn_t conn, const ai_chat_event_t *event
     {
         bool should_close_after_rest = false;
         bool rest_hint = ai_chat_caption_is_rest_hint(event);
+        bool should_log_dialog = false;
+        char dialog_text[AI_CHAT_CAPTION_TEXT_MAX] = {0};
 
         xSemaphoreTake(s_lock, portMAX_DELAY);
-        ai_chat_apply_caption_locked(event);
+        should_log_dialog = ai_chat_apply_caption_locked(event,
+                                                         dialog_text,
+                                                         sizeof(dialog_text));
         if (rest_hint && s_ai.conn == conn) {
             s_ai.resting_requested = true;
             should_close_after_rest = !s_ai.cloud_speaking;
             ai_chat_set_state_locked(s_ai.state, "rest requested");
         }
         xSemaphoreGive(s_lock);
+        if (should_log_dialog) {
+            ESP_LOGI(DIALOG_TAG,
+                     "%s: %s",
+                     event->caption_type == 0 ? "user" : "assistant",
+                     dialog_text);
+        }
         if (should_close_after_rest) {
             ESP_LOGI(TAG, "AI Chat rest hint received, closing session");
             (void)ai_chat_close();
@@ -2642,6 +2741,14 @@ static void ai_chat_handle_event(tirtc_conn_t conn, const ai_chat_event_t *event
         break;
     case AI_CHAT_EVENT_DEVICE_ACTION:
     {
+        ESP_LOGI(DIALOG_TAG,
+                 "device_action down: rpc_id=%s action=%s target=\"%s\" status_filter=%s call_type=%s contact_type=%s",
+                 event->jsonrpc_id_json[0] != '\0' ? event->jsonrpc_id_json : "(missing)",
+                 event->action[0] != '\0' ? event->action : "(empty)",
+                 event->target,
+                 event->status_filter[0] != '\0' ? event->status_filter : "(default)",
+                 event->call_type[0] != '\0' ? event->call_type : "(default)",
+                 event->contact_type[0] != '\0' ? event->contact_type : "(default)");
         esp_err_t ret = ai_chat_schedule_device_action(conn, event);
         if (ret != ESP_OK) {
             const char *status = ret == ESP_ERR_NO_MEM ? "internal" :
@@ -2655,10 +2762,17 @@ static void ai_chat_handle_event(tirtc_conn_t conn, const ai_chat_event_t *event
                      "AI Chat device_action rejected locally: action=%s ret=%s",
                      event->action,
                      esp_err_to_name(ret));
-            ai_chat_send_device_action_failure(conn,
-                                               event->jsonrpc_id_json,
-                                               status,
-                                               message);
+            esp_err_t send_ret = ai_chat_send_device_action_failure(conn,
+                                                                    event->jsonrpc_id_json,
+                                                                    status,
+                                                                    message);
+            ESP_LOGI(DIALOG_TAG,
+                     "device_action up: rpc_id=%s action=%s ok=0 status=%s route=none count=0 message=\"%s\" send=%s",
+                     event->jsonrpc_id_json[0] != '\0' ? event->jsonrpc_id_json : "(missing)",
+                     event->action[0] != '\0' ? event->action : "(empty)",
+                     status,
+                     message,
+                     esp_err_to_name(send_ret));
         }
         break;
     }

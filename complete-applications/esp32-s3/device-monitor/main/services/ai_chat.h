@@ -21,6 +21,8 @@
 #define AI_CHAT_MESSAGE_SNAPSHOT_MAX AI_CHAT_MESSAGE_HISTORY_MAX
 #define AI_CHAT_DEVICE_ACTION_STATUS_MAX 32U
 #define AI_CHAT_DEVICE_ACTION_MESSAGE_MAX 128U
+#define AI_CHAT_DEVICE_ACTION_CONTACT_MAX 8U
+#define AI_CHAT_DEVICE_ACTION_CONTACT_NAME_MAX 64U
 
 #if AI_CHAT_MESSAGE_HISTORY_MAX > 255
 #error "AI Chat message history count must fit in uint8_t"
@@ -46,15 +48,33 @@ typedef struct {
     char action[AI_CHAT_DEVICE_ACTION_NAME_MAX];
     char target[AI_CHAT_DEVICE_ACTION_TARGET_MAX];
     char call_type[AI_CHAT_DEVICE_ACTION_CALL_TYPE_MAX];
+    char contact_type[AI_CHAT_DEVICE_ACTION_CONTACT_TYPE_MAX];
+    char status_filter[AI_CHAT_DEVICE_ACTION_STATUS_FILTER_MAX];
 } ai_chat_device_action_t;
+
+typedef enum {
+    AI_CHAT_DEVICE_ACTION_ROUTE_NONE = 0,
+    AI_CHAT_DEVICE_ACTION_ROUTE_DEVICE_CALL,
+    AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP,
+} ai_chat_device_action_route_t;
+
+typedef struct {
+    char name[AI_CHAT_DEVICE_ACTION_CONTACT_NAME_MAX];
+    char device_id[AI_CHAT_DEVICE_ACTION_TARGET_MAX];
+    bool online;
+} ai_chat_device_action_contact_t;
 
 typedef struct {
     bool ok;
-    bool start_device_call;
+    bool has_contacts_result;
+    ai_chat_device_action_route_t call_route;
+    uint8_t contact_count;
     char status[AI_CHAT_DEVICE_ACTION_STATUS_MAX];
     char message[AI_CHAT_DEVICE_ACTION_MESSAGE_MAX];
-    char target_device_id[AI_CHAT_DEVICE_ACTION_TARGET_MAX];
+    char target_id[AI_CHAT_DEVICE_ACTION_TARGET_MAX];
     char matched_name[AI_CHAT_DEVICE_ACTION_TARGET_MAX];
+    char call_type[AI_CHAT_DEVICE_ACTION_CALL_TYPE_MAX];
+    ai_chat_device_action_contact_t contacts[AI_CHAT_DEVICE_ACTION_CONTACT_MAX];
 } ai_chat_device_action_result_t;
 
 typedef esp_err_t (*ai_chat_device_action_cb_t)(const ai_chat_device_action_t *action,

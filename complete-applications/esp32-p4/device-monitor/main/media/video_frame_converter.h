@@ -35,6 +35,9 @@ typedef struct {
     uint16_t source_crop_width;
     uint16_t source_crop_height;
     video_frame_fit_mode_t fit_mode;
+    /* Keep sources smaller than the viewport at native size and center them
+     * instead of manufacturing detail through upscaling. */
+    bool prevent_upscale;
     bool output_rgb565_byte_swap;
 } video_frame_converter_config_t;
 
@@ -54,6 +57,10 @@ typedef struct {
     uint16_t last_crop_y;
     uint16_t last_crop_width;
     uint16_t last_crop_height;
+    uint16_t last_render_width;
+    uint16_t last_render_height;
+    uint16_t last_offset_x;
+    uint16_t last_offset_y;
 } video_frame_converter_stats_t;
 
 esp_err_t video_frame_converter_create(const video_frame_converter_config_t *config,

@@ -26,6 +26,7 @@
 #define DISPLAY_CALL_CONTACT_REMARK_MAX 64
 #define DISPLAY_WECHAT_CONTACT_MAX  3
 #define DISPLAY_WECHAT_OPEN_ID_MAX  96
+#define DISPLAY_WECHAT_REMARK_MAX   64
 
 typedef enum {
     DISPLAY_OTA_STATE_IDLE = 0,
@@ -96,6 +97,7 @@ typedef struct {
 
 typedef struct {
     char open_id[DISPLAY_WECHAT_OPEN_ID_MAX];
+    char remark[DISPLAY_WECHAT_REMARK_MAX];
 } display_wechat_contact_t;
 
 typedef struct {
@@ -238,6 +240,9 @@ typedef esp_err_t (*display_wechat_contact_scan_start_cb_t)(display_scan_preview
                                                             void *ctx);
 typedef esp_err_t (*display_wechat_action_cb_t)(void *ctx);
 typedef esp_err_t (*display_wechat_contact_cb_t)(const char *open_id, void *ctx);
+typedef esp_err_t (*display_wechat_contact_remark_cb_t)(const char *open_id,
+                                                        const char *remark,
+                                                        void *ctx);
 typedef esp_err_t (*display_tirtc_config_update_cb_t)(display_tirtc_config_field_t field,
                                                       const char *value,
                                                       void *ctx);
@@ -274,6 +279,7 @@ typedef struct {
     display_wechat_contact_cb_t on_wechat_contact;
     display_wechat_contact_cb_t on_add_wechat_contact;
     display_wechat_contact_cb_t on_remove_wechat_contact;
+    display_wechat_contact_remark_cb_t on_update_wechat_contact_remark;
     display_simple_action_cb_t on_scan_wechat_contact;
     display_wechat_contact_scan_start_cb_t on_start_wechat_contact_scan;
     display_simple_action_cb_t on_stop_wechat_contact_scan;
@@ -301,5 +307,7 @@ esp_err_t display_debug_tap_async(uint16_t x, uint16_t y);
 esp_err_t display_debug_scroll_async(uint16_t x, uint16_t y, int16_t dx, int16_t dy);
 esp_err_t display_open_call_page_async(void);
 esp_err_t display_open_call_active_page_async(void);
+esp_err_t display_open_wechat_page_async(void);
+esp_err_t display_open_wechat_active_page_async(void);
 esp_err_t display_show_remote_video_frame_rgb565(const uint16_t *pixels, uint16_t width, uint16_t height);
 esp_err_t display_clear_remote_video(void);

@@ -13,11 +13,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
 #include "cJSON.h"
 
+#include "app_ai_device_action.h"
 #include "app_ai_chat_config.h"
 #include "app_audio_config.h"
 #include "app_audio_policy.h"
@@ -57,6 +59,7 @@
 #endif
 
 static const char *TAG = "app";
+static const char *CALL_FLOW_TAG = "CALL_FLOW";
 #if CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG
 static const char *MEDIA_HEALTH_TAG = "MEDIA";
 #endif
@@ -107,6 +110,8 @@ static void *app_calloc_psram(size_t count, size_t size)
 #define APP_AI_CHAT_TOKEN_PREFETCH_MIN_INTERVAL_MS 60000U
 #define APP_AI_CHAT_TOKEN_PREFETCH_TASK_STACK_SIZE (8U * 1024U)
 #define APP_AI_CHAT_TOKEN_PREFETCH_TASK_PRIORITY   1
+#define APP_AI_CALL_RTC_READY_TIMEOUT_MS           3500U
+#define APP_AI_CALL_RTC_READY_POLL_MS              20U
 
 typedef enum {
 	APP_CONTROL_EVENT_SPEAKER_VOLUME = 1,
@@ -124,6 +129,7 @@ typedef enum {
 	APP_LIFECYCLE_EVENT_ENTER_APP = 1,
 	APP_LIFECYCLE_EVENT_RETURN_HOME,
 	APP_LIFECYCLE_EVENT_START_APP_SERVICES,
+	APP_LIFECYCLE_EVENT_AI_CHAT_CALL_CONTACT,
 } app_lifecycle_event_type_t;
 
 typedef struct {
@@ -138,6 +144,9 @@ typedef struct {
 typedef struct {
 	app_lifecycle_event_type_t type;
 	app_id_t app_id;
+	ai_chat_device_action_route_t call_route;
+	app_call_type_t call_type;
+	char call_target_id[AI_CHAT_DEVICE_ACTION_TARGET_MAX];
 } app_lifecycle_event_t;
 
 typedef struct {
@@ -146,6 +155,8 @@ typedef struct {
 
 static portMUX_TYPE s_app_lifecycle_lock = portMUX_INITIALIZER_UNLOCKED;
 static portMUX_TYPE s_rtc_video_bitrate_lock = portMUX_INITIALIZER_UNLOCKED;
+static StaticSemaphore_t s_app_transition_mutex_buffer;
+static SemaphoreHandle_t s_app_transition_mutex;
 static QueueHandle_t s_app_control_queue;
 static TaskHandle_t s_app_control_task;
 static QueueHandle_t s_app_lifecycle_queue;
@@ -615,10 +626,18 @@ static void app_preload_persistent_state(void)
 }
 
 static esp_err_t app_set_speaker_volume_internal(uint8_t percent, bool persist);
+static esp_err_t app_release_active_app_locked(app_id_t app_id);
+static esp_err_t app_enter_app_locked(app_id_t app_id);
+static esp_err_t app_return_home_locked(void);
 static esp_err_t app_enter_app_sync(app_id_t app_id);
 static esp_err_t app_return_home_sync(void);
 static esp_err_t app_start_app_services(app_id_t app_id);
 static esp_err_t app_enqueue_lifecycle_event(app_lifecycle_event_type_t type, app_id_t app_id);
+static esp_err_t app_enqueue_ai_chat_call_lifecycle_event(
+	ai_chat_device_action_route_t route,
+	const char *target_id,
+	app_call_type_t call_type);
+static const char *app_id_name(app_id_t app_id);
 static esp_err_t app_prepare_rtc_after_time_sync(const char *reason);
 static esp_err_t app_prepare_rtc_after_config_if_ready(const char *reason);
 static esp_err_t app_reconfigure_tirtc_after_settings_change(const char *reason);
@@ -705,6 +724,154 @@ static const char *app_id_name(app_id_t app_id)
 	}
 }
 
+static const char *app_ai_call_route_name(
+	ai_chat_device_action_route_t route)
+{
+	switch (route) {
+	case AI_CHAT_DEVICE_ACTION_ROUTE_DEVICE_CALL:
+		return "device";
+	case AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP:
+		return "wechat";
+	case AI_CHAT_DEVICE_ACTION_ROUTE_NONE:
+	default:
+		return "none";
+	}
+}
+
+static bool app_ai_call_target_valid(ai_chat_device_action_route_t route,
+				     const char *target_id)
+{
+	if (target_id == NULL || target_id[0] == '\0') {
+		return false;
+	}
+	if (route == AI_CHAT_DEVICE_ACTION_ROUTE_DEVICE_CALL) {
+		return strlen(target_id) == APP_CALL_CONTACT_DEVICE_ID_LENGTH;
+	}
+	if (route == AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP) {
+		return strlen(target_id) < APP_WECHAT_OPEN_ID_MAX;
+	}
+	return false;
+}
+
+static esp_err_t app_wait_ai_call_rtc_ready(
+	ai_chat_device_action_route_t route)
+{
+	uint32_t waited_ms = 0U;
+	rtc_transport_state_t rtc_state = rtc_transport_get_state();
+
+	while (rtc_state != RTC_TRANSPORT_STATE_READY &&
+	       waited_ms < APP_AI_CALL_RTC_READY_TIMEOUT_MS) {
+		if (rtc_state == RTC_TRANSPORT_STATE_ERROR) {
+			break;
+		}
+		vTaskDelay(pdMS_TO_TICKS(APP_AI_CALL_RTC_READY_POLL_MS));
+		waited_ms += APP_AI_CALL_RTC_READY_POLL_MS;
+		rtc_state = rtc_transport_get_state();
+	}
+	if (rtc_state != RTC_TRANSPORT_STATE_READY) {
+		ESP_LOGW(CALL_FLOW_TAG,
+			 "stage=ai_call_handoff_rejected route=%s reason=rtc_not_ready state=%d wait_ms=%u",
+			 app_ai_call_route_name(route),
+			 (int)rtc_state,
+			 (unsigned)waited_ms);
+		return rtc_state == RTC_TRANSPORT_STATE_ERROR ?
+			ESP_ERR_INVALID_STATE : ESP_ERR_TIMEOUT;
+	}
+
+	ESP_LOGI(CALL_FLOW_TAG,
+		 "stage=ai_call_handoff_rtc_ready route=%s wait_ms=%u",
+		 app_ai_call_route_name(route),
+		 (unsigned)waited_ms);
+	return ESP_OK;
+}
+
+static void app_handle_ai_chat_call_contact(
+	ai_chat_device_action_route_t route,
+	const char *target_id,
+	app_call_type_t call_type)
+{
+	app_id_t target_app =
+		route == AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP ?
+			APP_ID_WECHAT : APP_ID_CALL;
+	esp_err_t ret = ESP_OK;
+
+	if (!app_ai_call_target_valid(route, target_id)) {
+		ESP_LOGW(CALL_FLOW_TAG,
+			 "stage=ai_call_handoff_rejected route=%s reason=invalid_target",
+			 app_ai_call_route_name(route));
+		return;
+	}
+	if (call_type != APP_CALL_TYPE_AUDIO &&
+	    call_type != APP_CALL_TYPE_VIDEO) {
+		ESP_LOGW(CALL_FLOW_TAG,
+			 "stage=ai_call_handoff_rejected route=%s reason=invalid_call_type",
+			 app_ai_call_route_name(route));
+		return;
+	}
+	if (s_app_transition_mutex == NULL ||
+	    xSemaphoreTake(s_app_transition_mutex, portMAX_DELAY) != pdTRUE) {
+		ESP_LOGE(CALL_FLOW_TAG,
+			 "stage=ai_call_handoff_rejected route=%s reason=transition_lock",
+			 app_ai_call_route_name(route));
+		return;
+	}
+
+	if (app_get_active_app() != APP_ID_AI_CHAT) {
+		ESP_LOGW(CALL_FLOW_TAG,
+			 "stage=ai_call_handoff_rejected route=%s reason=wrong_owner active=%s",
+			 app_ai_call_route_name(route),
+			 app_id_name(app_get_active_app()));
+		ret = ESP_ERR_INVALID_STATE;
+	} else {
+		/*
+		 * Keep release, RTC ownership transfer, target enter and call
+		 * submission in one lifecycle transaction. P4 disconnect completion
+		 * is asynchronous; the next owner must not submit a call while the
+		 * shared TiRTC session is still DISCONNECTING.
+		 */
+		ESP_LOGI(CALL_FLOW_TAG,
+			 "stage=ai_call_handoff_begin route=%s target_len=%u",
+			 app_ai_call_route_name(route),
+			 (unsigned)strlen(target_id));
+		ret = app_release_active_app_locked(APP_ID_AI_CHAT);
+		if (ret == ESP_OK) {
+			ret = app_wait_ai_call_rtc_ready(route);
+		}
+		if (ret == ESP_OK) {
+			ret = app_enter_app_locked(target_app);
+		}
+		if (ret == ESP_OK) {
+			ret = route == AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP ?
+				app_wechat_call_contact_with_type(target_id, call_type) :
+				app_call_contact(target_id, call_type);
+		}
+	}
+	xSemaphoreGive(s_app_transition_mutex);
+
+	if (ret == ESP_OK) {
+		esp_err_t display_ret =
+			route == AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP ?
+				display_open_wechat_active_page_async() :
+				display_open_call_active_page_async();
+		if (display_ret != ESP_OK) {
+			ESP_LOGW(CALL_FLOW_TAG,
+				 "stage=ai_call_page_failed route=%s page=active ret=%s",
+				 app_ai_call_route_name(route),
+				 esp_err_to_name(display_ret));
+		}
+	} else if (app_get_active_app() == target_app) {
+		if (route == AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP) {
+			(void)display_open_wechat_page_async();
+		} else {
+			(void)display_open_call_page_async();
+		}
+	}
+	ESP_LOGI(CALL_FLOW_TAG,
+		 "stage=ai_call_handoff_done route=%s ret=%s",
+		 app_ai_call_route_name(route),
+		 esp_err_to_name(ret));
+}
+
 static uint32_t app_resource_mask_for_app(app_id_t app_id)
 {
 	for (size_t index = 0; index < sizeof(s_app_resource_profiles) / sizeof(s_app_resource_profiles[0]); ++index) {
@@ -775,6 +942,47 @@ esp_err_t app_configure_tirtc(void)
 	return ret;
 }
 
+static esp_err_t app_ai_chat_device_action_cb(
+	const ai_chat_device_action_t *action,
+	ai_chat_device_action_result_t *result,
+	void *ctx)
+{
+	(void)ctx;
+	if (result == NULL) {
+		return ESP_ERR_INVALID_ARG;
+	}
+	if (s_app_lifecycle_queue == NULL ||
+	    s_app_transition_mutex == NULL ||
+	    app_get_active_app() != APP_ID_AI_CHAT) {
+		memset(result, 0, sizeof(*result));
+		strlcpy(result->status, "busy", sizeof(result->status));
+		strlcpy(result->message,
+			"应用正在切换，请稍后再试",
+			sizeof(result->message));
+		return ESP_ERR_INVALID_STATE;
+	}
+	return app_ai_device_action_execute(action, result);
+}
+
+static esp_err_t app_ai_chat_device_action_committed_cb(
+	const ai_chat_device_action_t *action,
+	const ai_chat_device_action_result_t *result,
+	void *ctx)
+{
+	(void)ctx;
+	if (result == NULL || !result->ok ||
+	    result->call_route == AI_CHAT_DEVICE_ACTION_ROUTE_NONE ||
+	    result->target_id[0] == '\0') {
+		return ESP_ERR_INVALID_ARG;
+	}
+	app_call_type_t call_type =
+		app_ai_device_action_requests_video(action) ?
+			APP_CALL_TYPE_VIDEO : APP_CALL_TYPE_AUDIO;
+	return app_enqueue_ai_chat_call_lifecycle_event(result->call_route,
+							 result->target_id,
+							 call_type);
+}
+
 static esp_err_t app_build_ai_chat_config(ai_chat_config_t *config)
 {
 	app_rtc_config_snapshot_t rtc_settings = {0};
@@ -790,6 +998,10 @@ static esp_err_t app_build_ai_chat_config(ai_chat_config_t *config)
 	config->video_enabled = APP_CONFIG_AI_CHAT_VIDEO_ENABLE != 0;
 	config->media_active_cb = app_ai_chat_media_active_changed;
 	config->media_active_ctx = NULL;
+	config->on_device_action = app_ai_chat_device_action_cb;
+	config->on_device_action_committed =
+		app_ai_chat_device_action_committed_cb;
+	config->device_action_ctx = NULL;
 	strlcpy(config->device_id, rtc_settings.device_id, sizeof(config->device_id));
 	strlcpy(config->user_id, APP_CONFIG_AI_CHAT_USER_ID, sizeof(config->user_id));
 	strlcpy(config->role_id, APP_CONFIG_AI_CHAT_ROLE_ID, sizeof(config->role_id));
@@ -1655,6 +1867,11 @@ static void app_lifecycle_task(void *arg)
 				}
 			}
 			break;
+		case APP_LIFECYCLE_EVENT_AI_CHAT_CALL_CONTACT:
+			app_handle_ai_chat_call_contact(event.call_route,
+							event.call_target_id,
+							event.call_type);
+			break;
 		default:
 			ESP_LOGW(TAG, "unknown lifecycle event: type=%u", (unsigned)event.type);
 			break;
@@ -1664,6 +1881,14 @@ static void app_lifecycle_task(void *arg)
 
 static esp_err_t app_start_control_task(void)
 {
+	if (s_app_transition_mutex == NULL) {
+		s_app_transition_mutex =
+			xSemaphoreCreateMutexStatic(&s_app_transition_mutex_buffer);
+		if (s_app_transition_mutex == NULL) {
+			return ESP_ERR_NO_MEM;
+		}
+	}
+
 	if (s_app_control_queue == NULL) {
 		s_app_control_queue = xQueueCreateWithCaps(APP_CONTROL_QUEUE_LENGTH,
 							   sizeof(app_control_event_t),
@@ -1726,8 +1951,44 @@ static esp_err_t app_enqueue_lifecycle_event(app_lifecycle_event_type_t type, ap
 		.app_id = app_id,
 	};
 
-	xQueueReset(s_app_lifecycle_queue);
+	/*
+	 * This queue serializes lifecycle ownership. Resetting it here would
+	 * silently discard an already accepted app or AI-call transition.
+	 */
 	return xQueueSendToBack(s_app_lifecycle_queue, &event, 0) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t app_enqueue_ai_chat_call_lifecycle_event(
+	ai_chat_device_action_route_t route,
+	const char *target_id,
+	app_call_type_t call_type)
+{
+	if (s_app_lifecycle_queue == NULL ||
+	    !app_ai_call_target_valid(route, target_id) ||
+	    (call_type != APP_CALL_TYPE_AUDIO &&
+	     call_type != APP_CALL_TYPE_VIDEO)) {
+		return ESP_ERR_INVALID_STATE;
+	}
+
+	app_lifecycle_event_t event = {
+		.type = APP_LIFECYCLE_EVENT_AI_CHAT_CALL_CONTACT,
+		.app_id = route == AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP ?
+			APP_ID_WECHAT : APP_ID_CALL,
+		.call_route = route,
+		.call_type = call_type,
+	};
+	strlcpy(event.call_target_id,
+		target_id,
+		sizeof(event.call_target_id));
+
+	/*
+	 * A successful action response already promised this handoff. Wait for
+	 * queue space instead of dropping the committed transition.
+	 */
+	return xQueueSendToBack(s_app_lifecycle_queue,
+				&event,
+				portMAX_DELAY) == pdTRUE ?
+		ESP_OK : ESP_ERR_TIMEOUT;
 }
 
 static void app_request_rtc_reconfigure_after_settings_change(const char *reason)
@@ -3358,7 +3619,40 @@ void app_run(void)
 #endif
 }
 
-static esp_err_t app_enter_app_sync(app_id_t app_id)
+static esp_err_t app_release_active_app_locked(app_id_t app_id)
+{
+	if (app_id == APP_ID_HOME) {
+		return ESP_OK;
+	}
+	if (app_get_active_app() != app_id) {
+		return ESP_ERR_INVALID_STATE;
+	}
+
+	ESP_LOGI(TAG, "app release: %s", app_id_name(app_id));
+	esp_err_t stop_ret = app_stop_app_services(app_id);
+	if (stop_ret != ESP_OK) {
+		ESP_LOGW(TAG,
+			 "app stop failed: %s ret=%s",
+			 app_id_name(app_id),
+			 esp_err_to_name(stop_ret));
+		return stop_ret;
+	}
+
+	esp_err_t release_ret =
+		app_switch_resources(app_resource_mask_for_app(APP_ID_HOME));
+	if (release_ret != ESP_OK) {
+		ESP_LOGW(TAG,
+			 "app release failed: %s ret=%s",
+			 app_id_name(app_id),
+			 esp_err_to_name(release_ret));
+		app_set_active_app(APP_ID_HOME);
+		return release_ret;
+	}
+	app_set_active_app(APP_ID_HOME);
+	return ESP_OK;
+}
+
+static esp_err_t app_enter_app_locked(app_id_t app_id)
 {
 	if (app_id < APP_ID_HOME || app_id > APP_ID_SYSTEM) {
 		return ESP_ERR_INVALID_ARG;
@@ -3370,19 +3664,9 @@ static esp_err_t app_enter_app_sync(app_id_t app_id)
 	}
 
 	if (current != APP_ID_HOME) {
-		ESP_LOGI(TAG, "app release: %s", app_id_name(current));
-		esp_err_t stop_ret = app_stop_app_services(current);
-		if (stop_ret != ESP_OK) {
-			ESP_LOGW(TAG, "app stop failed: %s ret=%s", app_id_name(current), esp_err_to_name(stop_ret));
-			return stop_ret;
-		}
-		esp_err_t release_ret = app_switch_resources(app_resource_mask_for_app(APP_ID_HOME));
-		if (release_ret != ESP_OK) {
-			ESP_LOGW(TAG, "app release failed: %s ret=%s", app_id_name(current), esp_err_to_name(release_ret));
-			app_set_active_app(APP_ID_HOME);
-			return release_ret;
-		}
-		app_set_active_app(APP_ID_HOME);
+		ESP_RETURN_ON_ERROR(app_release_active_app_locked(current),
+				    TAG,
+				    "release current app failed");
 	}
 
 	ESP_LOGI(TAG, "app enter: %s", app_id_name(app_id));
@@ -3403,7 +3687,7 @@ static esp_err_t app_enter_app_sync(app_id_t app_id)
 	return ESP_OK;
 }
 
-static esp_err_t app_return_home_sync(void)
+static esp_err_t app_return_home_locked(void)
 {
 	app_id_t previous = app_get_active_app();
 
@@ -3419,6 +3703,32 @@ static esp_err_t app_return_home_sync(void)
 	app_set_active_app(APP_ID_HOME);
 	app_schedule_ai_chat_token_prefetch("home");
 	return ESP_OK;
+}
+
+static esp_err_t app_enter_app_sync(app_id_t app_id)
+{
+	if (s_app_transition_mutex == NULL) {
+		return ESP_ERR_INVALID_STATE;
+	}
+	if (xSemaphoreTake(s_app_transition_mutex, portMAX_DELAY) != pdTRUE) {
+		return ESP_ERR_TIMEOUT;
+	}
+	esp_err_t ret = app_enter_app_locked(app_id);
+	xSemaphoreGive(s_app_transition_mutex);
+	return ret;
+}
+
+static esp_err_t app_return_home_sync(void)
+{
+	if (s_app_transition_mutex == NULL) {
+		return ESP_ERR_INVALID_STATE;
+	}
+	if (xSemaphoreTake(s_app_transition_mutex, portMAX_DELAY) != pdTRUE) {
+		return ESP_ERR_TIMEOUT;
+	}
+	esp_err_t ret = app_return_home_locked();
+	xSemaphoreGive(s_app_transition_mutex);
+	return ret;
 }
 
 esp_err_t app_enter_app(app_id_t app_id)

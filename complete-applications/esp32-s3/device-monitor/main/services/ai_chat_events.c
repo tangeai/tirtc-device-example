@@ -319,6 +319,19 @@ static void ai_chat_parse_device_action(cJSON *root, cJSON *params, ai_chat_even
         "media",
         "mode",
     };
+    static const char *const contact_type_names[] = {
+        "contact_type",
+        "target_type",
+        "contact_source",
+        "route",
+    };
+    static const char *const status_filter_names[] = {
+        "status_filter",
+        "online_status",
+        "presence",
+        "status",
+        "filter",
+    };
     cJSON *payload = ai_chat_pick_device_action_payload(params);
     const char *action = NULL;
 
@@ -357,6 +370,20 @@ static void ai_chat_parse_device_action(cJSON *root, cJSON *params, ai_chat_even
                                                        payload,
                                                        call_type_names,
                                                        sizeof(call_type_names) / sizeof(call_type_names[0])));
+    ai_chat_copy_str(event->contact_type,
+                     sizeof(event->contact_type),
+                     ai_chat_pick_device_action_string(params,
+                                                       payload,
+                                                       contact_type_names,
+                                                       sizeof(contact_type_names) /
+                                                           sizeof(contact_type_names[0])));
+    ai_chat_copy_str(event->status_filter,
+                     sizeof(event->status_filter),
+                     ai_chat_pick_device_action_string(params,
+                                                       payload,
+                                                       status_filter_names,
+                                                       sizeof(status_filter_names) /
+                                                           sizeof(status_filter_names[0])));
 }
 
 esp_err_t ai_chat_events_parse(const void *data, uint32_t len, ai_chat_event_t *event)

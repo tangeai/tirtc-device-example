@@ -167,10 +167,15 @@ CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=4096
 
 项目根 `sdkconfig.defaults` 已显式固定这些配置，并保留 ESP32-S3 PSRAM 配置。
 
-烧录和串口监视：
+构建后用 Chrome 或 Edge 打开
+[Espressif ESP Tool](https://espressif.github.io/esptool-js/)，按
+`build/flasher_args.json` 把本次构建的每个 BIN 和地址逐项加入并烧录。不要只写应用
+BIN；`storage` 中还包含测试媒体和本地 token 标记。
+
+烧录完成后复位设备，再打开串口监视：
 
 ```powershell
-idf.py -p COMx flash monitor
+idf.py -p COMx monitor
 ```
 
 把 `COMx` 替换为实际串口。构建通过不等于已烧录、联网或完成真实音视频验证，

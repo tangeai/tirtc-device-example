@@ -3,9 +3,13 @@
 本文档说明摄像头、音频、TiRTC、显示和内存的所有权。目标是让每条媒体链路只有一个生命周期
 所有者，运行时不通过跨层补丁争抢硬件或连接句柄。
 
-本文对应应用版本 `1.2.3` 和 TiRTC SDK `2.3.0`。版本来源见
+本文对应应用版本 `1.3.0` 和 TiRTC SDK `2.3.0`。版本来源见
 [SOURCE_PROVENANCE.md](../SOURCE_PROVENANCE.md)，项目入口见 [README.md](../README.md)。
+环境、构建、烧录和首次启动见 [GETTING_STARTED_CN.md](GETTING_STARTED_CN.md)。
 下列参数描述当前源码设计和默认配置，不单独构成目标板运行证明。
+
+本文中的上行和下行均以 P4 设备为参照：`P4 设备 -> 服务端` 为上行，
+`服务端 -> P4 设备` 为下行。微信客户端采集端的原始分辨率不由本工程配置。
 
 ## 分层
 
@@ -17,6 +21,10 @@
 | `protocols/tirtc` | TiRTC SDK、连接句柄、订阅、回调和媒体收发队列 |
 | `application` | 业务进入/退出、资源租约和所有权切换 |
 | `ui` | 状态展示和用户动作，不持有媒体设备或连接 |
+
+AI Chat 的 `device_action` 可查询联系人状态，并发起设备联系人或微信联系人的音频/视频呼叫。
+服务层负责解析动作、联系人别名和备注，应用层异步切换业务并持有生命周期；UI 只展示结果，
+不直接创建或释放 RTC 连接。呼叫类型从 AI 请求贯通到对应呼叫服务。
 
 ## 内存
 
@@ -48,7 +56,7 @@ ESP-Hosted streaming RX 使用两个 `64KB` cache-aligned PSRAM DMA 缓冲，只
 分配失败时才回退到 `4KB` internal DMA 缓冲。这样把 Wi-Fi burst payload 留在 PSRAM，
 同时保护 H264、JPEG 和音频依赖的内部 DMA 连续块。
 
-## 摄像头上行
+## P4 设备视频上行
 
 `main/media/camera_pipeline.c` 持有实时 RTC 摄像头：
 
@@ -60,7 +68,8 @@ ESP-Hosted streaming RX 使用两个 `64KB` cache-aligned PSRAM DMA 缓冲，只
 - PSRAM 中的 H264 输入和输出在 DMA 边界使用 `esp_cache_msync`。
 - 第一帧必须是完整关键帧，丢失依赖后重新请求 IDR。
 
-设备间呼叫和微信 VoIP 使用 `480x320@15fps`、`800kbps` 起始的独立上行档位；退出通话后恢复 IPC 正常档位。
+设备间呼叫和微信 VoIP 从 P4 设备向服务端发送 `480x320@15fps` H264，起始码率
+`800kbps`；退出通话后恢复 IPC 正常档位。
 
 ## 视频下行
 
@@ -78,14 +87,24 @@ ESP-Hosted streaming RX 使用两个 `64KB` cache-aligned PSRAM DMA 缓冲，只
 
 ### 微信 VoIP
 
-- 设备能力上报 `down_video_mt=mjpeg`、`screen_width=480`、`screen_height=320`。
+- P4 设备上报 `down_video_mt=mjpeg`、`screen_width=640`、`screen_height=480`，请求服务端
+  提供标准横屏 MJPEG 下行。这组值不代表物理 LCD；本机显示目标固定为 `480x320`。
+- 本工程不配置微信手机端采集分辨率，也没有 720p 采集声明；手机端原始视频由微信和
+  服务端链路决定。
 - 服务端把微信视频转换为独立 MJPEG 帧。
 - P4 hardware JPEG decoder 输出 RGB565。
-- PPA 优先完成旋转、居中 `cover` 裁剪和 `480x320` 输出，软件转换作为回退。
-  ThingConnect 协议字段独立上报 `object_fit=contain`。
-- 竖向 JPEG 默认顺时针旋转 90 度，横向 JPEG保持原方向。
+- 解码入口支持不超过 `640x480` 解码预算的服务端实际帧；服务端可根据链路临时下发
+  较小档位。
+- TiRTC JPEG 帧头不携带旋转元数据。本机按服务端实际下发方向显示，MJPEG 渲染固定使用
+  `cw0`；PPA 只执行裁切和缩放，不承担方向修正。
+- PPA 基于服务端实际帧执行一次居中 `cover`：大于显示视口的帧对称裁切并等比缩小到
+  `480x320`，较小档位等比放大后居中裁切，不做非等比拉伸或第二次显示缩放。
+- ThingConnect 协议字段独立上报 `object_fit=contain`；设备上行另行上报摄像头方向提示，
+  不改变本机 H264 帧内容。
 - 压缩输入复用 16 个 `256KB` PSRAM slot；解码和显示使用固定 PSRAM pool。
 - MJPEG 帧彼此独立。队列积压时释放旧帧并解码最新帧，避免延迟持续增长。
+- WHIP 连接接受后立即订阅远端视频；订阅调用成功但 `1s` 内仍无首个视频包时，仅补发
+  一次幂等订阅，避免信令刚就绪时的单次请求丢失。
 
 统一输出由三个 RGB565 slot 组成。控制层可见时由 LVGL 合成；控制层自动隐藏后切换为整帧 PSRAM direct-LCD DMA，点击画面恢复控制层。
 
@@ -121,8 +140,9 @@ IPC 等其他档位按当前基准码率和画面规模计算范围。
 
 | 项目 | 默认值 |
 | --- | --- |
-| IPC | `1280x960@20fps`, `4Mbps` |
-| 双向通话/微信上行 | `480x320@15fps`, `800kbps` 起始，TGMP `200-800kbps` |
+| P4 设备 -> 服务端（IPC） | `1280x960@20fps`, `4Mbps` |
+| P4 设备 -> 服务端（双向通话/微信 VoIP） | `480x320@15fps`, `800kbps` 起始，TGMP `200-800kbps` |
+| 服务端 -> P4 设备（微信 VoIP） | 请求 `640x480` MJPEG，显示到 `480x320` |
 | H264 GOP | `30` |
 | H264 output buffer | `1MB` |
 | Max delta payload | `256KB` |
@@ -147,7 +167,8 @@ IPC 等其他档位按当前基准码率和画面规模计算范围。
 1. 检查横屏显示和触摸坐标。
 2. 检查绑定、正式 MQTT 和 TiRTC 上线。
 3. 分别检查 IPC、设备呼叫、微信 VoIP 和 AI Chat。
-4. 对微信 VoIP 确认 H264 上行与 MJPEG 下行均有首帧证据。
+4. 对微信 VoIP 分别确认 P4 设备发送的 `480x320` H264 和服务端下发的 MJPEG 均有首帧证据，
+   并记录服务端实际下发分辨率。
 5. 保持每个主要场景至少 5 分钟，观察 fps、bitrate、queue、DMA largest block、PSRAM pool
    和 AEC。
 6. 每个场景连续进入和退出至少 10 次，确认无残留资源和连接句柄。

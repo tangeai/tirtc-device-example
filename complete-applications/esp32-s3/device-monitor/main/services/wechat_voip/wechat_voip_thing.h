@@ -19,6 +19,9 @@ esp_err_t wechat_voip_thing_start(void);
 void wechat_voip_thing_stop(void);
 bool wechat_voip_thing_is_connected(void);
 esp_err_t wechat_voip_thing_request_call(const char *open_id);
+esp_err_t wechat_voip_thing_refresh_contacts_async(void);
+esp_err_t wechat_voip_thing_update_contact_remark_async(const char *open_id,
+                                                        const char *remark);
 /* Compatibility entry: verifies that open_id is already authorized locally. */
 esp_err_t wechat_voip_thing_add_contact(const char *open_id);
 /* Authorization revocation requires the mini-program user JWT. */

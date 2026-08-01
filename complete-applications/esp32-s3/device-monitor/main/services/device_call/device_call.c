@@ -49,13 +49,14 @@ typedef enum {
 
 typedef struct {
     char target_device_id[128];
+    char call_type[DEVICE_CALL_TYPE_MAX];
     uint32_t generation;
 } device_call_request_ctx_t;
 
 typedef struct {
     char room_id[96];
     char caller_id[128];
-    char call_type[16];
+    char call_type[DEVICE_CALL_TYPE_MAX];
     char previous_room_id[96];
     uint32_t generation;
     bool switch_from_active_call;
@@ -119,11 +120,11 @@ typedef struct {
     char message[96];
     char room_id[96];
     char peer_device_id[128];
-    char call_type[16];
+    char call_type[DEVICE_CALL_TYPE_MAX];
     bool pending_incoming;
     char pending_room_id[96];
     char pending_caller_id[128];
-    char pending_call_type[16];
+    char pending_call_type[DEVICE_CALL_TYPE_MAX];
     uint8_t contact_count;
     esp_err_t contacts_last_error;
     device_call_contact_t contacts[DEVICE_CALL_CONTACT_MAX];
@@ -169,6 +170,13 @@ static const char *device_call_role_name(device_call_role_t role)
     default:
         return "none";
     }
+}
+
+static bool device_call_type_is_supported(const char *call_type)
+{
+    return call_type != NULL &&
+           (strcmp(call_type, DEVICE_CALL_TYPE_AUDIO) == 0 ||
+            strcmp(call_type, DEVICE_CALL_TYPE_VIDEO) == 0);
 }
 
 static const char *device_call_action_name(device_call_action_t action)
@@ -873,10 +881,11 @@ static void device_call_accept_failed(const device_call_accept_ctx_t *ctx,
     }
     device_call_unlock();
     ESP_LOGW(CALL_FLOW_TAG,
-             "stage=accept_failed gen=%lu room=%s peer=%s error=%s message=%s",
+             "stage=accept_failed gen=%lu room=%s peer=%s type=%s error=%s message=%s",
              (unsigned long)ctx->generation,
              ctx->room_id,
              ctx->caller_id,
+             ctx->call_type,
              esp_err_to_name(error),
              message != NULL ? message : "-");
     (void)device_call_post_room_action_async(server_accepted ? DEVICE_CALL_ACTION_HANGUP :
@@ -901,10 +910,11 @@ static void device_call_accept_task(void *arg)
     }
 
     ESP_LOGI(CALL_FLOW_TAG,
-             "stage=accept_worker_begin gen=%lu room=%s peer=%s switch=%d",
+             "stage=accept_worker_begin gen=%lu room=%s peer=%s type=%s switch=%d",
              (unsigned long)ctx->generation,
              ctx->room_id,
              ctx->caller_id,
+             ctx->call_type,
              ctx->switch_from_active_call ? 1 : 0);
 
     if (ctx->switch_from_active_call) {
@@ -1267,6 +1277,7 @@ static void device_call_room_recovery_task(void *arg)
 }
 
 static esp_err_t device_call_request_room(const char *target_device_id,
+                                          const char *call_type,
                                           char *room_id,
                                           size_t room_id_size)
 {
@@ -1276,15 +1287,17 @@ static esp_err_t device_call_request_room(const char *target_device_id,
     esp_err_t ret = ESP_FAIL;
     int written = snprintf(body,
                            sizeof(body),
-                           "{\"targets\":[\"%s\"],\"call_type\":\"audio\"}",
-                           target_device_id);
+                           "{\"targets\":[\"%s\"],\"call_type\":\"%s\"}",
+                           target_device_id,
+                           call_type);
     if (written <= 0 || written >= (int)sizeof(body)) {
         return ESP_ERR_INVALID_SIZE;
     }
 
     ESP_LOGI(CALL_FLOW_TAG,
-             "stage=call_request_begin peer=%s",
-             target_device_id);
+             "stage=call_request_begin peer=%s type=%s",
+             target_device_id,
+             call_type);
 
     response = heap_caps_calloc(1,
                                 DEVICE_CALL_HTTP_RESPONSE_MAX_LEN,
@@ -1311,8 +1324,9 @@ static esp_err_t device_call_request_room(const char *target_device_id,
         }
         if (ret == ESP_OK) {
             ESP_LOGI(CALL_FLOW_TAG,
-                     "stage=call_request_done peer=%s attempt=%u room=%s http=%d code=%d ret=ESP_OK",
+                     "stage=call_request_done peer=%s type=%s attempt=%u room=%s http=%d code=%d ret=ESP_OK",
                      target_device_id,
+                     call_type,
                      attempt + 1U,
                      room_id,
                      status_code,
@@ -1333,8 +1347,9 @@ static esp_err_t device_call_request_room(const char *target_device_id,
                  business_code,
                  esp_err_to_name(ret));
         ESP_LOGW(CALL_FLOW_TAG,
-                 "stage=call_request_done peer=%s attempt=%u http=%d code=%d ret=%s",
+                 "stage=call_request_done peer=%s type=%s attempt=%u http=%d code=%d ret=%s",
                  target_device_id,
+                 call_type,
                  attempt + 1U,
                  status_code,
                  business_code,
@@ -1421,9 +1436,10 @@ static void device_call_request_task(void *arg)
     }
 
     ESP_LOGI(CALL_FLOW_TAG,
-             "stage=request_worker_begin gen=%lu peer=%s",
+             "stage=request_worker_begin gen=%lu peer=%s type=%s",
              (unsigned long)ctx->generation,
-             ctx->target_device_id);
+             ctx->target_device_id,
+             ctx->call_type);
 
     /*
      * The caller is the TiRTC listener.  Creating the cloud room before the
@@ -1448,7 +1464,10 @@ static void device_call_request_task(void *arg)
     rtc_transport_set_next_connection_auto_media(true);
     rtc_transport_set_next_connection_defer_media(true);
 
-    ret = device_call_request_room(ctx->target_device_id, room_id, sizeof(room_id));
+    ret = device_call_request_room(ctx->target_device_id,
+                                   ctx->call_type,
+                                   room_id,
+                                   sizeof(room_id));
     if (ret != ESP_OK) {
         device_call_request_failed(ctx, ret, "call request failed");
         free(ctx);
@@ -1521,10 +1540,11 @@ static void device_call_request_task(void *arg)
         }
     }
     ESP_LOGI(CALL_FLOW_TAG,
-             "stage=ringing gen=%lu role=caller room=%s peer=%s timeout_ms=%u",
+             "stage=ringing gen=%lu role=caller room=%s peer=%s type=%s timeout_ms=%u",
              (unsigned long)ctx->generation,
              room_id,
              ctx->target_device_id,
+             ctx->call_type,
              (unsigned)DEVICE_CALL_RING_TIMEOUT_MS);
     ESP_LOGI(TAG, "outgoing call created: room=%s peer=%s", room_id, ctx->target_device_id);
 
@@ -1894,6 +1914,9 @@ static void device_call_handle_incoming(const cJSON *payload, uint32_t message_g
     const char *room_id = device_call_json_string(payload, "room_id");
     const char *caller_id = device_call_json_string(payload, "caller_id");
     const char *call_type = device_call_json_string(payload, "call_type");
+    const char *normalized_call_type = call_type[0] != '\0' ?
+                                           call_type :
+                                           DEVICE_CALL_TYPE_AUDIO;
     device_call_state_t state = DEVICE_CALL_STATE_IDLE;
     uint32_t generation = 0;
     device_call_incoming_allowed_cb_t incoming_allowed = NULL;
@@ -1905,6 +1928,17 @@ static void device_call_handle_incoming(const cJSON *payload, uint32_t message_g
         strlen(room_id) >= sizeof(s_call.pending_room_id) ||
         strlen(caller_id) >= sizeof(s_call.pending_caller_id)) {
         ESP_LOGW(TAG, "invalid call_incoming payload");
+        return;
+    }
+    if (!device_call_type_is_supported(normalized_call_type)) {
+        ESP_LOGW(CALL_FLOW_TAG,
+                 "stage=incoming_rejected room=%s peer=%s type=%s reason=unsupported_call_type",
+                 room_id,
+                 caller_id,
+                 normalized_call_type);
+        (void)device_call_post_room_action_async(DEVICE_CALL_ACTION_REJECT,
+                                                 room_id,
+                                                 "unsupported_call_type");
         return;
     }
 
@@ -2005,7 +2039,7 @@ static void device_call_handle_incoming(const cJSON *payload, uint32_t message_g
     strlcpy(s_call.pending_room_id, room_id, sizeof(s_call.pending_room_id));
     strlcpy(s_call.pending_caller_id, caller_id, sizeof(s_call.pending_caller_id));
     strlcpy(s_call.pending_call_type,
-            call_type[0] != '\0' ? call_type : "audio",
+            normalized_call_type,
             sizeof(s_call.pending_call_type));
 
     if (s_call.state == DEVICE_CALL_STATE_IDLE || s_call.state == DEVICE_CALL_STATE_ERROR) {
@@ -2025,8 +2059,12 @@ static void device_call_handle_incoming(const cJSON *payload, uint32_t message_g
              device_call_state_name(state),
              room_id,
              caller_id,
-             call_type[0] != '\0' ? call_type : "audio");
-    ESP_LOGI(TAG, "incoming call: room=%s caller=%s type=%s", room_id, caller_id, call_type);
+             normalized_call_type);
+    ESP_LOGI(TAG,
+             "incoming call: room=%s caller=%s type=%s",
+             room_id,
+             caller_id,
+             normalized_call_type);
 }
 
 static void device_call_handle_room_cancel(const cJSON *payload, uint32_t message_generation)
@@ -2280,7 +2318,17 @@ static bool device_call_on_rtc_command(tirtc_conn_t conn,
         return false;
     }
     if (data == NULL || data_len == 0U || data_len >= 256U) {
-        return true;
+        /*
+         * 0x2000 is shared with WeChat VoIP.  Only consume a payload-less
+         * command when an outgoing device call is actually waiting for it;
+         * otherwise the next RTC observer must be allowed to handle it.
+         */
+        device_call_lock();
+        expected = s_call.role == DEVICE_CALL_ROLE_CALLER &&
+                   (s_call.state == DEVICE_CALL_STATE_OUTGOING ||
+                    s_call.state == DEVICE_CALL_STATE_CONNECTING);
+        device_call_unlock();
+        return expected;
     }
 
     char json[256] = {0};
@@ -2726,6 +2774,11 @@ void device_call_reset_identity_state(void)
 
 esp_err_t device_call_request(const char *target_device_id)
 {
+    return device_call_request_with_type(target_device_id, DEVICE_CALL_TYPE_AUDIO);
+}
+
+esp_err_t device_call_request_with_type(const char *target_device_id, const char *call_type)
+{
     device_call_request_ctx_t *ctx = NULL;
     uint32_t generation = 0;
     device_call_state_t rejected_state = DEVICE_CALL_STATE_IDLE;
@@ -2741,6 +2794,13 @@ esp_err_t device_call_request(const char *target_device_id)
 
     if (target_device_id == NULL || target_device_id[0] == '\0') {
         ESP_LOGW(CALL_FLOW_TAG, "stage=request_rejected reason=invalid_peer");
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!device_call_type_is_supported(call_type)) {
+        ESP_LOGW(CALL_FLOW_TAG,
+                 "stage=request_rejected peer=%s type=%s reason=invalid_call_type",
+                 target_device_id,
+                 call_type != NULL ? call_type : "(null)");
         return ESP_ERR_INVALID_ARG;
     }
     if (strlen(target_device_id) >= sizeof(ctx->target_device_id)) {
@@ -2818,20 +2878,23 @@ esp_err_t device_call_request(const char *target_device_id)
     s_call.last_error = ESP_OK;
     s_call.room_id[0] = '\0';
     strlcpy(s_call.peer_device_id, target_device_id, sizeof(s_call.peer_device_id));
-    strlcpy(s_call.call_type, "audio", sizeof(s_call.call_type));
+    strlcpy(s_call.call_type, call_type, sizeof(s_call.call_type));
     device_call_set_message_locked("requesting call");
     device_call_unlock();
 
     strlcpy(ctx->target_device_id, target_device_id, sizeof(ctx->target_device_id));
+    strlcpy(ctx->call_type, call_type, sizeof(ctx->call_type));
     ctx->generation = generation;
     ESP_LOGI(TAG,
-             "outgoing call queued: peer=%s generation=%lu",
+             "outgoing call queued: peer=%s type=%s generation=%lu",
              target_device_id,
+             call_type,
              (unsigned long)generation);
     ESP_LOGI(CALL_FLOW_TAG,
-             "stage=request_queued gen=%lu role=caller peer=%s",
+             "stage=request_queued gen=%lu role=caller peer=%s type=%s",
              (unsigned long)generation,
-             target_device_id);
+             target_device_id,
+             call_type);
     esp_err_t ret = device_call_launch_task(device_call_request_task,
                                             "dev_call_req",
                                             DEVICE_CALL_WORK_TASK_STACK,
@@ -2846,9 +2909,10 @@ esp_err_t device_call_request(const char *target_device_id)
         device_call_reset_caller_media_gate();
         free(ctx);
         ESP_LOGW(CALL_FLOW_TAG,
-                 "stage=request_task_failed gen=%lu peer=%s ret=%s",
+                 "stage=request_task_failed gen=%lu peer=%s type=%s ret=%s",
                  (unsigned long)generation,
                  target_device_id,
+                 call_type,
                  esp_err_to_name(ret));
     }
     return ret;
@@ -2911,16 +2975,17 @@ esp_err_t device_call_accept_pending(void)
     strlcpy(s_call.room_id, ctx->room_id, sizeof(s_call.room_id));
     strlcpy(s_call.peer_device_id, ctx->caller_id, sizeof(s_call.peer_device_id));
     strlcpy(s_call.call_type,
-            ctx->call_type[0] != '\0' ? ctx->call_type : "audio",
+            ctx->call_type[0] != '\0' ? ctx->call_type : DEVICE_CALL_TYPE_AUDIO,
             sizeof(s_call.call_type));
     device_call_set_message_locked("answering call");
     device_call_unlock();
 
     ESP_LOGI(CALL_FLOW_TAG,
-             "stage=accept_queued gen=%lu room=%s peer=%s switch=%d",
+             "stage=accept_queued gen=%lu room=%s peer=%s type=%s switch=%d",
              (unsigned long)generation,
              ctx->room_id,
              ctx->caller_id,
+             ctx->call_type,
              ctx->switch_from_active_call ? 1 : 0);
 
     esp_err_t ret = device_call_launch_task(device_call_accept_task,
@@ -2936,9 +3001,10 @@ esp_err_t device_call_accept_pending(void)
         }
         device_call_unlock();
         ESP_LOGW(CALL_FLOW_TAG,
-                 "stage=accept_task_failed gen=%lu room=%s ret=%s",
+                 "stage=accept_task_failed gen=%lu room=%s type=%s ret=%s",
                  (unsigned long)generation,
                  ctx->room_id,
+                 ctx->call_type,
                  esp_err_to_name(ret));
         free(ctx);
     }

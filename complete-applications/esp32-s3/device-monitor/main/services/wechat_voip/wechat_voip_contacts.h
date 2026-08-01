@@ -14,12 +14,16 @@ extern "C" {
 #define WECHAT_VOIP_OPEN_ID_MAX 96
 #define WECHAT_VOIP_MODEL_ID_MAX 64
 #define WECHAT_VOIP_APP_ID_MAX 64
+#define WECHAT_VOIP_REMARK_MAX 64
 
 typedef struct {
     char open_id[WECHAT_VOIP_OPEN_ID_MAX];
+    char remark[WECHAT_VOIP_REMARK_MAX];
 } wechat_voip_contact_t;
 
 typedef struct {
+    bool ready;
+    bool server_synced;
     uint8_t count;
     wechat_voip_contact_t contacts[WECHAT_VOIP_CONTACT_MAX];
 } wechat_voip_contacts_snapshot_t;
@@ -28,6 +32,7 @@ typedef struct {
     char openid[WECHAT_VOIP_OPEN_ID_MAX];
     char model_id[WECHAT_VOIP_MODEL_ID_MAX];
     char app_id[WECHAT_VOIP_APP_ID_MAX];
+    char remark[WECHAT_VOIP_REMARK_MAX];
 } wechat_voip_auth_user_t;
 
 esp_err_t wechat_voip_contacts_init(void);
@@ -43,6 +48,9 @@ esp_err_t wechat_voip_contacts_replace_for_device(const char *device_id,
                                                    const wechat_voip_auth_user_t *users,
                                                    size_t count,
                                                    const char *source);
+esp_err_t wechat_voip_contacts_update_remark(const char *openid,
+                                             const char *remark,
+                                             const char *source);
 void wechat_voip_contacts_find(const char *openid, wechat_voip_auth_user_t *target);
 void wechat_voip_contacts_get_snapshot(wechat_voip_contacts_snapshot_t *snapshot);
 

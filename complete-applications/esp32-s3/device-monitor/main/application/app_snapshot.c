@@ -316,6 +316,9 @@ static void app_snapshot_fill_wechat(app_wechat_snapshot_t *wechat_snapshot)
 		strlcpy(wechat_snapshot->contacts[index].open_id,
 			contacts.contacts[index].open_id,
 			sizeof(wechat_snapshot->contacts[index].open_id));
+		strlcpy(wechat_snapshot->contacts[index].remark,
+			contacts.contacts[index].remark,
+			sizeof(wechat_snapshot->contacts[index].remark));
 	}
 }
 

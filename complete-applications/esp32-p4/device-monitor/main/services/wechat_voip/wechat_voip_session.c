@@ -88,6 +88,7 @@ typedef struct
     uint32_t generation;
     bool outbound_call;
     bool cancel_on_connect;
+    wechat_voip_call_media_t call_media;
     bool connection_callback_claimed;
     tirtc_conn_t connection_callback_hconn;
     bool connection_tracked;
@@ -679,6 +680,8 @@ static void voip_work_task(void *arg)
         case VOIP_WORK_START_MEDIA:
         {
             bool current = false;
+            bool local_video_enabled = false;
+            bool remote_video_enabled = false;
 
             lock_session();
             current = s_session.generation == item.generation &&
@@ -688,6 +691,12 @@ static void voip_work_task(void *arg)
                       !s_session.media_started;
             if (current) {
                 s_session.media_start_pending = false;
+                bool video_call =
+                    s_session.call_media == WECHAT_VOIP_CALL_MEDIA_VIDEO;
+                local_video_enabled =
+                    video_call && WECHAT_VOIP_LOCAL_VIDEO_ENABLE;
+                remote_video_enabled =
+                    video_call && WECHAT_VOIP_REMOTE_VIDEO_ENABLE;
             }
             unlock_session();
             if (!current) {
@@ -699,8 +708,8 @@ static void voip_work_task(void *arg)
             }
 
             esp_err_t ret = wechat_voip_media_prepare(
-                WECHAT_VOIP_LOCAL_VIDEO_ENABLE != 0,
-                WECHAT_VOIP_REMOTE_VIDEO_ENABLE != 0);
+                local_video_enabled,
+                remote_video_enabled);
             if (ret == ESP_OK &&
                 !media_start_is_current(item.hconn, item.generation)) {
                 (void)wechat_voip_media_stop_wait(item.hconn,
@@ -715,8 +724,8 @@ static void voip_work_task(void *arg)
                 ret = tirtc_session_set_external_media_call_active(
                     item.hconn,
                     true,
-                    WECHAT_VOIP_LOCAL_VIDEO_ENABLE != 0,
-                    WECHAT_VOIP_REMOTE_VIDEO_ENABLE != 0);
+                    local_video_enabled,
+                    remote_video_enabled);
             }
             if (ret == ESP_OK &&
                 !media_start_is_current(item.hconn, item.generation)) {
@@ -770,8 +779,8 @@ static void voip_work_task(void *arg)
 
             ESP_LOGI(TAG,
                      "微信双向媒体已启动: audio=pcma/a-law up_video=%d down_video=%d target=%ux%u",
-                     WECHAT_VOIP_LOCAL_VIDEO_ENABLE ? 1 : 0,
-                     WECHAT_VOIP_REMOTE_VIDEO_ENABLE ? 1 : 0,
+                     local_video_enabled ? 1 : 0,
+                     remote_video_enabled ? 1 : 0,
                      (unsigned)WECHAT_VOIP_VIDEO_WIDTH,
                      (unsigned)WECHAT_VOIP_VIDEO_HEIGHT);
             break;
@@ -1436,20 +1445,24 @@ static esp_err_t start_answer_task(const char *source, uint32_t delay_ms)
 
 esp_err_t wechat_voip_session_handle_join_room(cJSON *root,
                                                bool auto_answer,
-                                               bool cancel_on_connect)
+                                               bool cancel_on_connect,
+                                               wechat_voip_call_media_t call_media)
 {
     ensure_init();
 
-    if (!cJSON_IsObject(root))
+    if (!cJSON_IsObject(root) ||
+        (call_media != WECHAT_VOIP_CALL_MEDIA_AUDIO &&
+         call_media != WECHAT_VOIP_CALL_MEDIA_VIDEO))
     {
-        ESP_LOGE(TAG, "来电消息为空");
+        ESP_LOGE(TAG, "入会消息或媒体类型无效");
         return ESP_ERR_INVALID_ARG;
     }
 
     WX_VOIP_TRACEI(TAG,
-                   "开始处理入会消息: auto=%d cancel=%d",
+                   "开始处理入会消息: auto=%d cancel=%d media=%s",
                    auto_answer ? 1 : 0,
-                   cancel_on_connect ? 1 : 0);
+                   cancel_on_connect ? 1 : 0,
+                   call_media == WECHAT_VOIP_CALL_MEDIA_VIDEO ? "video" : "audio");
     WX_VOIP_TRACEI(TAG, "入会消息已解析");
 
     const char *peer_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "peer_id"));
@@ -1576,14 +1589,16 @@ esp_err_t wechat_voip_session_handle_join_room(cJSON *root,
     s_session.generation = generation;
     s_session.outbound_call = auto_answer;
     s_session.cancel_on_connect = cancel_on_connect;
+    s_session.call_media = call_media;
     s_session.state = VOIP_STATE_RINGING;
     set_deadline_locked(VOIP_RING_TIMEOUT_MS);
     unlock_session();
 
     WX_VOIP_TRACEI(TAG,
-                   "入会信息已保存: auto=%d cancel=%d",
+                   "入会信息已保存: auto=%d cancel=%d media=%s",
                    auto_answer ? 1 : 0,
-                   cancel_on_connect ? 1 : 0);
+                   cancel_on_connect ? 1 : 0,
+                   call_media == WECHAT_VOIP_CALL_MEDIA_VIDEO ? "video" : "audio");
 
     if (auto_answer)
     {

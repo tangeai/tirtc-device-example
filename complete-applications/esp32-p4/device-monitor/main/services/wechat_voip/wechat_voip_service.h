@@ -31,7 +31,11 @@ esp_err_t wechat_voip_service_start(void);
 void wechat_voip_service_stop(void);
 esp_err_t wechat_voip_service_answer(void);
 esp_err_t wechat_voip_service_reject_or_hangup(void);
-esp_err_t wechat_voip_service_request_call(const char *open_id);
+esp_err_t wechat_voip_service_request_call(const char *open_id,
+                                           wechat_voip_call_media_t call_media);
+esp_err_t wechat_voip_service_refresh_contacts_async(void);
+bool wechat_voip_service_is_enabled(void);
+bool wechat_voip_service_is_connected(void);
 esp_err_t wechat_voip_service_add_contact(const char *open_id);
 esp_err_t wechat_voip_service_remove_contact(const char *open_id);
 bool wechat_voip_service_has_incoming_call(void);

@@ -10,6 +10,11 @@
 项目明确标记为自生成且按仓库根许可分发的测试素材，以项目内 `media/README.md` 的来源、
 内容和 SHA-256 声明为准；这不改变编解码器实现本身的许可。
 
+ESP32-S3 日志示例中的五个短语音提示由 Windows 本地 `Microsoft Huihui Desktop` 语音合成，
+仅作为固定协议测试输入；文件来源、提示文本和 SHA-256 见
+[`media/README.md`](../logging-examples/esp32-s3/media/README.md)。该来源说明不改变 Microsoft
+语音组件或输出可能适用的条款，二次分发和商用前应结合使用环境核对相应许可。
+
 具体许可证文件随对应组件保留在项目目录中。使用、修改或再分发前，请同时核对目标项目的
 `SOURCE_PROVENANCE.md`、组件目录中的 `LICENSE`/`NOTICE`，以及 SDK 或素材供应方提供的条款。
 未随公开仓分发的供应商 SDK、工具链和烧录工具，需要开发者从相应授权渠道单独获取。

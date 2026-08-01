@@ -67,13 +67,18 @@
 idf.py build
 ```
 
-烧录并打开串口日志：
+使用 Chrome 或 Edge 打开
+[Espressif ESP Tool](https://espressif.github.io/esptool-js/)，按
+`build/flasher_args.json` 把同一次构建生成的全部 BIN 和地址逐项加入并烧录。必须包含
+`storage` SPIFFS 分区，不能只烧录应用 BIN。
+
+烧录完成后复位设备，再打开串口日志：
 
 ```powershell
-idf.py -p COMx flash monitor
+idf.py -p COMx monitor
 ```
 
-将 `COMx` 替换为实际串口号。建议使用 `idf.py flash`，这样会同时烧录应用固件和 `storage` SPIFFS 分区。
+将 `COMx` 替换为实际串口号。
 
 ## 4. 验证步骤
 

@@ -29,29 +29,24 @@
 #endif
 
 /*
- * Device display capabilities reported to ThingConnect. Keep these separate
- * from the codec target below: changing the camera bitrate or encode size must
- * not silently turn the physical 480x320 panel into a portrait device.
+ * Request the service's standard 640x480 landscape MJPEG rendition. These
+ * protocol values remain independent from the physical 480x320 LCD.
  */
-#ifndef APP_CONFIG_WECHAT_VOIP_SCREEN_WIDTH
-#define APP_CONFIG_WECHAT_VOIP_SCREEN_WIDTH 480
-#endif
-
-#ifndef APP_CONFIG_WECHAT_VOIP_SCREEN_HEIGHT
-#define APP_CONFIG_WECHAT_VOIP_SCREEN_HEIGHT 320
-#endif
+#define APP_CONFIG_WECHAT_VOIP_SCREEN_WIDTH  640
+#define APP_CONFIG_WECHAT_VOIP_SCREEN_HEIGHT 480
 
 #ifndef APP_CONFIG_WECHAT_VOIP_CAMERA_ROTATION
 /* Protocol UI metadata only: WeChat rotates the published camera view.
  * Keep the local YUV420 -> H264 frame path byte-for-byte unchanged. */
-#define APP_CONFIG_WECHAT_VOIP_CAMERA_ROTATION 180
+#define APP_CONFIG_WECHAT_VOIP_CAMERA_ROTATION 270
 #endif
 
 #ifndef APP_CONFIG_WECHAT_VOIP_OBJECT_FIT
 /*
  * ThingConnect accepts only "fill" or "contain" for this protocol field.
- * Preserve the remote picture aspect ratio here; the local renderer applies
- * its own centered cover crop independently.
+ * Preserve the complete picture in the WeChat UI. The P4 downlink renderer is
+ * independent: it uses one centered cover crop to map adaptive JPEG frames to
+ * the fixed 480x320 panel without non-uniform stretching.
  */
 #define APP_CONFIG_WECHAT_VOIP_OBJECT_FIT "contain"
 #endif

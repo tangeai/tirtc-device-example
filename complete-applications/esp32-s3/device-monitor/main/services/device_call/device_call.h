@@ -9,6 +9,10 @@
 extern "C" {
 #endif
 
+#define DEVICE_CALL_TYPE_MAX   16
+#define DEVICE_CALL_TYPE_AUDIO "audio"
+#define DEVICE_CALL_TYPE_VIDEO "video"
+
 typedef enum {
     DEVICE_CALL_STATE_IDLE = 0,
     DEVICE_CALL_STATE_OUTGOING,
@@ -34,7 +38,7 @@ typedef struct {
     bool pending_incoming;
     char room_id[96];
     char peer_device_id[128];
-    char call_type[16];
+    char call_type[DEVICE_CALL_TYPE_MAX];
     esp_err_t last_error;
     char message[96];
 } device_call_snapshot_t;
@@ -61,6 +65,7 @@ esp_err_t device_call_start(void);
 esp_err_t device_call_reconcile_room_async(void);
 void device_call_reset_identity_state(void);
 esp_err_t device_call_request(const char *target_device_id);
+esp_err_t device_call_request_with_type(const char *target_device_id, const char *call_type);
 esp_err_t device_call_accept_pending(void);
 esp_err_t device_call_reject_pending(void);
 esp_err_t device_call_hangup(void);

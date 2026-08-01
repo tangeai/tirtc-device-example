@@ -174,6 +174,23 @@ esp_err_t app_wechat_remove_contact(const char *open_id)
 	return wechat_voip_service_remove_contact(open_id);
 }
 
+esp_err_t app_wechat_update_contact_remark(const char *open_id, const char *remark)
+{
+	if (open_id == NULL || open_id[0] == '\0' || remark == NULL) {
+		return ESP_ERR_INVALID_ARG;
+	}
+	if (strlen(open_id) >= APP_WECHAT_OPEN_ID_MAX ||
+	    strlen(remark) >= APP_WECHAT_REMARK_MAX) {
+		return ESP_ERR_INVALID_SIZE;
+	}
+	if (app_get_active_app() != APP_ID_WECHAT || !network_is_connected()) {
+		return ESP_ERR_INVALID_STATE;
+	}
+
+	ESP_LOGD(TAG, "wechat contact remark update requested");
+	return wechat_voip_service_update_contact_remark(open_id, remark);
+}
+
 esp_err_t app_scan_wechat_contact(void)
 {
 	qr_scanner_contact_t contact = {0};

@@ -126,14 +126,23 @@ static void app_contact_scan_result_cb(esp_err_t result,
 
 esp_err_t app_call_contact(const char *device_id)
 {
+    return app_call_contact_with_type(device_id, DEVICE_CALL_TYPE_AUDIO);
+}
+
+esp_err_t app_call_contact_with_type(const char *device_id, const char *call_type)
+{
     if (device_id == NULL ||
-        strlen(device_id) != APP_CALL_CONTACT_DEVICE_ID_LENGTH) {
-        ESP_LOGW(CALL_FLOW_TAG, "stage=app_call_rejected reason=invalid_peer");
+        strlen(device_id) != APP_CALL_CONTACT_DEVICE_ID_LENGTH ||
+        call_type == NULL ||
+        (strcmp(call_type, DEVICE_CALL_TYPE_AUDIO) != 0 &&
+         strcmp(call_type, DEVICE_CALL_TYPE_VIDEO) != 0)) {
+        ESP_LOGW(CALL_FLOW_TAG, "stage=app_call_rejected reason=invalid_request");
         return ESP_ERR_INVALID_ARG;
     }
     ESP_LOGI(CALL_FLOW_TAG,
-             "stage=app_call_begin peer=%s active_app=%d network=%d",
+             "stage=app_call_begin peer=%s type=%s active_app=%d network=%d",
              device_id,
+             call_type,
              (int)app_get_active_app(),
              network_is_connected() ? 1 : 0);
     if (app_get_active_app() != APP_ID_CALL) {
@@ -161,13 +170,14 @@ esp_err_t app_call_contact(const char *device_id)
     ESP_LOGI(CALL_FLOW_TAG,
              "stage=app_call_resources_ready peer=%s",
              device_id);
-    esp_err_t ret = device_call_request(device_id);
+    esp_err_t ret = device_call_request_with_type(device_id, call_type);
     if (ret != ESP_OK) {
         app_release_call_session_resources();
     }
     ESP_LOGI(CALL_FLOW_TAG,
-             "stage=app_call_submitted peer=%s ret=%s",
+             "stage=app_call_queued peer=%s type=%s ret=%s",
              device_id,
+             call_type,
              esp_err_to_name(ret));
     return ret;
 }

@@ -45,6 +45,21 @@ typedef struct {
     uint16_t offset_y;
 } video_frame_ppa_fit_t;
 
+static void video_frame_record_render_layout(
+    video_frame_converter_handle_t handle,
+    uint16_t render_width,
+    uint16_t render_height,
+    uint16_t offset_x,
+    uint16_t offset_y)
+{
+    taskENTER_CRITICAL(&handle->stats_lock);
+    handle->stats.last_render_width = render_width;
+    handle->stats.last_render_height = render_height;
+    handle->stats.last_offset_x = offset_x;
+    handle->stats.last_offset_y = offset_y;
+    taskEXIT_CRITICAL(&handle->stats_lock);
+}
+
 static size_t video_frame_align_up(size_t value, size_t alignment)
 {
     return (value + alignment - 1U) & ~(alignment - 1U);
@@ -178,6 +193,7 @@ static bool video_frame_resolve_ppa_fit(uint16_t crop_width,
                                         uint16_t output_width,
                                         uint16_t output_height,
                                         video_frame_rotation_t rotation,
+                                        bool prevent_upscale,
                                         video_frame_ppa_fit_t *fit)
 {
     if (crop_width == 0U || crop_height == 0U ||
@@ -196,6 +212,9 @@ static bool video_frame_resolve_ppa_fit(uint16_t crop_width,
         ((uint32_t)output_height * VIDEO_FRAME_PPA_SCALE_STEPS) / rotated_height;
     uint32_t scale_steps =
         scale_x_steps < scale_y_steps ? scale_x_steps : scale_y_steps;
+    if (prevent_upscale && scale_steps > VIDEO_FRAME_PPA_SCALE_STEPS) {
+        scale_steps = VIDEO_FRAME_PPA_SCALE_STEPS;
+    }
     if (scale_steps == 0U || scale_steps > VIDEO_FRAME_PPA_SCALE_MAX_STEPS) {
         return false;
     }
@@ -239,6 +258,7 @@ static esp_err_t video_frame_convert_i420_ppa(video_frame_converter_handle_t han
                                                         output_width,
                                                         output_height,
                                                         VIDEO_FRAME_ROTATION_CLOCKWISE_0,
+                                                        handle->config.prevent_upscale,
                                                         &fit) &&
                             packed_size <= handle->packed_yuv420_size &&
                             ((uintptr_t)output & (VIDEO_FRAME_CACHE_LINE_SIZE - 1U)) == 0U &&
@@ -247,6 +267,11 @@ static esp_err_t video_frame_convert_i420_ppa(video_frame_converter_handle_t han
                         TAG,
                         "PPA conversion buffer is not compatible");
 
+    video_frame_record_render_layout(handle,
+                                     fit.render_width,
+                                     fit.render_height,
+                                     fit.offset_x,
+                                     fit.offset_y);
     int64_t started_us = esp_timer_get_time();
     video_frame_pack_i420_region_for_ppa(i420,
                                          source_width,
@@ -375,6 +400,7 @@ static void video_frame_fit_inside(uint16_t source_width,
                                    uint16_t source_height,
                                    uint16_t output_width,
                                    uint16_t output_height,
+                                   bool prevent_upscale,
                                    uint16_t *render_width,
                                    uint16_t *render_height,
                                    uint16_t *offset_x,
@@ -389,6 +415,12 @@ static void video_frame_fit_inside(uint16_t source_width,
     } else {
         width = ((uint32_t)source_width * output_height) / source_height;
         width &= ~1U;
+    }
+
+    if (prevent_upscale &&
+        (width > source_width || height > source_height)) {
+        width = source_width;
+        height = source_height;
     }
 
     *render_width = (uint16_t)width;
@@ -570,6 +602,7 @@ static esp_err_t video_frame_convert_i420_scaled(video_frame_converter_handle_t 
                            crop_height,
                            handle->config.output_width,
                            handle->config.output_height,
+                           handle->config.prevent_upscale,
                            &render_width,
                            &render_height,
                            &offset_x,
@@ -579,6 +612,11 @@ static esp_err_t video_frame_convert_i420_scaled(video_frame_converter_handle_t 
                         TAG,
                         "invalid software conversion layout");
 
+    video_frame_record_render_layout(handle,
+                                     render_width,
+                                     render_height,
+                                     offset_x,
+                                     offset_y);
     memset(output,
            0,
            (size_t)handle->config.output_width * handle->config.output_height * sizeof(*output));
@@ -665,10 +703,12 @@ esp_err_t video_frame_converter_create(const video_frame_converter_config_t *con
     *out_handle = handle;
 
     ESP_LOGI(TAG,
-             "video converter ready: mode=%s fit=%s crop=%ux%u+%u+%u "
+             "video converter ready: mode=%s fit=%s upscale=%s "
+             "crop=%ux%u+%u+%u "
              "output=RGB565-%ux%u i420_staging=%u",
              video_frame_converter_mode_name(handle->last_mode),
              video_frame_fit_mode_name(config->fit_mode),
+             config->prevent_upscale ? "deny" : "allow",
              config->source_crop_width,
              config->source_crop_height,
              config->source_crop_x,
@@ -824,6 +864,7 @@ static esp_err_t video_frame_convert_rgb565_ppa(video_frame_converter_handle_t h
                                                         output_width,
                                                         output_height,
                                                         rotation,
+                                                        handle->config.prevent_upscale,
                                                         &fit) &&
                             ((uintptr_t)output &
                              (VIDEO_FRAME_CACHE_LINE_SIZE - 1U)) == 0U &&
@@ -833,6 +874,11 @@ static esp_err_t video_frame_convert_rgb565_ppa(video_frame_converter_handle_t h
                         TAG,
                         "PPA RGB565 conversion buffer is not compatible");
 
+    video_frame_record_render_layout(handle,
+                                     fit.render_width,
+                                     fit.render_height,
+                                     fit.offset_x,
+                                     fit.offset_y);
     int64_t started_us = esp_timer_get_time();
     if (fit.render_width != output_width || fit.render_height != output_height) {
         memset(output, 0, output_size);
@@ -930,6 +976,7 @@ static esp_err_t video_frame_convert_rgb565_scaled(
                            rotated_height,
                            handle->config.output_width,
                            handle->config.output_height,
+                           handle->config.prevent_upscale,
                            &render_width,
                            &render_height,
                            &offset_x,
@@ -940,9 +987,14 @@ static esp_err_t video_frame_convert_rgb565_scaled(
                              (uint32_t)crop_y + crop_height <= source_height &&
                              video_frame_rotation_is_valid(rotation),
                          ESP_ERR_INVALID_SIZE,
-                        TAG,
-                        "invalid software RGB565 conversion layout");
+                         TAG,
+                         "invalid software RGB565 conversion layout");
 
+    video_frame_record_render_layout(handle,
+                                     render_width,
+                                     render_height,
+                                     offset_x,
+                                     offset_y);
     memset(output,
            0,
            (size_t)handle->config.output_width *

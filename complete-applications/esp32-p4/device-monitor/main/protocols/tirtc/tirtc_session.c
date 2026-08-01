@@ -39,6 +39,7 @@ static const char *TIRTC_SDK_LOG_TAG = "tirtc_sdk";
 #define TIRTC_SESSION_BAD_REMOTE_AUDIO_LOG_INTERVAL_MS 5000U
 #define TIRTC_SESSION_MEDIA_SEND_ERROR_LOG_INTERVAL_MS 1000U
 #define TIRTC_SESSION_REMOTE_KEY_FRAME_RETRY_MS 2000U
+#define TIRTC_SESSION_REMOTE_VIDEO_FIRST_PACKET_RETRY_US (1000ULL * 1000ULL)
 #define TIRTC_SESSION_SHA256_HEX_LEN 65U
 #define TIRTC_SESSION_IPC_AUDIO_SAMPLE_RATE_HZ 8000U
 #define TIRTC_SESSION_IPC_AUDIO_STACK_ALAW_BYTES 512U
@@ -216,6 +217,7 @@ static bool s_local_audio_send_enabled;
 static esp_timer_handle_t s_time_message_initial_timer;
 static esp_timer_handle_t s_time_message_periodic_timer;
 static esp_timer_handle_t s_media_bootstrap_timer;
+static esp_timer_handle_t s_remote_video_first_packet_timer;
 static esp_timer_handle_t s_disconnect_watchdog_timer;
 static esp_timer_handle_t s_deferred_full_reset_timer;
 static esp_timer_handle_t s_deferred_start_after_full_reset_timer;
@@ -252,6 +254,10 @@ static bool s_remote_video_requested;
 static bool s_remote_audio_requested;
 static bool s_remote_video_receive_enabled;
 static bool s_media_bootstrap_pending;
+static uint64_t s_remote_video_first_request_at_us;
+static uint8_t s_remote_video_request_attempts;
+static bool s_remote_video_first_packet_retry_armed;
+static bool s_remote_video_first_packet_retry_due;
 static bool s_remote_video_first_packet_logged;
 static bool s_remote_audio_first_packet_logged;
 static bool s_remote_message_first_packet_logged;
@@ -431,6 +437,7 @@ static esp_err_t tirtc_session_send_time_stream_message(void);
 static void tirtc_session_time_message_initial_timer_cb(void *arg);
 static void tirtc_session_time_message_periodic_timer_cb(void *arg);
 static void tirtc_session_media_bootstrap_timer_cb(void *arg);
+static void tirtc_session_remote_video_first_packet_timer_cb(void *arg);
 static void tirtc_session_disconnect_watchdog_timer_cb(void *arg);
 static void tirtc_session_deferred_full_reset_timer_cb(void *arg);
 static void tirtc_session_deferred_start_after_full_reset_timer_cb(void *arg);
@@ -1082,10 +1089,16 @@ static esp_err_t tirtc_session_create_timers(void)
                         TAG,
                         "rtc time periodic timer create failed");
     ESP_RETURN_ON_ERROR(tirtc_session_create_timer("rtc_media_boot",
-                                                  tirtc_session_media_bootstrap_timer_cb,
-                                                  &s_media_bootstrap_timer),
+                                                   tirtc_session_media_bootstrap_timer_cb,
+                                                   &s_media_bootstrap_timer),
                         TAG,
                         "rtc media bootstrap timer create failed");
+    ESP_RETURN_ON_ERROR(tirtc_session_create_timer(
+                            "rtc_video_first",
+                            tirtc_session_remote_video_first_packet_timer_cb,
+                            &s_remote_video_first_packet_timer),
+                        TAG,
+                        "rtc remote video first-packet timer create failed");
     ESP_RETURN_ON_ERROR(tirtc_session_create_timer("rtc_disc_watch",
                                                   tirtc_session_disconnect_watchdog_timer_cb,
                                                   &s_disconnect_watchdog_timer),
@@ -1674,10 +1687,15 @@ static void tirtc_session_cancel_media_bootstrap(void)
 {
     taskENTER_CRITICAL(&s_rtc_lock);
     s_media_bootstrap_pending = false;
+    s_remote_video_first_packet_retry_armed = false;
+    s_remote_video_first_packet_retry_due = false;
     taskEXIT_CRITICAL(&s_rtc_lock);
 
     if (s_media_bootstrap_timer != NULL) {
         (void)esp_timer_stop(s_media_bootstrap_timer);
+    }
+    if (s_remote_video_first_packet_timer != NULL) {
+        (void)esp_timer_stop(s_remote_video_first_packet_timer);
     }
 }
 
@@ -1697,6 +1715,10 @@ static void tirtc_session_reset_call_state_locked(void)
     s_remote_audio_requested = false;
     s_remote_video_receive_enabled = false;
     s_media_bootstrap_pending = false;
+    s_remote_video_first_request_at_us = 0U;
+    s_remote_video_request_attempts = 0U;
+    s_remote_video_first_packet_retry_armed = false;
+    s_remote_video_first_packet_retry_due = false;
     s_remote_video_first_packet_logged = false;
     s_remote_audio_first_packet_logged = false;
     s_remote_message_first_packet_logged = false;
@@ -2163,8 +2185,44 @@ static void tirtc_session_media_bootstrap_timer_cb(void *arg)
     }
 }
 
+static void tirtc_session_remote_video_first_packet_timer_cb(void *arg)
+{
+    bool retry = false;
+
+    (void)arg;
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    if (s_remote_video_first_packet_retry_armed) {
+        s_remote_video_first_packet_retry_armed = false;
+        if (s_remote_video_requested &&
+            !s_remote_video_first_packet_logged &&
+            s_remote_video_request_attempts == 1U &&
+            tirtc_session_is_media_bootstrap_ready_locked() &&
+            tirtc_session_media_profile_allows_remote_video_locked()) {
+            s_remote_video_first_packet_retry_due = true;
+            s_media_bootstrap_pending = true;
+            retry = true;
+        }
+    }
+    taskEXIT_CRITICAL(&s_rtc_lock);
+
+    if (!retry) {
+        return;
+    }
+
+    tirtc_session_event_t rtc_event = {
+        .type = TIRTC_SESSION_EVENT_MEDIA_BOOTSTRAP,
+    };
+    if (!tirtc_session_enqueue_event(&rtc_event,
+                                      TIRTC_SESSION_CONTROL_EVENT_WAIT_TICKS)) {
+        tirtc_session_note_event("video retry drop");
+        ESP_LOGW(TAG, "rtc event queue full: remote video retry dropped");
+    }
+}
+
 static void tirtc_session_disconnect_watchdog_timer_cb(void *arg)
 {
+    tirtc_session_event_t rtc_event = {0};
     tirtc_conn_t closing_conn = NULL;
     bool was_sdk_started = false;
 
@@ -2179,11 +2237,24 @@ static void tirtc_session_disconnect_watchdog_timer_cb(void *arg)
         return;
     }
 
+    /*
+     * Owners must see the same terminal event whether it came from the SDK or
+     * from the watchdog. Otherwise they retain a stale connection handle even
+     * though the protocol layer has already returned to READY.
+     */
+    rtc_event.type = TIRTC_SESSION_EVENT_DISCONNECTED;
+    rtc_event.payload.conn.conn = closing_conn;
+    rtc_event.payload.conn.error = 0;
     tirtc_session_note_event("disconnect timeout");
     ESP_LOGW(TAG,
-             "rtc disconnect timeout: hconn=%p, force completing teardown",
+             "rtc disconnect timeout: hconn=%p, completing teardown through worker",
              closing_conn);
-    (void)tirtc_session_complete_connection_shutdown(closing_conn, was_sdk_started);
+    if (!tirtc_session_enqueue_event(&rtc_event, 0)) {
+        ESP_LOGE(TAG,
+                 "rtc disconnect timeout event dropped: hconn=%p, force completing teardown",
+                 closing_conn);
+        (void)tirtc_session_complete_connection_shutdown(closing_conn, was_sdk_started);
+    }
 }
 
 static void tirtc_session_deferred_full_reset_timer_cb(void *arg)
@@ -2490,6 +2561,44 @@ static bool tirtc_session_schedule_media_bootstrap_timer(const char *reason, uin
     return true;
 }
 
+static void tirtc_session_schedule_remote_video_first_packet_retry(
+    uint8_t request_attempt)
+{
+    bool should_start = false;
+
+    if (request_attempt != 1U || s_remote_video_first_packet_timer == NULL) {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    should_start = s_remote_video_requested &&
+                   !s_remote_video_first_packet_logged &&
+                   s_remote_video_request_attempts == 1U &&
+                   tirtc_session_is_media_bootstrap_ready_locked();
+    s_remote_video_first_packet_retry_armed = should_start;
+    s_remote_video_first_packet_retry_due = false;
+    taskEXIT_CRITICAL(&s_rtc_lock);
+
+    if (!should_start) {
+        return;
+    }
+
+    (void)esp_timer_stop(s_remote_video_first_packet_timer);
+    esp_err_t ret = esp_timer_start_once(
+        s_remote_video_first_packet_timer,
+        TIRTC_SESSION_REMOTE_VIDEO_FIRST_PACKET_RETRY_US);
+    if (ret == ESP_OK) {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    s_remote_video_first_packet_retry_armed = false;
+    taskEXIT_CRITICAL(&s_rtc_lock);
+    ESP_LOGW(TAG,
+             "remote video first-packet retry timer failed: %s",
+             esp_err_to_name(ret));
+}
+
 void tirtc_session_schedule_media_bootstrap(const char *reason)
 {
     bool should_start = false;
@@ -2572,10 +2681,21 @@ static void tirtc_session_retry_remote_media_request_after_delay(bool retry_vide
 void tirtc_session_run_media_bootstrap(void)
 {
     bool should_run = false;
+    bool retry_remote_video = false;
 
     taskENTER_CRITICAL(&s_rtc_lock);
     if (s_media_bootstrap_pending && tirtc_session_is_media_bootstrap_ready_locked()) {
         should_run = true;
+        if (s_remote_video_first_packet_retry_due) {
+            retry_remote_video = s_remote_video_requested &&
+                                 !s_remote_video_first_packet_logged &&
+                                 s_remote_video_request_attempts == 1U &&
+                                 tirtc_session_media_profile_allows_remote_video_locked();
+            if (retry_remote_video) {
+                s_remote_video_requested = false;
+            }
+            s_remote_video_first_packet_retry_due = false;
+        }
     }
     s_media_bootstrap_pending = false;
     taskEXIT_CRITICAL(&s_rtc_lock);
@@ -2584,6 +2704,9 @@ void tirtc_session_run_media_bootstrap(void)
         return;
     }
 
+    if (retry_remote_video) {
+        ESP_LOGI(TAG, "remote video first packet timeout: retry subscribe once");
+    }
     tirtc_session_note_event("media bootstrap");
     tirtc_session_apply_local_media_policy();
     tirtc_session_request_remote_media();
@@ -5078,6 +5201,10 @@ static esp_err_t tirtc_session_request_remote_audio(tirtc_conn_t conn)
 
 static esp_err_t tirtc_session_request_remote_video(tirtc_conn_t conn)
 {
+    uint64_t accepted_at_us = 0U;
+    uint64_t requested_at_us = 0U;
+    uint8_t request_attempt = 0U;
+
     if (!tirtc_session_is_connection_usable(conn)) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -5112,20 +5239,36 @@ static esp_err_t tirtc_session_request_remote_video(tirtc_conn_t conn)
         return ESP_FAIL;
     }
 
-    ESP_LOGD(TAG, "remote video requested: stream=%u", (unsigned)TIRTC_SESSION_REMOTE_VIDEO_STREAM_ID);
     if (tirtc_session_media_remote_video_requires_key_frame()) {
         (void)tirtc_session_request_remote_key_frame(conn,
                                                     TIRTC_SESSION_REMOTE_VIDEO_STREAM_ID,
                                                     "remote video requested");
     }
 
+    requested_at_us = esp_timer_get_time();
     taskENTER_CRITICAL(&s_rtc_lock);
     if (conn == s_active_conn && s_sdk_started && !s_start_in_progress && !s_stop_in_progress &&
         s_closing_conn == NULL) {
+        if (s_remote_video_request_attempts == 0U) {
+            s_remote_video_first_request_at_us = requested_at_us;
+        }
+        if (s_remote_video_request_attempts < UINT8_MAX) {
+            s_remote_video_request_attempts++;
+        }
         s_remote_video_requested = true;
+        accepted_at_us = s_active_conn_accepted_at_us;
+        request_attempt = s_remote_video_request_attempts;
     }
     taskEXIT_CRITICAL(&s_rtc_lock);
 
+    tirtc_session_schedule_remote_video_first_packet_retry(request_attempt);
+    ESP_LOGI(TAG,
+             "remote video subscribe accepted: stream=%u attempt=%u accepted_ms=%llu",
+             (unsigned)TIRTC_SESSION_REMOTE_VIDEO_STREAM_ID,
+             (unsigned)request_attempt,
+             accepted_at_us != 0U && requested_at_us >= accepted_at_us ?
+                 (unsigned long long)((requested_at_us - accepted_at_us) / 1000ULL) :
+                 0ULL);
     tirtc_session_note_event("remote video req");
     return ESP_OK;
 }
@@ -6566,6 +6709,9 @@ static void tirtc_session_on_video(tirtc_conn_t hconn, const TIRTCFRAMEINFO *fra
 {
     tirtc_conn_t active_conn = NULL;
     bool log_first_packet = false;
+    uint64_t accepted_at_us = 0U;
+    uint64_t first_request_at_us = 0U;
+    uint8_t request_attempts = 0U;
 
     if (!tirtc_session_try_get_active_conn(&active_conn) || hconn != active_conn) {
         return;
@@ -6602,8 +6748,13 @@ static void tirtc_session_on_video(tirtc_conn_t hconn, const TIRTCFRAMEINFO *fra
     taskENTER_CRITICAL(&s_rtc_lock);
     if (!s_remote_video_first_packet_logged) {
         s_remote_video_first_packet_logged = true;
+        s_remote_video_first_packet_retry_armed = false;
+        s_remote_video_first_packet_retry_due = false;
         log_first_packet = true;
     }
+    accepted_at_us = s_active_conn_accepted_at_us;
+    first_request_at_us = s_remote_video_first_request_at_us;
+    request_attempts = s_remote_video_request_attempts;
     s_stats.rx_video_frames++;
     s_stats.rx_video_bytes += frame_info->length;
     tirtc_session_set_last_event_locked("video rx");
@@ -6611,11 +6762,19 @@ static void tirtc_session_on_video(tirtc_conn_t hconn, const TIRTCFRAMEINFO *fra
 
     if (log_first_packet) {
         ESP_LOGI(TAG,
-                 "remote video first packet media=%u(%s) flags=%u payload=%u",
+                 "remote video first packet media=%u(%s) flags=%u payload=%u "
+                 "accepted_ms=%llu subscribe_wait_ms=%llu attempts=%u",
                  frame_info->media,
                  tirtc_session_media_name(frame_info->media),
                  frame_info->flags,
-                 (unsigned)frame_info->length);
+                 (unsigned)frame_info->length,
+                 accepted_at_us != 0U ?
+                     (unsigned long long)((esp_timer_get_time() - accepted_at_us) / 1000ULL) :
+                     0ULL,
+                 first_request_at_us != 0U ?
+                     (unsigned long long)((esp_timer_get_time() - first_request_at_us) / 1000ULL) :
+                     0ULL,
+                 (unsigned)request_attempts);
         tirtc_session_retry_remote_media_request_after_delay(false,
                                                             true,
                                                             "audio after first video",
@@ -7171,8 +7330,15 @@ void tirtc_session_handle_connection_loss(tirtc_conn_t hconn, int error)
                 int disconnect_ret = tirtc_session_disconnect_with_sdk_lock(hconn);
 
                 if (disconnect_ret >= 0) {
-                    ESP_LOGD(TAG,
-                             "request disconnect after remote close hconn=%p ret=%d",
+                    /*
+                     * The peer has already closed its side. Ask the SDK to
+                     * release the handle and keep closing_conn until the SDK
+                     * confirms DISCONNECTED. Advertising READY before that
+                     * confirmation lets a new WHIP enter the SDK while the old
+                     * connection is still being destroyed.
+                     */
+                    ESP_LOGI(TAG,
+                             "remote close cleanup requested: hconn=%p ret=%d, waiting for disconnected",
                              hconn,
                              disconnect_ret);
                     wait_for_disconnect = true;
@@ -7742,6 +7908,7 @@ int tirtc_session_whip_connect(const char *service_desc,
     tirtc_session_whip_request_t *request = NULL;
     size_t service_desc_len = 0;
     size_t token_len = 0;
+    int64_t sdk_call_start_us = 0;
     int ret = TIRTC_E_BUSY;
 
     if (service_desc == NULL || service_desc[0] == '\0' ||
@@ -7755,10 +7922,17 @@ int tirtc_session_whip_connect(const char *service_desc,
     }
     taskENTER_CRITICAL(&s_rtc_lock);
     bool sdk_ready = s_network_connected && s_sdk_initialized && s_sdk_started &&
-                     !s_sdk_prepare_in_progress && !s_start_in_progress &&
-                     !s_stop_in_progress && s_closing_conn == NULL;
+                      !s_sdk_prepare_in_progress && !s_start_in_progress &&
+                      !s_stop_in_progress && s_active_conn == NULL &&
+                      s_closing_conn == NULL;
+    tirtc_conn_t active_conn = s_active_conn;
+    tirtc_conn_t closing_conn = s_closing_conn;
     taskEXIT_CRITICAL(&s_rtc_lock);
     if (!sdk_ready) {
+        ESP_LOGW(TAG,
+                 "WHIP submit rejected before SDK call: active=%p closing=%p",
+                 active_conn,
+                 closing_conn);
         return TIRTC_E_BUSY;
     }
 
@@ -7776,11 +7950,17 @@ int tirtc_session_whip_connect(const char *service_desc,
         tirtc_session_set_next_connection_auto_media(TIRTC_SESSION_DEFAULT_AUTO_MEDIA);
         return TIRTC_E_BUSY;
     }
+    sdk_call_start_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "WHIP SDK call entered");
     ret = TiRtcWhipConnect(request->service_desc,
                            request->token,
                            tirtc_session_on_whip_connect_result,
                            request);
     tirtc_session_give_sdk_api_lock();
+    ESP_LOGI(TAG,
+             "WHIP submit returned: ret=%d elapsed=%ums",
+             ret,
+             (unsigned)((esp_timer_get_time() - sdk_call_start_us) / 1000LL));
 
     if (ret != 0) {
         ESP_LOGE(TAG,
@@ -7803,6 +7983,7 @@ int tirtc_session_whip_connect_external(const char *service_desc,
     tirtc_session_whip_request_t *request = NULL;
     size_t service_desc_len = 0;
     size_t token_len = 0;
+    int64_t sdk_call_start_us = 0;
     int ret = TIRTC_E_BUSY;
 
     if (service_desc == NULL || service_desc[0] == '\0' ||
@@ -7817,10 +7998,17 @@ int tirtc_session_whip_connect_external(const char *service_desc,
 
     taskENTER_CRITICAL(&s_rtc_lock);
     bool sdk_ready = s_network_connected && s_sdk_initialized && s_sdk_started &&
-                     !s_sdk_prepare_in_progress && !s_start_in_progress &&
-                     !s_stop_in_progress && s_closing_conn == NULL;
+                      !s_sdk_prepare_in_progress && !s_start_in_progress &&
+                      !s_stop_in_progress && s_active_conn == NULL &&
+                      s_closing_conn == NULL;
+    tirtc_conn_t active_conn = s_active_conn;
+    tirtc_conn_t closing_conn = s_closing_conn;
     taskEXIT_CRITICAL(&s_rtc_lock);
     if (!sdk_ready) {
+        ESP_LOGW(TAG,
+                 "WHIP external submit rejected before SDK call: active=%p closing=%p",
+                 active_conn,
+                 closing_conn);
         return TIRTC_E_BUSY;
     }
 
@@ -7837,11 +8025,17 @@ int tirtc_session_whip_connect_external(const char *service_desc,
         tirtc_session_free_whip_request(request);
         return TIRTC_E_BUSY;
     }
+    sdk_call_start_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "WHIP external SDK call entered");
     ret = TiRtcWhipConnect(request->service_desc,
                            request->token,
                            tirtc_session_on_external_whip_connect_result,
                            request);
     tirtc_session_give_sdk_api_lock();
+    ESP_LOGI(TAG,
+             "WHIP external submit returned: ret=%d elapsed=%ums",
+             ret,
+             (unsigned)((esp_timer_get_time() - sdk_call_start_us) / 1000LL));
 
     if (ret != 0) {
         ESP_LOGE(TAG,

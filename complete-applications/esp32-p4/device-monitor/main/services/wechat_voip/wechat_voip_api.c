@@ -12,11 +12,10 @@
 #include "wechat_voip_config.h"
 
 static const char *TAG = "wx_voip_api";
-static const char *ACTIVE_CALL_ROOM_TYPE =
-    (WECHAT_VOIP_LOCAL_VIDEO_ENABLE || WECHAT_VOIP_REMOTE_VIDEO_ENABLE) ? "video" : "voice";
 
-_Static_assert(WECHAT_VOIP_SCREEN_WIDTH > WECHAT_VOIP_SCREEN_HEIGHT,
-               "P4 WeChat VoIP profile must report a landscape display");
+_Static_assert(WECHAT_VOIP_SCREEN_WIDTH == 640 &&
+                   WECHAT_VOIP_SCREEN_HEIGHT == 480,
+               "P4 WeChat VoIP profile must request the standard landscape rendition");
 _Static_assert(WECHAT_VOIP_CAMERA_ROTATION == 0 ||
                    WECHAT_VOIP_CAMERA_ROTATION == 90 ||
                    WECHAT_VOIP_CAMERA_ROTATION == 180 ||
@@ -158,14 +157,19 @@ esp_err_t wechat_voip_api_report_profile(const char *api_base, const char *mqtt_
     }
 
     /*
-     * screen_width/screen_height and the media types are the public server
-     * contract. Rotation, mirror, aspect_ratio, and object_fit are extension
-     * hints; the P4 renderer does not depend on the server honoring them.
+     * Request the standard 640x480 landscape rendition. The physical 480x320
+     * panel contract remains inside the renderer, and adaptive service output
+     * may still temporarily arrive at a smaller size.
+     * Rotation, mirror, aspect_ratio, and object_fit are extension hints.
      * P4 publishes hardware-encoded H264, while the service converts WeChat
      * downlink to independent MJPEG frames for the hardware JPEG decoder.
      */
-    cJSON_AddNumberToObject(profile, "screen_width", WECHAT_VOIP_SCREEN_WIDTH);
-    cJSON_AddNumberToObject(profile, "screen_height", WECHAT_VOIP_SCREEN_HEIGHT);
+    cJSON_AddNumberToObject(profile,
+                           "screen_width",
+                           WECHAT_VOIP_SCREEN_WIDTH);
+    cJSON_AddNumberToObject(profile,
+                           "screen_height",
+                           WECHAT_VOIP_SCREEN_HEIGHT);
     cJSON_AddNumberToObject(profile, "camera_rotation", WECHAT_VOIP_CAMERA_ROTATION);
     cJSON_AddNumberToObject(profile,
                            "aspect_ratio",
@@ -195,7 +199,8 @@ esp_err_t wechat_voip_api_report_profile(const char *api_base, const char *mqtt_
                         (unsigned)VOIP_PROFILE_MAX_LEN);
 
     ESP_LOGI(TAG,
-             "report voip profile: request_down=%s-%ux%u server_fit=%s "
+             "report voip profile: request_down=%s-%ux%u "
+             "server_fit=%s "
              "camera_rotation=%u request_up=%s-%ux%u "
              "audio=%uHz/%uch bytes=%u",
              remote_video ? WECHAT_VOIP_DOWN_VIDEO_MEDIA : "none",
@@ -311,6 +316,9 @@ esp_err_t wechat_voip_api_fetch_callers(const char *api_base,
                                   "wxa_user_openid"));
         copy_str(caller.model_id, sizeof(caller.model_id), json_string_any(item, "wx_model_id", "wxa_model_id"));
         copy_str(caller.app_id, sizeof(caller.app_id), json_string_any(item, "wx_app_id", "wxa_app_id"));
+        copy_str(caller.remark,
+                 sizeof(caller.remark),
+                 json_string_any4(item, "remark", "alias", "contact_name", "nickname"));
         if (caller_cb != NULL) {
             caller_cb(&caller, ctx);
         }
@@ -328,17 +336,32 @@ esp_err_t wechat_voip_api_request_call(const char *api_base,
                                        const char *mqtt_token,
                                        const char *device_id,
                                        const wechat_voip_auth_user_t *target,
+                                       wechat_voip_call_media_t call_media,
                                        int wx_version_type)
 {
     if (device_id == NULL || device_id[0] == '\0' ||
         target == NULL || target->openid[0] == '\0' || target->model_id[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
     }
+    if (call_media != WECHAT_VOIP_CALL_MEDIA_AUDIO &&
+        call_media != WECHAT_VOIP_CALL_MEDIA_VIDEO) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const bool video_call = call_media == WECHAT_VOIP_CALL_MEDIA_VIDEO;
+    if (video_call &&
+        !WECHAT_VOIP_LOCAL_VIDEO_ENABLE &&
+        !WECHAT_VOIP_REMOTE_VIDEO_ENABLE) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
 
     char body[VOIP_HTTP_BODY_MAX_LEN];
     /* Platform camera status uses 0 for enabled and 1 for disabled. */
-    const unsigned local_camera_status = WECHAT_VOIP_LOCAL_VIDEO_ENABLE ? 0U : 1U;
-    const unsigned remote_camera_status = WECHAT_VOIP_REMOTE_VIDEO_ENABLE ? 0U : 1U;
+    const char *room_type = video_call ? "video" : "voice";
+    const bool local_video = video_call && WECHAT_VOIP_LOCAL_VIDEO_ENABLE;
+    const bool remote_video = video_call && WECHAT_VOIP_REMOTE_VIDEO_ENABLE;
+    const unsigned local_camera_status = local_video ? 0U : 1U;
+    const unsigned remote_camera_status = remote_video ? 0U : 1U;
     int written = 0;
     if (target->app_id[0] != '\0') {
         written = snprintf(body,
@@ -356,7 +379,7 @@ esp_err_t wechat_voip_api_request_call(const char *api_base,
                            target->app_id,
                            target->openid,
                            target->model_id,
-                           ACTIVE_CALL_ROOM_TYPE,
+                           room_type,
                            wx_version_type,
                            (unsigned)DEVICE_CALLING_TIMEOUT_SEC,
                            local_camera_status,
@@ -375,7 +398,7 @@ esp_err_t wechat_voip_api_request_call(const char *api_base,
                            device_id,
                            target->openid,
                            target->model_id,
-                           ACTIVE_CALL_ROOM_TYPE,
+                           room_type,
                            wx_version_type,
                            (unsigned)DEVICE_CALLING_TIMEOUT_SEC,
                            local_camera_status,
@@ -388,18 +411,25 @@ esp_err_t wechat_voip_api_request_call(const char *api_base,
     char response[VOIP_HTTP_RESPONSE_MAX_LEN] = {0};
     int status = 0;
     ESP_LOGI(TAG,
-             "request wechat call: room=%s local_camera=%s(status=%u) "
+             "request wechat call: device_id=%s room=%s local_camera=%s(status=%u) "
              "remote_camera=%s(status=%u) openid_len=%u model_id_len=%u "
-             "version_type=%d calling_timeout=%us",
-             ACTIVE_CALL_ROOM_TYPE,
-             WECHAT_VOIP_LOCAL_VIDEO_ENABLE ? "on" : "off",
+             "version_type=%d calling_timeout=%us "
+             "down_profile=%s/%ux%u",
+             device_id,
+             room_type,
+             local_video ? "on" : "off",
              local_camera_status,
-             WECHAT_VOIP_REMOTE_VIDEO_ENABLE ? "on" : "off",
+             remote_video ? "on" : "off",
              remote_camera_status,
              (unsigned)strlen(target->openid),
              (unsigned)strlen(target->model_id),
              wx_version_type,
-             (unsigned)DEVICE_CALLING_TIMEOUT_SEC);
+             (unsigned)DEVICE_CALLING_TIMEOUT_SEC,
+             remote_video ?
+                  WECHAT_VOIP_DOWN_VIDEO_MEDIA :
+                  "none",
+             (unsigned)WECHAT_VOIP_SCREEN_WIDTH,
+             (unsigned)WECHAT_VOIP_SCREEN_HEIGHT);
     esp_err_t ret = voip_http_request(api_base,
                                       "/v1/voip/device/call",
                                       "POST",
@@ -417,5 +447,27 @@ esp_err_t wechat_voip_api_request_call(const char *api_base,
                  (unsigned)strlen(response));
         return ESP_FAIL;
     }
-    return parse_and_check_reply(response, "device call");
+    esp_err_t parse_ret = parse_and_check_reply(response, "device call");
+    if (parse_ret != ESP_OK) {
+        return parse_ret;
+    }
+
+    const char *call_id = "";
+    cJSON *root = cJSON_Parse(response);
+    if (root != NULL) {
+        const cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
+        const cJSON *call_id_item = cJSON_IsObject(data) ?
+                                        cJSON_GetObjectItemCaseSensitive(data, "call_id") :
+                                        NULL;
+        const char *value = cJSON_GetStringValue(call_id_item);
+        if (value != NULL) {
+            call_id = value;
+        }
+    }
+    ESP_LOGI(TAG,
+             "wechat call accepted: device_id=%s call_id=%s",
+             device_id,
+             call_id[0] != '\0' ? call_id : "-");
+    cJSON_Delete(root);
+    return ESP_OK;
 }

@@ -7,6 +7,39 @@
 Git `main` 保存源码、文档、必要脚本和 SDK 静态库；构建生成的固件、维护包和其他二进制
 附件不进入 Git 历史。
 
+## 2026-07-31 Release
+
+统一 Tag：
+
+```text
+tirtc-device-examples-v2026.07.31
+```
+
+本次只更新三个项目：
+
+| 项目 | 版本 | 发布交付 |
+| --- | --- | --- |
+| ESP32-S3 日志示例 | `0.3.0` | 源码与 `0x0` 完整镜像 |
+| ESP32-S3 Device Monitor | `1.8.0` | 源码、`0x0` 完整镜像与 OTA app |
+| ESP32-P4 Device App | `1.3.0` | 源码 |
+
+Release 资产名称：
+
+| 项目 | 文件 | 烧录用途 |
+| --- | --- | --- |
+| ESP32-S3 日志示例 | `esp32s3-tirtc-logging-full-v0.3.0.bin` | ESP Tool，地址 `0x0` |
+| ESP32-S3 Device Monitor | `esp32s3-tirtc-device-monitor-full-v1.8.0.bin` | ESP Tool，地址 `0x0` |
+| ESP32-S3 Device Monitor | `esp32s3-tirtc-device-monitor-ota-v1.8.0.bin` | OTA app，不写入 `0x0` |
+| 全局校验 | `SHA256SUMS.txt` | 下载完整性校验 |
+| 全局来源 | `release-manifest.json` | Tag、源码、构建与附件一致性 |
+
+本次两个 `*-full-*.bin` 都是 `16 MB` 整片镜像。它们从 `0x0` 写满目标 Flash，也会重置
+NVS 中原有的 Wi-Fi、绑定和本地设置；烧录后请按项目 README 重新完成首次配置。单独的
+`*-ota-*.bin` 只用于应用 OTA 流程，不能当作 `0x0` 完整镜像使用。
+
+ESP32-P4 Device App `1.3.0` 按源码范围交付，不创建占位 BIN。其他项目维持上一 Release
+版本及附件，不在本次重复构建或上传。
+
 ## ESP32-S3 AT ThingConnect Demo 0.2.0
 
 独立 Release：
@@ -20,8 +53,8 @@ Git `main` 保存源码、文档、必要脚本和 SDK 静态库；构建生成�
 
 本例不声明 OTA 升级合同，因此不发布单独 OTA app。设备侧配置和业务交互使用串口 AT；
 开发者平台账号登录及 6 位绑定码确认仍在平台 H5 完成。功能和体验步骤见项目
-[README](../sdk-integration-examples/esp32-s3-at-thingconnect/README.md) 与
-[使用说明](../sdk-integration-examples/esp32-s3-at-thingconnect/docs/USER_GUIDE_CN.md)。
+[README](../logging-examples/esp32-s3/README.md) 与
+[使用说明](../logging-examples/esp32-s3/docs/USER_GUIDE_CN.md)。
 
 完整镜像的各分片地址来自该发布 commit 正式构建生成的 `flasher_args.json`，不能从本页或
 旧版本手工推导。源码静态核验、正式构建、目标板烧录、平台绑定、AI、设备呼叫和真实媒体
@@ -44,7 +77,7 @@ ESP32-P4 Device App `1.2.3` 本次按源码范围发布。其余项目的正式�
 完成干净构建，附件名称、大小、用途、Flash 地址和 SHA-256 以 Release 页面、
 `SHA256SUMS.txt` 和 `release-manifest.json` 为准。
 
-## 本次资产
+## 2026-07-30 资产
 
 | 项目 | Release 文件 | 烧录用途 |
 | --- | --- | --- |
@@ -71,7 +104,7 @@ ESP32-P4 Device App `1.2.3` 本次按源码范围发布。其余项目的正式�
 
 ## 标签约定
 
-六个项目使用一个统一公开 Tag：
+2026-07-30 的六个项目使用统一公开 Tag：
 
 ```text
 tirtc-device-examples-v2026.07.30
@@ -82,12 +115,19 @@ tirtc-device-examples-v2026.07.30
 
 ## ESP32-S3/P4 烧录
 
-1. 打开 [Espressif ESP Tool](https://espressif.github.io/esptool-js/)。
-2. 选择 `Connect` 并连接目标开发板串口。
-3. 使用 `Add File` 添加从同一 Release 下载的目标板固件。
-4. 按 Release manifest 或项目说明填写烧录地址。
-5. 首次使用或设备状态不确定时执行 `Erase Flash`。
-6. 选择 `Program`，完成后复位开发板。
+准备一根支持数据传输的 USB 线，并使用支持 Web Serial 的 Chrome 或 Edge。Safari 不能使用该工具。
+
+1. 断开其他串口终端，打开 [Espressif ESP Tool](https://espressif.github.io/esptool-js/)。
+2. 点击 `Connect`，在浏览器弹窗中选择开发板串口。
+3. 在 `Program` 区域添加从同一 Release 下载的目标板固件。
+4. 完整镜像填写 Flash 地址 `0x0`；OTA app 不通过这个地址直接烧录。
+5. 保持 Release 说明指定的 Flash mode、frequency 和 size；不确定时不要照搬其他板卡参数。
+6. 本次 `16 MB` 完整镜像本身会覆盖整片 Flash；使用源码构建的分片、跨项目切换或状态不确定时，
+   再先执行 `Erase Flash`。
+7. 点击 `Program`。写入完成后复位开发板，再打开串口观察项目 README 中列出的成功现象。
+
+浏览器看不到串口时，先确认 USB 线支持数据、串口没有被其他程序占用、驱动已安装，并尝试按住
+板卡 `BOOT` 后复位进入下载模式。不同板卡的按键组合可能不同，以项目 README 和板卡资料为准。
 
 固件类型和烧录地址必须以当次 Release 的实际资产说明为准，不能从旧版本文件名推断。
 

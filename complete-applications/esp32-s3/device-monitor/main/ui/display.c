@@ -106,6 +106,7 @@ static lv_obj_t *s_wechat_delete_confirm_box;
 static bool s_call_alert_wechat;
 static uint8_t s_wechat_delete_pending_index = UINT8_MAX;
 static char s_wechat_delete_pending_open_id[DISPLAY_WECHAT_OPEN_ID_MAX];
+static char s_wechat_remark_edit_open_id[DISPLAY_WECHAT_OPEN_ID_MAX];
 static bool s_ai_dialog_external_font_applied;
 static int64_t s_refresh_slow_last_log_us;
 
@@ -353,6 +354,7 @@ static lv_obj_t *s_wechat_page;
 static lv_obj_t *s_wechat_add_page;
 static lv_obj_t *s_wechat_add_edit_page;
 static lv_obj_t *s_wechat_list_page;
+static lv_obj_t *s_wechat_remark_page;
 static lv_obj_t *s_wechat_active_page;
 static lv_obj_t *s_uuid_edit_page;
 static lv_obj_t *s_system_page;
@@ -458,7 +460,9 @@ static lv_obj_t *s_wechat_add_edit_length_label;
 static lv_obj_t *s_wechat_add_edit_status_label;
 static lv_obj_t *s_wechat_empty_label;
 static lv_obj_t *s_wechat_contact_rows[DISPLAY_WECHAT_CONTACT_MAX];
+static lv_obj_t *s_wechat_contact_remark_labels[DISPLAY_WECHAT_CONTACT_MAX];
 static lv_obj_t *s_wechat_contact_open_id_labels[DISPLAY_WECHAT_CONTACT_MAX];
+static lv_obj_t *s_wechat_remark_current_label;
 static lv_obj_t *s_test_status_label;
 static lv_obj_t *s_test_video_btn;
 static lv_obj_t *s_test_video_btn_label;
@@ -599,6 +603,9 @@ static void display_wechat_confirm_add_btn_cb(lv_event_t *event);
 static void display_wechat_add_field_btn_cb(lv_event_t *event);
 static void display_wechat_add_edit_back_btn_cb(lv_event_t *event);
 static void display_wechat_add_edit_save_btn_cb(lv_event_t *event);
+static void display_wechat_contact_remark_btn_cb(lv_event_t *event);
+static void display_wechat_remark_back_btn_cb(lv_event_t *event);
+static void display_wechat_remark_preset_btn_cb(lv_event_t *event);
 static void display_wechat_contact_call_btn_cb(lv_event_t *event);
 static void display_wechat_contact_delete_cb(lv_event_t *event);
 static void display_wechat_delete_cancel_btn_cb(lv_event_t *event);
@@ -639,6 +646,7 @@ static void display_build_wechat_page(lv_obj_t *screen);
 static void display_build_wechat_add_page(lv_obj_t *screen);
 static void display_build_wechat_add_edit_page(lv_obj_t *screen);
 static void display_build_wechat_list_page(lv_obj_t *screen);
+static void display_build_wechat_remark_page(lv_obj_t *screen);
 static void display_build_wechat_active_page(lv_obj_t *screen);
 static void display_build_network_test_page(lv_obj_t *screen);
 static void display_build_tirtc_config_page(lv_obj_t *screen);
@@ -896,6 +904,12 @@ static const char * const s_uuid_keyboard_map[] = {
     "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "\n",
     "A", "S", "D", "F", "G", "H", "J", "K", "L", "\n",
     "Clear", "Z", "X", "C", "V", "B", "N", "M", ""
+};
+
+static const char * const s_wechat_remark_presets[] = {
+    "妈妈", "爸爸", "爷爷",
+    "奶奶", "外公", "外婆",
+    "哥哥", "姐姐", "朋友",
 };
 
 static EXT_RAM_BSS_ATTR display_call_contact_t s_call_contacts[DISPLAY_CALL_CONTACT_COUNT];
@@ -1472,6 +1486,22 @@ static void display_store_scanned_wechat_contact(const char *open_id)
     strlcpy(contact.open_id, open_id, sizeof(contact.open_id));
     s_last_status.wechat_contacts[0] = contact;
     s_last_status.wechat_contact_count = count;
+}
+
+static display_wechat_contact_t *display_find_wechat_contact_by_open_id(const char *open_id)
+{
+    uint8_t count = s_last_status.wechat_contact_count > DISPLAY_WECHAT_CONTACT_COUNT ?
+        DISPLAY_WECHAT_CONTACT_COUNT : s_last_status.wechat_contact_count;
+
+    if (open_id == NULL || open_id[0] == '\0') {
+        return NULL;
+    }
+    for (uint8_t index = 0; index < count; ++index) {
+        if (strcmp(s_last_status.wechat_contacts[index].open_id, open_id) == 0) {
+            return &s_last_status.wechat_contacts[index];
+        }
+    }
+    return NULL;
 }
 
 static const char *display_contact_scan_error_text(esp_err_t result)
@@ -3202,6 +3232,27 @@ static lv_obj_t *display_create_ai_dialog_text(lv_obj_t *parent,
     lv_obj_set_style_text_font(label, display_ai_chat_font(), 0);
     lv_obj_set_style_text_opa(label, LV_OPA_COVER, 0);
     lv_obj_set_style_opa(label, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(label, LV_OBJ_FLAG_SCROLLABLE);
+    display_text_set(label, text != NULL ? text : "");
+    return label;
+}
+
+static lv_obj_t *display_create_runtime_cn_text(lv_obj_t *parent,
+                                                const char *text,
+                                                lv_coord_t x,
+                                                lv_coord_t y,
+                                                lv_coord_t width,
+                                                lv_color_t color,
+                                                lv_text_align_t align)
+{
+    lv_obj_t *label = lv_label_create(parent);
+
+    lv_obj_set_pos(label, x, y);
+    lv_obj_set_width(label, width);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    display_text_set_color(label, color, 0);
+    lv_obj_set_style_text_align(label, align, 0);
+    lv_obj_set_style_text_font(label, display_ai_chat_font(), 0);
     lv_obj_clear_flag(label, LV_OBJ_FLAG_SCROLLABLE);
     display_text_set(label, text != NULL ? text : "");
     return label;
@@ -5398,6 +5449,7 @@ static void display_create_wechat_contact_row(lv_obj_t *parent, uint8_t index, l
 {
     lv_color_t button_fill = lv_color_hex(0xDDF8EA);
     lv_color_t button_text = lv_color_hex(0x1FC985);
+    lv_obj_t *remark_label = NULL;
     lv_obj_t *open_id_label = NULL;
     lv_obj_t *row = display_create_figma_box(parent,
                                              8,
@@ -5413,14 +5465,39 @@ static void display_create_wechat_contact_row(lv_obj_t *parent, uint8_t index, l
                         LV_EVENT_LONG_PRESSED,
                         (void *)(uintptr_t)index);
 
+    remark_label = display_create_runtime_cn_text(row,
+                                                  "",
+                                                  11,
+                                                  2,
+                                                  151,
+                                                  lv_color_hex(0x10233B),
+                                                  LV_TEXT_ALIGN_LEFT);
     open_id_label = display_create_figma_text(row,
                                               "",
                                               11,
-                                              13,
-                                              206,
-                                              lv_color_hex(0x10233B),
-                                              12,
+                                              25,
+                                              151,
+                                              lv_color_hex(0x64758A),
+                                              9,
                                               LV_TEXT_ALIGN_LEFT);
+
+    lv_obj_t *remark_btn = display_create_figma_button(row,
+                                                        169,
+                                                        7,
+                                                        49,
+                                                        30,
+                                                        lv_color_hex(0xE9F5FF),
+                                                        lv_color_hex(0xB9D7F1),
+                                                        "改名",
+                                                        lv_color_hex(0x1768B7),
+                                                        10,
+                                                        NULL);
+    lv_obj_set_style_radius(remark_btn, 7, 0);
+    lv_obj_add_event_cb(remark_btn,
+                        display_wechat_contact_remark_btn_cb,
+                        LV_EVENT_CLICKED,
+                        (void *)(uintptr_t)index);
+
     lv_obj_t *btn = display_create_figma_button(row,
                                                 226,
                                                 5,
@@ -5442,6 +5519,7 @@ static void display_create_wechat_contact_row(lv_obj_t *parent, uint8_t index, l
                         LV_EVENT_LONG_PRESSED,
                         (void *)(uintptr_t)index);
     s_wechat_contact_rows[index] = row;
+    s_wechat_contact_remark_labels[index] = remark_label;
     s_wechat_contact_open_id_labels[index] = open_id_label;
     lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
 }
@@ -5890,6 +5968,7 @@ static void display_hide_all_pages(void)
         s_wechat_add_page,
         s_wechat_add_edit_page,
         s_wechat_list_page,
+        s_wechat_remark_page,
         s_wechat_active_page,
         s_uuid_edit_page,
         s_system_page,
@@ -6141,6 +6220,34 @@ static void display_show_wechat_list_page(void)
     }
     display_update_wechat_contact_list(&s_last_status);
     display_show_page(s_wechat_list_page);
+}
+
+static void display_show_wechat_remark_page(uint8_t contact_index)
+{
+    const display_wechat_contact_t *contact = NULL;
+
+    if (contact_index >= DISPLAY_WECHAT_CONTACT_COUNT ||
+        contact_index >= s_last_status.wechat_contact_count) {
+        display_show_wifi_alert("微信联系人", "联系人不存在");
+        return;
+    }
+    contact = &s_last_status.wechat_contacts[contact_index];
+    if (contact->open_id[0] == '\0') {
+        display_show_wifi_alert("微信联系人", "联系人不存在");
+        return;
+    }
+    if (s_wechat_remark_page == NULL) {
+        display_build_wechat_remark_page(lv_scr_act());
+    }
+
+    strlcpy(s_wechat_remark_edit_open_id,
+            contact->open_id,
+            sizeof(s_wechat_remark_edit_open_id));
+    if (s_wechat_remark_current_label != NULL) {
+        display_text_set(s_wechat_remark_current_label,
+                         contact->remark[0] != '\0' ? contact->remark : "未设置");
+    }
+    display_show_page(s_wechat_remark_page);
 }
 
 static void display_show_wechat_active_page(void)
@@ -6727,7 +6834,7 @@ static void display_home_ai_btn_cb(lv_event_t *event)
 
     esp_err_t ret = display_enter_app(DISPLAY_APP_AI_CHAT);
     if (ret != ESP_OK) {
-        display_show_wifi_alert("AI Chat", ret == ESP_ERR_INVALID_STATE ? "Connect WiFi first." : "Open failed.");
+        display_show_wifi_alert("小钛", ret == ESP_ERR_INVALID_STATE ? "Connect WiFi first." : "Open failed.");
         return;
     }
     display_show_ai_chat_page();
@@ -6770,11 +6877,11 @@ static void display_ai_start_new_btn_cb(lv_event_t *event)
 
     esp_err_t ret = s_actions.on_start_ai_chat(s_actions.ctx);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        display_show_wifi_alert("AI Chat", "Start failed.");
+        display_show_wifi_alert("小钛", "Start failed.");
         return;
     }
     if (ret == ESP_ERR_INVALID_STATE && !s_last_status.network_connected) {
-        display_show_wifi_alert("AI Chat", "Connect WiFi first.");
+        display_show_wifi_alert("小钛", "Connect WiFi first.");
     }
 }
 
@@ -7391,6 +7498,61 @@ static void display_wechat_confirm_add_btn_cb(lv_event_t *event)
     display_reset_wechat_add_input();
     display_show_wechat_list_page();
     display_show_wifi_alert("微信联系人", "添加成功");
+}
+
+static void display_wechat_contact_remark_btn_cb(lv_event_t *event)
+{
+    uint8_t contact_index = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
+
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    display_show_wechat_remark_page(contact_index);
+}
+
+static void display_wechat_remark_back_btn_cb(lv_event_t *event)
+{
+    (void)event;
+    s_wechat_remark_edit_open_id[0] = '\0';
+    display_show_wechat_list_page();
+}
+
+static void display_wechat_remark_preset_btn_cb(lv_event_t *event)
+{
+    const char *remark = (const char *)lv_event_get_user_data(event);
+    display_wechat_contact_t *contact = NULL;
+    esp_err_t ret = ESP_OK;
+
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED || remark == NULL) {
+        return;
+    }
+    if (s_wechat_remark_edit_open_id[0] == '\0') {
+        display_show_wifi_alert("微信联系人", "联系人不存在");
+        return;
+    }
+    if (s_actions.on_update_wechat_contact_remark == NULL) {
+        display_show_wifi_alert("微信联系人", "改名接口不可用");
+        return;
+    }
+
+    ret = s_actions.on_update_wechat_contact_remark(s_wechat_remark_edit_open_id,
+                                                     remark,
+                                                     s_actions.ctx);
+    if (ret != ESP_OK) {
+        display_show_wifi_alert("微信联系人",
+                                ret == ESP_ERR_INVALID_STATE ? "联系人服务忙，请稍后再试" :
+                                ret == ESP_ERR_INVALID_SIZE ? "名称过长" : "名称更新失败");
+        return;
+    }
+
+    contact = display_find_wechat_contact_by_open_id(s_wechat_remark_edit_open_id);
+    if (contact != NULL) {
+        strlcpy(contact->remark, remark, sizeof(contact->remark));
+    }
+    s_wechat_remark_edit_open_id[0] = '\0';
+    display_update_wechat_contact_list(&s_last_status);
+    display_show_wechat_list_page();
+    display_show_wifi_alert("微信联系人", "名称已提交");
 }
 
 static void display_wechat_contact_call_btn_cb(lv_event_t *event)
@@ -8538,13 +8700,19 @@ static void display_update_wechat_contact_list(const display_status_t *status)
         DISPLAY_WECHAT_CONTACT_COUNT : status->wechat_contact_count;
 
     for (uint8_t index = 0; index < DISPLAY_WECHAT_CONTACT_COUNT; ++index) {
+        const char *remark = "";
         const char *open_id = "";
         bool show = index < visible_count &&
                     status->wechat_contacts[index].open_id[0] != '\0';
 
         if (show) {
+            remark = status->wechat_contacts[index].remark[0] != '\0' ?
+                status->wechat_contacts[index].remark : "微信联系人";
             open_id = status->wechat_contacts[index].open_id;
             ++shown_count;
+        }
+        if (s_wechat_contact_remark_labels[index] != NULL) {
+            display_text_set(s_wechat_contact_remark_labels[index], remark);
         }
         if (s_wechat_contact_open_id_labels[index] != NULL) {
             display_text_set(s_wechat_contact_open_id_labels[index], open_id);
@@ -9887,6 +10055,78 @@ static void display_build_wechat_list_page(lv_obj_t *screen)
     display_update_wechat_contact_list(&s_last_status);
 }
 
+static void display_build_wechat_remark_page(lv_obj_t *screen)
+{
+    lv_obj_t *current_row = NULL;
+
+    s_wechat_remark_page = lv_obj_create(screen);
+    display_prepare_figma_page(s_wechat_remark_page);
+    lv_obj_add_flag(s_wechat_remark_page, LV_OBJ_FLAG_HIDDEN);
+
+    (void)display_create_figma_header(s_wechat_remark_page,
+                                      "联系人名称",
+                                      display_wechat_remark_back_btn_cb,
+                                      NULL,
+                                      lv_color_hex(0x21C783),
+                                      NULL);
+
+    current_row = display_create_figma_box(s_wechat_remark_page,
+                                           8,
+                                           36,
+                                           304,
+                                           32,
+                                           lv_color_hex(0xFFFFFF),
+                                           lv_color_hex(0xD6E4EF),
+                                           7);
+    (void)display_create_figma_text(current_row,
+                                    "当前名称",
+                                    10,
+                                    8,
+                                    92,
+                                    lv_color_hex(0x64758A),
+                                    11,
+                                    LV_TEXT_ALIGN_LEFT);
+    s_wechat_remark_current_label = display_create_runtime_cn_text(current_row,
+                                                                   "未设置",
+                                                                   105,
+                                                                   5,
+                                                                   188,
+                                                                   lv_color_hex(0x10233B),
+                                                                   LV_TEXT_ALIGN_RIGHT);
+
+    for (size_t index = 0;
+         index < sizeof(s_wechat_remark_presets) / sizeof(s_wechat_remark_presets[0]);
+         ++index) {
+        const lv_coord_t column = (lv_coord_t)(index % 3U);
+        const lv_coord_t row = (lv_coord_t)(index / 3U);
+        lv_obj_t *button = display_create_figma_button(s_wechat_remark_page,
+                                                       8 + (column * 105),
+                                                       78 + (row * 44),
+                                                       94,
+                                                       34,
+                                                       lv_color_hex(0xE3F8EE),
+                                                       lv_color_hex(0xA8E4C9),
+                                                       s_wechat_remark_presets[index],
+                                                       lv_color_hex(0x0D8A59),
+                                                       13,
+                                                       NULL);
+        lv_obj_set_style_radius(button, 7, 0);
+        lv_obj_add_event_cb(button,
+                            display_wechat_remark_preset_btn_cb,
+                            LV_EVENT_CLICKED,
+                            (void *)s_wechat_remark_presets[index]);
+    }
+
+    (void)display_create_figma_text(s_wechat_remark_page,
+                                    "名称仅用于本设备和AI呼叫",
+                                    8,
+                                    216,
+                                    304,
+                                    lv_color_hex(0x64758A),
+                                    10,
+                                    LV_TEXT_ALIGN_CENTER);
+}
+
 static void display_build_wechat_active_page(lv_obj_t *screen)
 {
     s_wechat_active_page = lv_obj_create(screen);
@@ -10055,7 +10295,7 @@ static void display_build_ai_chat_page(lv_obj_t *screen)
     lv_obj_add_flag(s_ai_chat_page, LV_OBJ_FLAG_HIDDEN);
 
     (void)display_create_ai_header(s_ai_chat_page,
-                                   "AI 对讲",
+                                   "小钛",
                                    display_ai_back_btn_cb,
                                    true,
                                    true);
@@ -10267,7 +10507,7 @@ static void display_build_ai_chat_settings_page(lv_obj_t *screen)
     lv_obj_add_flag(s_ai_chat_settings_page, LV_OBJ_FLAG_HIDDEN);
 
     (void)display_create_ai_header(s_ai_chat_settings_page,
-                                   "AI 对讲设置",
+                                   "小钛设置",
                                    display_ai_settings_back_btn_cb,
                                    false,
                                    false);
@@ -11650,6 +11890,43 @@ esp_err_t display_open_call_page_async(void)
 esp_err_t display_open_call_active_page_async(void)
 {
     return display_schedule_call_page(true);
+}
+
+static void display_open_wechat_page_async_cb(void *user_data)
+{
+    const bool active_call = (uintptr_t)user_data != 0U;
+
+    if (active_call) {
+        s_wechat_active_started_us = 0;
+        display_show_wechat_active_page();
+    } else {
+        display_show_wechat_page();
+    }
+}
+
+static esp_err_t display_schedule_wechat_page(bool active_call)
+{
+    if (!s_display_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!lvgl_port_lock(1000)) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    lv_res_t ret = lv_async_call(display_open_wechat_page_async_cb,
+                                 (void *)(uintptr_t)(active_call ? 1U : 0U));
+    lvgl_port_unlock();
+    return ret == LV_RES_OK ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t display_open_wechat_page_async(void)
+{
+    return display_schedule_wechat_page(false);
+}
+
+esp_err_t display_open_wechat_active_page_async(void)
+{
+    return display_schedule_wechat_page(true);
 }
 
 static lv_obj_t *display_find_tap_target_locked(const lv_point_t *point)

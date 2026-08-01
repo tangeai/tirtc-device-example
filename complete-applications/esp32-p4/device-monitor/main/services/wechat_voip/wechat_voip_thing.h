@@ -6,6 +6,7 @@
 
 #include "esp_err.h"
 #include "wechat_voip_contacts.h"
+#include "wechat_voip_types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,7 +21,8 @@ esp_err_t wechat_voip_thing_start(void);
 void wechat_voip_thing_stop(void);
 bool wechat_voip_thing_is_connected(void);
 esp_err_t wechat_voip_thing_refresh_contacts_async(void);
-esp_err_t wechat_voip_thing_request_call(const char *open_id);
+esp_err_t wechat_voip_thing_request_call(const char *open_id,
+                                         wechat_voip_call_media_t call_media);
 esp_err_t wechat_voip_thing_add_contact(const char *open_id);
 esp_err_t wechat_voip_thing_remove_contact(const char *open_id);
 bool wechat_voip_thing_request_call_busy(void);

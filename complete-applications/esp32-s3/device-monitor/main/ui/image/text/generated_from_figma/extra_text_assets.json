@@ -767,6 +767,1038 @@
           "y_offset": 2
         }
       ]
+    },
+    {
+      "text": "妈妈",
+      "source": "Figma frame 409:2, nodes 409:3-409:5",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_7d3b2b0ebc_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_7d3b2b0ebc_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_7d3b2b0ebc_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "爸爸",
+      "source": "Figma frame 409:2, nodes 409:6-409:8",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_c86d164500_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_c86d164500_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_c86d164500_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "爷爷",
+      "source": "Figma frame 409:2, nodes 409:9-409:11",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_bf795b2847_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_bf795b2847_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_bf795b2847_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "奶奶",
+      "source": "Figma frame 409:2, nodes 409:12-409:14",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_fe4c23d628_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_fe4c23d628_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_fe4c23d628_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "外公",
+      "source": "Figma frame 409:2, nodes 409:15-409:17",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_e1dff1a454_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_e1dff1a454_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_e1dff1a454_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "外婆",
+      "source": "Figma frame 409:2, nodes 409:18-409:20",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_8c7137356d_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_8c7137356d_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_8c7137356d_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "哥哥",
+      "source": "Figma frame 409:2, nodes 409:21-409:23",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_b91fac808b_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_b91fac808b_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_b91fac808b_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "姐姐",
+      "source": "Figma frame 409:2, nodes 409:24-409:26",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_2d4e3b70d0_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_2d4e3b70d0_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_2d4e3b70d0_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "朋友",
+      "source": "Figma frame 409:2, nodes 409:27-409:29",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_d490b5fd60_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_d490b5fd60_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_d490b5fd60_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "28位微信Open ID",
+      "source": "Figma frame 409:2, nodes 409:30-409:32",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_20e2d5de56_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_20e2d5de56_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_20e2d5de56_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "删除联系人",
+      "source": "Figma frame 409:2, nodes 409:33-409:35",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_fc49062f28_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_fc49062f28_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_fc49062f28_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "请输入微信Open ID",
+      "source": "Figma frame 409:2, nodes 409:36-409:38",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_baae33c820_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_baae33c820_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_baae33c820_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "必须是28位微信Open ID",
+      "source": "Figma frame 409:2, nodes 409:39-409:41",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_9f5eb564b5_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_9f5eb564b5_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_9f5eb564b5_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "改名",
+      "source": "Figma frame 409:2, nodes 409:42-409:44",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_4d91317639_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_4d91317639_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_4d91317639_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "未设置",
+      "source": "Figma frame 409:2, nodes 409:45-409:47",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_55a04b58cd_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_55a04b58cd_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_55a04b58cd_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "对方设备当前离线",
+      "source": "Figma frame 409:2, nodes 409:48-409:50",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_2ca325c5bb_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_2ca325c5bb_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_2ca325c5bb_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "请输入28位微信Open ID",
+      "source": "Figma frame 409:2, nodes 409:51-409:53",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_15dd011b6f_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_15dd011b6f_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_15dd011b6f_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "添加接口不可用",
+      "source": "Figma frame 409:2, nodes 409:54-409:56",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_5b4c7d19cb_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_5b4c7d19cb_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_5b4c7d19cb_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "请先进入微信呼叫",
+      "source": "Figma frame 409:2, nodes 409:57-409:59",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_01c6eb77f5_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_01c6eb77f5_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_01c6eb77f5_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "添加失败",
+      "source": "Figma frame 409:2, nodes 409:60-409:62",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_9d563ebbbd_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_9d563ebbbd_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_9d563ebbbd_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "添加成功",
+      "source": "Figma frame 409:2, nodes 409:63-409:65",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_6950d05c09_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_6950d05c09_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_6950d05c09_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "改名接口不可用",
+      "source": "Figma frame 409:2, nodes 409:66-409:68",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_5fa68a1e53_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_5fa68a1e53_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_5fa68a1e53_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "联系人服务忙，请稍后再试",
+      "source": "Figma frame 409:2, nodes 409:69-409:71",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_1eeb1f37e1_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_1eeb1f37e1_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_1eeb1f37e1_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "名称过长",
+      "source": "Figma frame 409:2, nodes 409:72-409:74",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_9cb530969e_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_9cb530969e_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_9cb530969e_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "名称更新失败",
+      "source": "Figma frame 409:2, nodes 409:75-409:77",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_326449ed1f_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_326449ed1f_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_326449ed1f_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "名称已提交",
+      "source": "Figma frame 409:2, nodes 409:78-409:80",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_3b6ae95c99_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_3b6ae95c99_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_3b6ae95c99_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "删除接口不可用",
+      "source": "Figma frame 409:2, nodes 409:81-409:83",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_12c248dc4f_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_12c248dc4f_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_12c248dc4f_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "删除失败",
+      "source": "Figma frame 409:2, nodes 409:84-409:86",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_72250c5922_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_72250c5922_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_72250c5922_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "已删除",
+      "source": "Figma frame 409:2, nodes 409:87-409:89",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_fb5fe1e266_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_fb5fe1e266_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_fb5fe1e266_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "聆听中",
+      "source": "Figma frame 409:2, nodes 409:90-409:92",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_76416e6cb4_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_76416e6cb4_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_76416e6cb4_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "正在连接",
+      "source": "Figma frame 409:2, nodes 409:93-409:95",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_50d95770e7_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_50d95770e7_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_50d95770e7_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "字幕加载中",
+      "source": "Figma frame 409:2, nodes 409:96-409:98",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_23e384e37b_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_23e384e37b_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_23e384e37b_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "呼叫中",
+      "source": "Figma frame 409:2, nodes 409:99-409:101",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_e5337b724e_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_e5337b724e_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_e5337b724e_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "联系人名称",
+      "source": "Figma frame 409:2, nodes 409:102-409:104",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_e34804e83d_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_e34804e83d_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_e34804e83d_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "当前名称",
+      "source": "Figma frame 409:2, nodes 409:105-409:107",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_3d1cc7d14d_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_3d1cc7d14d_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_3d1cc7d14d_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "名称仅用于本设备和AI呼叫",
+      "source": "Figma frame 409:2, nodes 410:2-410:4",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_588566780b_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_588566780b_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_588566780b_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "开始新对话",
+      "source": "Figma frame 409:2, nodes 409:111-409:113",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_4d37472da7_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_4d37472da7_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_4d37472da7_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "对讲方式",
+      "source": "Figma frame 409:2, nodes 409:114-409:116",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_77aa65c2c0_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_77aa65c2c0_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_77aa65c2c0_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "默认常听，直接说话。",
+      "source": "Figma frame 409:2, nodes 409:117-409:119",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_16fb49dd93_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_16fb49dd93_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_16fb49dd93_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "AI 回复时按侧键打断。",
+      "source": "Figma frame 409:2, nodes 409:120-409:122",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_f7ca514b2e_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_f7ca514b2e_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_f7ca514b2e_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "断开后按侧键重连。",
+      "source": "Figma frame 409:2, nodes 409:123-409:125",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_ac61a1dfc7_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_ac61a1dfc7_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_ac61a1dfc7_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "小钛",
+      "source": "Figma frame 412:2, nodes 412:3-412:5",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_ai_brand_name_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_ai_brand_name_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_ai_brand_name_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
+    },
+    {
+      "text": "小钛设置",
+      "source": "Figma frame 412:2, nodes 412:6-412:8",
+      "sizes": [
+        {
+          "size": 10,
+          "file": "text_ai_brand_settings_10.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 12,
+          "file": "text_ai_brand_settings_12.png",
+          "x_offset": 0,
+          "y_offset": 2
+        },
+        {
+          "size": 16,
+          "file": "text_ai_brand_settings_16.png",
+          "x_offset": 0,
+          "y_offset": 2
+        }
+      ]
     }
   ]
 }

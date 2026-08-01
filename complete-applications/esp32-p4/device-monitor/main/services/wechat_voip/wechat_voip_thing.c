@@ -64,6 +64,7 @@ typedef struct {
     active_call_join_disposition_t disposition;
     uint32_t seq;
     bool owns_pending_call;
+    wechat_voip_call_media_t call_media;
 } active_call_join_claim_t;
 
 typedef struct {
@@ -93,6 +94,7 @@ typedef struct {
     uint32_t active_call_seq;
     int64_t active_call_deadline_us;
     char active_call_openid[WECHAT_VOIP_OPEN_ID_MAX];
+    wechat_voip_call_media_t active_call_media;
     wechat_voip_incoming_allowed_cb_t incoming_allowed;
     void *incoming_policy_ctx;
 } wechat_voip_thing_runtime_t;
@@ -266,6 +268,25 @@ static const char *json_string_any4(cJSON *root,
         }
     }
     return NULL;
+}
+
+static wechat_voip_call_media_t call_media_from_payload(cJSON *payload)
+{
+    const char *room_type = json_string_any4(payload,
+                                             "wx_room_type",
+                                             "wxa_room_type",
+                                             "room_type",
+                                             "media_type");
+    if (room_type != NULL &&
+        (strcmp(room_type, "voice") == 0 || strcmp(room_type, "audio") == 0)) {
+        return WECHAT_VOIP_CALL_MEDIA_AUDIO;
+    }
+    if (room_type != NULL && strcmp(room_type, "video") == 0) {
+        return WECHAT_VOIP_CALL_MEDIA_VIDEO;
+    }
+    return (WECHAT_VOIP_LOCAL_VIDEO_ENABLE || WECHAT_VOIP_REMOTE_VIDEO_ENABLE) ?
+               WECHAT_VOIP_CALL_MEDIA_VIDEO :
+               WECHAT_VOIP_CALL_MEDIA_AUDIO;
 }
 
 static bool msg_type_is(const char *type,
@@ -536,6 +557,7 @@ static void active_call_set_idle_locked(void)
     s_voip.active_call_state = ACTIVE_CALL_IDLE;
     s_voip.active_call_deadline_us = 0;
     s_voip.active_call_openid[0] = '\0';
+    s_voip.active_call_media = WECHAT_VOIP_CALL_MEDIA_AUDIO;
 }
 
 static void active_call_reset_if_expired(const char *reason)
@@ -562,9 +584,13 @@ static void active_call_reset_if_expired(const char *reason)
     }
 }
 
-static esp_err_t active_call_begin(const char *open_id, uint32_t *seq)
+static esp_err_t active_call_begin(const char *open_id,
+                                   wechat_voip_call_media_t call_media,
+                                   uint32_t *seq)
 {
-    if (open_id == NULL || open_id[0] == '\0' || seq == NULL) {
+    if (open_id == NULL || open_id[0] == '\0' || seq == NULL ||
+        (call_media != WECHAT_VOIP_CALL_MEDIA_AUDIO &&
+         call_media != WECHAT_VOIP_CALL_MEDIA_VIDEO)) {
         return ESP_ERR_INVALID_ARG;
     }
     active_call_reset_if_expired("before-start");
@@ -580,6 +606,7 @@ static esp_err_t active_call_begin(const char *open_id, uint32_t *seq)
     s_voip.active_call_state = ACTIVE_CALL_REQUESTING;
     s_voip.active_call_deadline_us = esp_timer_get_time() + (int64_t)ACTIVE_CALL_REQUEST_GUARD_MS * 1000;
     copy_str(s_voip.active_call_openid, sizeof(s_voip.active_call_openid), open_id);
+    s_voip.active_call_media = call_media;
     *seq = ++s_voip.active_call_seq;
     xSemaphoreGive(s_voip.lock);
     return ESP_OK;
@@ -629,6 +656,7 @@ static active_call_join_claim_t active_call_claim_join(const char *openid)
     active_call_reset_if_expired("join");
     active_call_join_claim_t claim = {
         .disposition = ACTIVE_CALL_JOIN_INCOMING,
+        .call_media = WECHAT_VOIP_CALL_MEDIA_AUDIO,
     };
 
     xSemaphoreTake(s_voip.lock, portMAX_DELAY);
@@ -646,6 +674,7 @@ static active_call_join_claim_t active_call_claim_join(const char *openid)
                     : ACTIVE_CALL_JOIN_OUTBOUND;
             claim.seq = s_voip.active_call_seq;
             claim.owns_pending_call = true;
+            claim.call_media = s_voip.active_call_media;
         }
     }
     xSemaphoreGive(s_voip.lock);
@@ -675,9 +704,11 @@ static esp_err_t do_active_call(uint32_t seq)
 {
     char openid[WECHAT_VOIP_OPEN_ID_MAX] = {0};
     wechat_voip_auth_user_t target = {0};
+    wechat_voip_call_media_t call_media = WECHAT_VOIP_CALL_MEDIA_AUDIO;
 
     xSemaphoreTake(s_voip.lock, portMAX_DELAY);
     copy_str(openid, sizeof(openid), s_voip.active_call_openid);
+    call_media = s_voip.active_call_media;
     xSemaphoreGive(s_voip.lock);
 
     wechat_voip_contacts_find(openid, &target);
@@ -705,10 +736,11 @@ static esp_err_t do_active_call(uint32_t seq)
     }
 
     return wechat_voip_api_request_call(thing_service_registry_voip_api_base(),
-                                        token,
-                                        device_id,
-                                        &target,
-                                        WECHAT_VOIP_ACTIVE_CALL_VERSION_TYPE);
+                                         token,
+                                         device_id,
+                                         &target,
+                                         call_media,
+                                         WECHAT_VOIP_ACTIVE_CALL_VERSION_TYPE);
 }
 
 static void active_call_task(void *arg)
@@ -798,6 +830,8 @@ static void handle_call_incoming(cJSON *payload)
     }
     bool auto_answer = claim.disposition != ACTIVE_CALL_JOIN_INCOMING;
     bool cancel_on_connect = claim.disposition == ACTIVE_CALL_JOIN_CANCEL;
+    wechat_voip_call_media_t call_media =
+        claim.owns_pending_call ? claim.call_media : call_media_from_payload(payload);
     if (!auto_answer && !incoming_call_allowed()) {
         esp_err_t reject_ret = wechat_voip_session_reject_join_room_busy(payload);
         ESP_LOGW(TAG,
@@ -813,7 +847,8 @@ static void handle_call_incoming(cJSON *payload)
                            "incoming WeChat call");
     esp_err_t ret = wechat_voip_session_handle_join_room(payload,
                                                          auto_answer,
-                                                         cancel_on_connect);
+                                                         cancel_on_connect,
+                                                         call_media);
     bool cancel_requested = active_call_complete_join(&claim);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "call_incoming rejected locally: %s", esp_err_to_name(ret));
@@ -1247,9 +1282,12 @@ bool wechat_voip_thing_is_connected(void)
     return ready && thing_mqtt_client_is_connected();
 }
 
-esp_err_t wechat_voip_thing_request_call(const char *open_id)
+esp_err_t wechat_voip_thing_request_call(const char *open_id,
+                                         wechat_voip_call_media_t call_media)
 {
-    if (open_id == NULL || open_id[0] == '\0') {
+    if (open_id == NULL || open_id[0] == '\0' ||
+        (call_media != WECHAT_VOIP_CALL_MEDIA_AUDIO &&
+         call_media != WECHAT_VOIP_CALL_MEDIA_VIDEO)) {
         return ESP_ERR_INVALID_ARG;
     }
     ESP_RETURN_ON_ERROR(ensure_runtime(), TAG, "runtime init failed");
@@ -1259,7 +1297,7 @@ esp_err_t wechat_voip_thing_request_call(const char *open_id)
     }
 
     uint32_t seq = 0;
-    esp_err_t ret = active_call_begin(open_id, &seq);
+    esp_err_t ret = active_call_begin(open_id, call_media, &seq);
     if (ret != ESP_OK) {
         return ret;
     }

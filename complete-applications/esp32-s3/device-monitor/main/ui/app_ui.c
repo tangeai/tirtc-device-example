@@ -478,6 +478,14 @@ static esp_err_t app_ui_on_remove_wechat_contact(const char *open_id, void *ctx)
     return app_wechat_remove_contact(open_id);
 }
 
+static esp_err_t app_ui_on_update_wechat_contact_remark(const char *open_id,
+                                                        const char *remark,
+                                                        void *ctx)
+{
+    (void)ctx;
+    return app_wechat_update_contact_remark(open_id, remark);
+}
+
 static esp_err_t app_ui_on_scan_wechat_contact(void *ctx)
 {
     (void)ctx;
@@ -662,6 +670,7 @@ void app_ui_configure_display_actions(display_actions_t *actions)
         .on_wechat_contact = app_ui_on_wechat_contact,
         .on_add_wechat_contact = app_ui_on_add_wechat_contact,
         .on_remove_wechat_contact = app_ui_on_remove_wechat_contact,
+        .on_update_wechat_contact_remark = app_ui_on_update_wechat_contact_remark,
         .on_scan_wechat_contact = app_ui_on_scan_wechat_contact,
         .on_start_wechat_contact_scan = app_ui_on_start_wechat_contact_scan,
         .on_stop_wechat_contact_scan = app_ui_on_stop_wechat_contact_scan,
@@ -813,6 +822,9 @@ void app_ui_fill_display_status(display_status_t *status, void *ctx)
         strlcpy(status->wechat_contacts[index].open_id,
                 snapshot->wechat.contacts[index].open_id,
                 sizeof(status->wechat_contacts[index].open_id));
+        strlcpy(status->wechat_contacts[index].remark,
+                snapshot->wechat.contacts[index].remark,
+                sizeof(status->wechat_contacts[index].remark));
     }
 
     status->audio_ready = snapshot->audio.ready;

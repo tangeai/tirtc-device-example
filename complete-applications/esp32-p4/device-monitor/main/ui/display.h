@@ -323,6 +323,10 @@ typedef struct {
 
 esp_err_t display_init(const display_actions_t *actions);
 void display_set_snapshot_provider(display_snapshot_cb_t cb, void *ctx);
+esp_err_t display_open_call_page_async(void);
+esp_err_t display_open_call_active_page_async(void);
+esp_err_t display_open_wechat_page_async(void);
+esp_err_t display_open_wechat_active_page_async(void);
 esp_err_t display_capture_bmp(uint8_t **bmp_data, size_t *bmp_size);
 esp_err_t display_debug_tap(uint16_t x, uint16_t y);
 esp_err_t display_debug_tap_async(uint16_t x, uint16_t y);

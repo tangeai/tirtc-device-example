@@ -54,10 +54,12 @@ config APP_WECHAT_VOIP_REMOTE_VIDEO_ENABLE
     bool "Display remote WeChat video during calls"
     default y
     help
-        Ask the service to transcode remote WeChat video to 480x320 MJPEG,
-        subscribe to the JPEG frame stream, decode it with the ESP32-P4
-        hardware JPEG decoder, and present it on the display. The local camera
-        uplink remains H264. Disable only for an audio-only product variant.
+        Request the standard 640x480 landscape MJPEG downlink, decode the
+        received frames with the ESP32-P4 hardware JPEG decoder, and map them
+        once to the physical 480x320 display without non-uniform stretching or
+        local rotation. Smaller adaptive frames may be uniformly enlarged to
+        fill the display. The local camera uplink remains H264. Disable only
+        for an audio-only product variant.
 
 endmenu
 

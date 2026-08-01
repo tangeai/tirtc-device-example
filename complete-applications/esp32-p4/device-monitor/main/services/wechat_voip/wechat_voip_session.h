@@ -8,6 +8,7 @@
 #include "cJSON.h"
 #include "esp_err.h"
 #include "tiRTC.h"
+#include "wechat_voip_types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,7 +25,8 @@ typedef enum {
 
 esp_err_t wechat_voip_session_handle_join_room(cJSON *payload,
                                                bool auto_answer,
-                                               bool cancel_on_connect);
+                                               bool cancel_on_connect,
+                                               wechat_voip_call_media_t call_media);
 esp_err_t wechat_voip_session_reject_join_room_busy(cJSON *payload);
 esp_err_t wechat_voip_session_answer(void);
 esp_err_t wechat_voip_session_reject_incoming(void);

@@ -107,13 +107,18 @@ idf.py build
 
 首次编译时，ESP-IDF 会根据 `main/idf_component.yml` 和 `dependencies.lock` 获取并锁定 P4 Wi-Fi 相关 managed components。
 
-烧录并查看串口日志：
+构建后用 Chrome 或 Edge 打开
+[Espressif ESP Tool](https://espressif.github.io/esptool-js/)，按
+`build/flasher_args.json` 把同一次构建生成的全部 BIN 和地址逐项加入并烧录。这样应用和
+`storage` SPIFFS 测试媒体会保持对应，且不会把单独的应用 BIN 错写到 `0x0`。
+
+烧录完成后复位设备，再查看串口日志：
 
 ```powershell
-idf.py -p COMx flash monitor
+idf.py -p COMx monitor
 ```
 
-将 `COMx` 替换为实际串口号。建议使用 `idf.py flash`，这样会同时烧录应用固件和 `storage` SPIFFS 分区。
+将 `COMx` 替换为实际串口号。
 
 ## 预期启动日志
 

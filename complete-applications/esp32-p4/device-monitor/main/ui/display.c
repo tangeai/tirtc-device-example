@@ -49,6 +49,9 @@ static void *display_calloc_psram(size_t count, size_t size)
 #define DISPLAY_BINDING_PLATFORM_URL        APP_CONFIG_DEVICE_BINDING_API_BASE
 #define DISPLAY_BINDING_CODE_PLACEHOLDER    "------"
 #define DISPLAY_HOME_PORTRAIT_HEADER_HEIGHT 28
+#define DISPLAY_AI_APP_TITLE                 "AI 对讲"
+#define DISPLAY_AI_SETTINGS_TITLE            "AI 对讲设置"
+#define DISPLAY_AI_AVATAR_NAME               "小钛"
 #define DISPLAY_HOME_LANDSCAPE_HEADER_HEIGHT DISPLAY_UI_HEADER_HEIGHT
 #define DISPLAY_HOME_LANDSCAPE_MIN_WIDTH    440
 #define DISPLAY_HOME_LANDSCAPE_MIN_HEIGHT   300
@@ -700,6 +703,7 @@ static EXT_RAM_BSS_ATTR char s_wechat_qr_payload[DISPLAY_CONTACT_QR_PAYLOAD_MAX]
 static int64_t s_call_active_started_us;
 static int64_t s_call_active_page_opened_us;
 static int64_t s_wechat_active_started_us;
+static int64_t s_wechat_active_page_opened_us;
 
 static void display_wifi_ap_select_cb(lv_event_t *event);
 static void display_show_home_page(void);
@@ -4440,7 +4444,8 @@ static uint8_t display_ai_avatar_normalize(uint8_t avatar)
 
 static const char *display_ai_avatar_name(uint8_t avatar)
 {
-    return display_ai_avatar_normalize(avatar) == DISPLAY_AI_AVATAR_SPROUT ? "小芽" : "小云";
+    (void)avatar;
+    return DISPLAY_AI_AVATAR_NAME;
 }
 
 static ai_chat_avatar_state_t display_ai_avatar_visual_state(const display_status_t *status,
@@ -6028,6 +6033,9 @@ static void display_show_wechat_active_page(void)
     }
     display_show_page(s_wechat_active_page);
     display_update_wechat_active_page(&s_last_status);
+    if (!was_visible) {
+        s_wechat_active_page_opened_us = esp_timer_get_time();
+    }
 }
 
 static void display_show_system_page(void)
@@ -6575,7 +6583,8 @@ static void display_home_ai_btn_cb(lv_event_t *event)
 
     esp_err_t ret = display_enter_app(DISPLAY_APP_AI_CHAT);
     if (ret != ESP_OK) {
-        display_show_wifi_alert("AI Chat", ret == ESP_ERR_INVALID_STATE ? "Connect WiFi first." : "Open failed.");
+        display_show_wifi_alert(DISPLAY_AI_APP_TITLE,
+                                ret == ESP_ERR_INVALID_STATE ? "Connect WiFi first." : "Open failed.");
         return;
     }
     display_show_ai_chat_page();
@@ -6622,11 +6631,11 @@ static void display_ai_start_new_btn_cb(lv_event_t *event)
 
     esp_err_t ret = s_actions.on_start_ai_chat(s_actions.ctx);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        display_show_wifi_alert("AI Chat", "Start failed.");
+        display_show_wifi_alert(DISPLAY_AI_APP_TITLE, "Start failed.");
         return;
     }
     if (ret == ESP_ERR_INVALID_STATE && !s_last_status.network_connected) {
-        display_show_wifi_alert("AI Chat", "Connect WiFi first.");
+        display_show_wifi_alert(DISPLAY_AI_APP_TITLE, "Connect WiFi first.");
     }
 }
 
@@ -7067,6 +7076,7 @@ static void display_call_video_surface_tap_cb(lv_event_t *event)
     display_call_video_overlays_t *overlays = NULL;
     lv_obj_t *image = NULL;
     lv_obj_t *placeholder = NULL;
+    lv_img_dsc_t *image_dsc = NULL;
     bool direct_lcd_active = false;
     const char *owner = NULL;
 
@@ -7079,6 +7089,7 @@ static void display_call_video_surface_tap_cb(lv_event_t *event)
         overlays = &s_wechat_video_overlays;
         image = s_wechat_video_image;
         placeholder = s_wechat_video_placeholder_label;
+        image_dsc = &s_wechat_video_image_dsc;
         direct_lcd_active = s_wechat_video_direct_lcd_active;
         owner = "wechat";
     } else {
@@ -7090,17 +7101,44 @@ static void display_call_video_surface_tap_cb(lv_event_t *event)
         overlays = &s_call_video_overlays;
         image = s_call_video_image;
         placeholder = s_call_video_placeholder_label;
+        image_dsc = &s_call_video_image_dsc;
         direct_lcd_active = s_call_video_direct_lcd_active;
         owner = "device-call";
     }
 
+    bool show_overlays = overlays->hidden;
+    if (show_overlays &&
+        direct_lcd_active &&
+        image != NULL &&
+        image_dsc != NULL &&
+        image_dsc->data != NULL) {
+        /*
+         * The direct path keeps the latest renderer slot retained. Attach it
+         * to LVGL only when controls need composition; the normal video path
+         * remains a single LCD transfer from its very first frame.
+         */
+        lv_img_cache_invalidate_src(image_dsc);
+        if (lv_img_get_src(image) != image_dsc) {
+            lv_img_set_src(image, image_dsc);
+        }
+        lv_obj_clear_flag(image, LV_OBJ_FLAG_HIDDEN);
+    }
     display_set_call_video_overlays_hidden(overlays,
                                            image,
                                            placeholder,
                                            direct_lcd_active,
-                                           !overlays->hidden);
-    /* The currently presented RGB slot remains owned by the renderer, so LVGL
-     * can redraw only the changed controls without waiting for another frame. */
+                                           !show_overlays);
+    if (!show_overlays && image != NULL) {
+        /*
+         * Hiding the LVGL image transfers panel ownership back to the direct
+         * video path. Drain that invalidation together with the controls so no
+         * delayed LVGL flush can overwrite a later full-frame DMA transfer.
+         */
+        lv_obj_add_flag(image, LV_OBJ_FLAG_HIDDEN);
+    }
+    /* The currently presented RGB slot remains owned by the renderer. Showing
+     * controls composites that slot with LVGL; hiding them drains LVGL before
+     * the next direct frame takes over the panel. */
     lv_refr_now(s_display);
     ESP_LOGI(TAG,
              "%s video controls %s",
@@ -7296,6 +7334,7 @@ static void display_wechat_contact_call_btn_cb(lv_event_t *event)
                                 message);
         return;
     }
+    s_last_status.wechat_call_state = DISPLAY_WECHAT_CALL_STATE_CALLING;
     s_wechat_active_started_us = 0;
     display_show_wechat_active_page();
 }
@@ -8462,8 +8501,11 @@ static void display_update_call_video_frame(void)
     bool *direct_lcd_failed = NULL;
 #endif
     const char *owner = NULL;
-    const char *presentation_path = "lvgl";
-    uint32_t direct_transfer_us = 0;
+    const char *presentation_path = "lvgl-sync";
+    uint32_t presentation_transfer_us = 0;
+#if CONFIG_APP_CALL_VIDEO_DIRECT_LCD
+    uint32_t direct_transition_refresh_us = 0;
+#endif
     bool frame_presented = false;
 
     if (s_call_video_image != NULL &&
@@ -8511,19 +8553,25 @@ static void display_update_call_video_frame(void)
     if (overlays != NULL &&
         !overlays->hidden &&
         overlays->hide_at_us > 0 &&
-        esp_timer_get_time() >= overlays->hide_at_us &&
-        image_dsc->data != NULL) {
+        esp_timer_get_time() >= overlays->hide_at_us) {
         /*
-         * Remove controls while the previous RGB slot is still retained.
-         * LVGL only refreshes the overlay rectangles; subsequent video frames
-         * can then use one full-screen DMA transaction without temporal strips.
+         * Direct LCD and LVGL share the panel. Complete the LVGL handoff
+         * before the first direct frame; otherwise pending dirty rectangles
+         * from hidden controls can overwrite parts of that frame later.
          */
         display_set_call_video_overlays_hidden(overlays,
                                                image,
                                                placeholder,
                                                *direct_lcd_active,
                                                true);
+        if (image != NULL &&
+            !lv_obj_has_flag(image, LV_OBJ_FLAG_HIDDEN)) {
+            lv_obj_add_flag(image, LV_OBJ_FLAG_HIDDEN);
+        }
+        int64_t refresh_started_us = esp_timer_get_time();
         lv_refr_now(s_display);
+        direct_transition_refresh_us =
+            (uint32_t)(esp_timer_get_time() - refresh_started_us);
     }
 #endif
 
@@ -8540,14 +8588,9 @@ static void display_update_call_video_frame(void)
     }
 
 #if CONFIG_APP_CALL_VIDEO_DIRECT_LCD
-    bool image_backing_ready =
-        image_dsc->data != NULL &&
-        lv_img_get_src(image) == image_dsc &&
-        !lv_obj_has_flag(image, LV_OBJ_FLAG_HIDDEN);
     if (!*direct_lcd_failed &&
         overlays != NULL &&
-        overlays->hidden &&
-        image_backing_ready) {
+        overlays->hidden) {
         bool direct_transition = !*direct_lcd_active;
         if (placeholder != NULL &&
             !lv_obj_has_flag(placeholder, LV_OBJ_FLAG_HIDDEN)) {
@@ -8555,9 +8598,9 @@ static void display_update_call_video_frame(void)
         }
         /*
          * Keep the presented slot retained and update LVGL's backing pointer
-         * without invalidating the image. This lets a tap redraw controls
-         * immediately over the current frame while normal video presentation
-         * stays on the single-transfer direct path.
+         * without forcing a refresh. A tap can attach the same frame to LVGL
+         * when controls are needed, while normal video presentation uses the
+         * single-transfer direct path from the first frame onward.
          */
         lv_img_cache_invalidate_src(image_dsc);
         image_dsc->data = (const uint8_t *)pixels;
@@ -8566,16 +8609,17 @@ static void display_update_call_video_frame(void)
                                          CALL_VIDEO_RENDER_WIDTH,
                                          CALL_VIDEO_RENDER_HEIGHT,
                                          pixels,
-                                         &direct_transfer_us);
+                                         &presentation_transfer_us);
         if (ret == ESP_OK) {
             frame_presented = true;
             presentation_path = "direct-psram-dma";
             *direct_lcd_active = true;
             if (direct_transition) {
                 ESP_LOGI(TAG,
-                         "%s video path=direct transfer=%luus",
+                         "%s video path=direct lvgl_drain=%luus transfer=%luus",
                          owner,
-                         (unsigned long)direct_transfer_us);
+                         (unsigned long)direct_transition_refresh_us,
+                         (unsigned long)presentation_transfer_us);
             }
         } else {
             *direct_lcd_failed = true;
@@ -8606,6 +8650,19 @@ static void display_update_call_video_frame(void)
         !lv_obj_has_flag(placeholder, LV_OBJ_FLAG_HIDDEN)) {
         lv_obj_add_flag(placeholder, LV_OBJ_FLAG_HIDDEN);
     }
+    if (!frame_presented) {
+        /*
+         * The image descriptor points directly at a renderer-owned PSRAM
+         * slot. Finish LVGL's source read before the next presentation hands
+         * that slot back to the converter; otherwise a 10 ms video timer can
+         * overwrite the buffer while LVGL is still drawing it in strips.
+         */
+        int64_t refresh_started_us = esp_timer_get_time();
+        lv_refr_now(s_display);
+        presentation_transfer_us =
+            (uint32_t)(esp_timer_get_time() - refresh_started_us);
+        frame_presented = true;
+    }
     if (!*first_frame_logged) {
         *first_frame_logged = true;
         ESP_LOGI(TAG,
@@ -8618,7 +8675,7 @@ static void display_update_call_video_frame(void)
                  CALL_VIDEO_RENDER_WIDTH,
                  CALL_VIDEO_RENDER_HEIGHT,
                  (unsigned long)*sequence,
-                 (unsigned long)direct_transfer_us);
+                 (unsigned long)presentation_transfer_us);
     }
 }
 
@@ -8788,6 +8845,13 @@ static bool display_wechat_call_state_keeps_active_page(display_wechat_call_stat
     default:
         return false;
     }
+}
+
+static bool display_wechat_call_state_opens_active_page(display_wechat_call_state_t state)
+{
+    return state == DISPLAY_WECHAT_CALL_STATE_CALLING ||
+           state == DISPLAY_WECHAT_CALL_STATE_CONNECTING ||
+           state == DISPLAY_WECHAT_CALL_STATE_IN_CALL;
 }
 
 static void display_update_wechat_active_page(const display_status_t *status)
@@ -10571,7 +10635,7 @@ static void display_build_ai_chat_page(lv_obj_t *screen)
     lv_obj_add_flag(s_ai_chat_page, LV_OBJ_FLAG_HIDDEN);
 
     (void)display_create_ai_header(s_ai_chat_page,
-                                   "AI 对讲",
+                                   DISPLAY_AI_APP_TITLE,
                                    display_ai_back_btn_cb,
                                    true,
                                    true);
@@ -10595,7 +10659,7 @@ static void display_build_ai_chat_page(lv_obj_t *screen)
         s_ai_avatar_last_state = AI_CHAT_AVATAR_STATE_RESTING;
     }
     s_ai_avatar_name_label = display_create_ai_static_text(avatar_card,
-                                                           "小云",
+                                                           DISPLAY_AI_AVATAR_NAME,
                                                            12,
                                                            128,
                                                            108,
@@ -10687,7 +10751,7 @@ static void display_build_ai_chat_settings_page(lv_obj_t *screen)
     lv_obj_add_flag(s_ai_chat_settings_page, LV_OBJ_FLAG_HIDDEN);
 
     (void)display_create_ai_header(s_ai_chat_settings_page,
-                                   "AI 对讲设置",
+                                   DISPLAY_AI_SETTINGS_TITLE,
                                    display_ai_settings_back_btn_cb,
                                    false,
                                    false);
@@ -11923,6 +11987,17 @@ static void display_refresh_timer(lv_timer_t *timer)
         main_page_visible = false;
         call_list_page_visible = false;
     }
+    if (display_wechat_call_state_opens_active_page(status->wechat_call_state) &&
+        !display_wechat_call_state_keeps_active_page(previous_status->wechat_call_state) &&
+        !wechat_active_page_visible) {
+        display_show_wechat_active_page();
+        wechat_active_page_visible = true;
+        wechat_page_visible = false;
+        wechat_list_page_visible = false;
+        ESP_LOGI(TAG,
+                 "wechat active page restored: state=%d",
+                 (int)status->wechat_call_state);
+    }
     if (display_sync_call_contacts_from_status(status)) {
         display_invalidate_call_list_page();
         if (call_list_page_visible) {
@@ -11961,9 +12036,14 @@ static void display_refresh_timer(lv_timer_t *timer)
 
     if (wechat_active_page_visible) {
         display_update_wechat_active_page(status);
-        if (!display_wechat_call_state_keeps_active_page(status->wechat_call_state)) {
+        if (!display_wechat_call_state_keeps_active_page(status->wechat_call_state) &&
+            refresh_start_us - s_wechat_active_page_opened_us >
+                DISPLAY_CALL_PAGE_TRANSITION_GRACE_US) {
             s_wechat_active_started_us = 0;
+            s_wechat_active_page_opened_us = 0;
             display_show_wechat_page();
+            wechat_active_page_visible = false;
+            wechat_page_visible = true;
         }
     }
 
@@ -12538,6 +12618,56 @@ esp_err_t display_debug_tap(uint16_t x, uint16_t y)
 
     lvgl_port_unlock();
     return ret;
+}
+
+static void display_open_call_page_async_cb(void *arg)
+{
+    (void)arg;
+    display_show_call_page();
+}
+
+static void display_open_call_active_page_async_cb(void *arg)
+{
+    (void)arg;
+    display_show_call_active_page();
+}
+
+static void display_open_wechat_page_async_cb(void *arg)
+{
+    (void)arg;
+    display_show_wechat_page();
+}
+
+static void display_open_wechat_active_page_async_cb(void *arg)
+{
+    (void)arg;
+    display_show_wechat_active_page();
+}
+
+static esp_err_t display_open_page_async(lv_async_cb_t callback)
+{
+    return lv_async_call(callback, NULL) == LV_RES_OK ?
+        ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+esp_err_t display_open_call_page_async(void)
+{
+    return display_open_page_async(display_open_call_page_async_cb);
+}
+
+esp_err_t display_open_call_active_page_async(void)
+{
+    return display_open_page_async(display_open_call_active_page_async_cb);
+}
+
+esp_err_t display_open_wechat_page_async(void)
+{
+    return display_open_page_async(display_open_wechat_page_async_cb);
+}
+
+esp_err_t display_open_wechat_active_page_async(void)
+{
+    return display_open_page_async(display_open_wechat_active_page_async_cb);
 }
 
 esp_err_t display_debug_tap_async(uint16_t x, uint16_t y)

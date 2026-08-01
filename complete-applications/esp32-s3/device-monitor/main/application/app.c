@@ -103,7 +103,7 @@ typedef enum {
 	APP_LIFECYCLE_EVENT_ENTER_APP = 1,
 	APP_LIFECYCLE_EVENT_RETURN_HOME,
 	APP_LIFECYCLE_EVENT_START_APP_SERVICES,
-	APP_LIFECYCLE_EVENT_AI_CHAT_CALL_DEVICE,
+	APP_LIFECYCLE_EVENT_AI_CHAT_CALL_CONTACT,
 } app_lifecycle_event_type_t;
 
 typedef struct {
@@ -118,7 +118,9 @@ typedef struct {
 typedef struct {
 	app_lifecycle_event_type_t type;
 	app_id_t app_id;
-	char call_target_device_id[APP_CALL_CONTACT_DEVICE_ID_MAX];
+	ai_chat_device_action_route_t call_route;
+	char call_target_id[AI_CHAT_DEVICE_ACTION_TARGET_MAX];
+	char call_type[AI_CHAT_DEVICE_ACTION_CALL_TYPE_MAX];
 } app_lifecycle_event_t;
 
 typedef struct {
@@ -179,7 +181,9 @@ static esp_err_t app_return_home_locked(void);
 static esp_err_t app_enter_app_sync(app_id_t app_id);
 static esp_err_t app_return_home_sync(void);
 static esp_err_t app_enqueue_lifecycle_event(app_lifecycle_event_type_t type, app_id_t app_id);
-static esp_err_t app_enqueue_ai_chat_call_lifecycle_event(const char *target_device_id);
+static esp_err_t app_enqueue_ai_chat_call_lifecycle_event(ai_chat_device_action_route_t route,
+							 const char *target_id,
+							 const char *call_type);
 static esp_err_t app_start_app_services(app_id_t app_id);
 static esp_err_t app_prepare_rtc_after_time_sync(const char *reason);
 static esp_err_t app_prepare_rtc_after_config_if_ready(const char *reason);
@@ -222,7 +226,9 @@ static esp_err_t app_ai_chat_device_action_cb(const ai_chat_device_action_t *act
 static esp_err_t app_ai_chat_device_action_committed_cb(const ai_chat_device_action_t *action,
 						       const ai_chat_device_action_result_t *result,
 						       void *ctx);
-static void app_handle_ai_chat_call_device(const char *target_device_id);
+static void app_handle_ai_chat_call_contact(ai_chat_device_action_route_t route,
+					    const char *target_id,
+					    const char *call_type);
 static void app_request_ai_chat_start_if_idle(const char *reason);
 static void app_begin_ai_chat_start_window(void);
 static void app_schedule_ai_chat_token_prefetch(const char *reason);
@@ -570,35 +576,88 @@ static esp_err_t app_ai_chat_device_action_committed_cb(const ai_chat_device_act
 {
 	(void)action;
 	(void)ctx;
-	if (result == NULL || !result->ok || !result->start_device_call ||
-	    result->target_device_id[0] == '\0') {
+	if (result == NULL || !result->ok ||
+	    result->call_route == AI_CHAT_DEVICE_ACTION_ROUTE_NONE ||
+	    result->target_id[0] == '\0' ||
+	    result->call_type[0] == '\0') {
 		return ESP_ERR_INVALID_ARG;
 	}
 
-	return app_enqueue_ai_chat_call_lifecycle_event(result->target_device_id);
+	return app_enqueue_ai_chat_call_lifecycle_event(result->call_route,
+							result->target_id,
+							result->call_type);
 }
 
-static void app_handle_ai_chat_call_device(const char *target_device_id)
+static const char *app_ai_call_route_name(ai_chat_device_action_route_t route)
+{
+	switch (route) {
+	case AI_CHAT_DEVICE_ACTION_ROUTE_DEVICE_CALL:
+		return "device";
+	case AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP:
+		return "wechat";
+	case AI_CHAT_DEVICE_ACTION_ROUTE_NONE:
+	default:
+		return "none";
+	}
+}
+
+static bool app_ai_call_target_valid(ai_chat_device_action_route_t route, const char *target_id)
+{
+	if (target_id == NULL || target_id[0] == '\0') {
+		return false;
+	}
+	switch (route) {
+	case AI_CHAT_DEVICE_ACTION_ROUTE_DEVICE_CALL:
+		return strlen(target_id) == APP_CALL_CONTACT_DEVICE_ID_LENGTH;
+	case AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP:
+		return strlen(target_id) < APP_WECHAT_OPEN_ID_MAX;
+	case AI_CHAT_DEVICE_ACTION_ROUTE_NONE:
+	default:
+		return false;
+	}
+}
+
+static bool app_ai_call_type_valid(ai_chat_device_action_route_t route, const char *call_type)
+{
+	if (call_type == NULL) {
+		return false;
+	}
+	if (strcmp(call_type, DEVICE_CALL_TYPE_AUDIO) == 0) {
+		return true;
+	}
+	return route == AI_CHAT_DEVICE_ACTION_ROUTE_DEVICE_CALL &&
+	       strcmp(call_type, DEVICE_CALL_TYPE_VIDEO) == 0;
+}
+
+static void app_handle_ai_chat_call_contact(ai_chat_device_action_route_t route,
+					    const char *target_id,
+					    const char *call_type)
 {
 	esp_err_t ret = ESP_OK;
+	app_id_t target_app = route == AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP ?
+				      APP_ID_WECHAT :
+				      APP_ID_CALL;
 
-	if (target_device_id == NULL ||
-	    strlen(target_device_id) != APP_CALL_CONTACT_DEVICE_ID_LENGTH) {
-		ESP_LOGW(CALL_FLOW_TAG, "stage=ai_call_handoff_rejected reason=invalid_target");
+	if (!app_ai_call_target_valid(route, target_id) ||
+	    !app_ai_call_type_valid(route, call_type)) {
+		ESP_LOGW(CALL_FLOW_TAG,
+			 "stage=ai_call_handoff_rejected route=%s type=%s reason=invalid_request",
+			 app_ai_call_route_name(route),
+			 call_type != NULL ? call_type : "(null)");
 		return;
 	}
 	if (s_app_transition_mutex == NULL ||
 	    xSemaphoreTake(s_app_transition_mutex, portMAX_DELAY) != pdTRUE) {
 		ESP_LOGE(CALL_FLOW_TAG,
-			 "stage=ai_call_handoff_rejected peer=%s reason=transition_lock",
-			 target_device_id);
+			 "stage=ai_call_handoff_rejected route=%s reason=transition_lock",
+			 app_ai_call_route_name(route));
 		return;
 	}
 
 	if (app_get_active_app() != APP_ID_AI_CHAT) {
 		ESP_LOGW(CALL_FLOW_TAG,
-			 "stage=ai_call_handoff_rejected peer=%s reason=wrong_owner active=%s",
-			 target_device_id,
+			 "stage=ai_call_handoff_rejected route=%s reason=wrong_owner active=%s",
+			 app_ai_call_route_name(route),
 			 app_id_name(app_get_active_app()));
 		ret = ESP_ERR_INVALID_STATE;
 	} else {
@@ -607,27 +666,41 @@ static void app_handle_ai_chat_call_device(const char *target_device_id)
 		 * submission in one transition transaction so no other synchronous
 		 * caller can interleave a home/app switch between the two operations.
 		 */
-		ESP_LOGI(CALL_FLOW_TAG, "stage=ai_call_handoff_begin peer=%s", target_device_id);
-		ret = app_enter_app_locked(APP_ID_CALL);
+		ESP_LOGI(CALL_FLOW_TAG,
+			 "stage=ai_call_handoff_begin route=%s target_len=%u type=%s",
+			 app_ai_call_route_name(route),
+			 (unsigned)strlen(target_id),
+			 call_type);
+		ret = app_enter_app_locked(target_app);
 		if (ret == ESP_OK) {
-			ret = app_call_contact(target_device_id);
+			ret = route == AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP ?
+				      app_wechat_call_contact(target_id) :
+				      app_call_contact_with_type(target_id, call_type);
 		}
 	}
 	xSemaphoreGive(s_app_transition_mutex);
 
 	if (ret == ESP_OK) {
-		esp_err_t display_ret = display_open_call_active_page_async();
+		esp_err_t display_ret = route == AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP ?
+					    display_open_wechat_active_page_async() :
+					    display_open_call_active_page_async();
 		if (display_ret != ESP_OK) {
 			ESP_LOGW(CALL_FLOW_TAG,
-				 "stage=ai_call_page_failed page=active ret=%s",
+				 "stage=ai_call_page_failed route=%s page=active ret=%s",
+				 app_ai_call_route_name(route),
 				 esp_err_to_name(display_ret));
 		}
-	} else if (app_get_active_app() == APP_ID_CALL) {
-		(void)display_open_call_page_async();
+	} else if (app_get_active_app() == target_app) {
+		if (route == AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP) {
+			(void)display_open_wechat_page_async();
+		} else {
+			(void)display_open_call_page_async();
+		}
 	}
 	ESP_LOGI(CALL_FLOW_TAG,
-		 "stage=ai_call_handoff_done peer=%s ret=%s",
-		 target_device_id,
+		 "stage=ai_call_handoff_done route=%s type=%s ret=%s",
+		 app_ai_call_route_name(route),
+		 call_type,
 		 esp_err_to_name(ret));
 }
 
@@ -1341,8 +1414,10 @@ static void app_lifecycle_task(void *arg)
 				}
 			}
 			break;
-		case APP_LIFECYCLE_EVENT_AI_CHAT_CALL_DEVICE:
-			app_handle_ai_chat_call_device(event.call_target_device_id);
+		case APP_LIFECYCLE_EVENT_AI_CHAT_CALL_CONTACT:
+			app_handle_ai_chat_call_contact(event.call_route,
+							event.call_target_id,
+							event.call_type);
 			break;
 		default:
 			ESP_LOGW(TAG, "unknown lifecycle event: type=%u", (unsigned)event.type);
@@ -1429,21 +1504,25 @@ static esp_err_t app_enqueue_lifecycle_event(app_lifecycle_event_type_t type, ap
 	return xQueueSendToBack(s_app_lifecycle_queue, &event, 0) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
-static esp_err_t app_enqueue_ai_chat_call_lifecycle_event(const char *target_device_id)
+static esp_err_t app_enqueue_ai_chat_call_lifecycle_event(ai_chat_device_action_route_t route,
+							 const char *target_id,
+							 const char *call_type)
 {
 	if (s_app_lifecycle_queue == NULL ||
-	    target_device_id == NULL ||
-	    strlen(target_device_id) != APP_CALL_CONTACT_DEVICE_ID_LENGTH) {
+	    !app_ai_call_target_valid(route, target_id) ||
+	    !app_ai_call_type_valid(route, call_type)) {
 		return ESP_ERR_INVALID_STATE;
 	}
 
 	app_lifecycle_event_t event = {
-		.type = APP_LIFECYCLE_EVENT_AI_CHAT_CALL_DEVICE,
-		.app_id = APP_ID_CALL,
+		.type = APP_LIFECYCLE_EVENT_AI_CHAT_CALL_CONTACT,
+		.app_id = route == AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP ?
+			      APP_ID_WECHAT :
+			      APP_ID_CALL,
+		.call_route = route,
 	};
-	strlcpy(event.call_target_device_id,
-		target_device_id,
-		sizeof(event.call_target_device_id));
+	strlcpy(event.call_target_id, target_id, sizeof(event.call_target_id));
+	strlcpy(event.call_type, call_type, sizeof(event.call_type));
 
 	/*
 	 * A successful JSON-RPC action response already promised that this

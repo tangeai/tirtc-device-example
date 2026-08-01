@@ -335,12 +335,32 @@ esp_err_t wechat_voip_service_reject_or_hangup(void)
     return ESP_ERR_INVALID_STATE;
 }
 
-esp_err_t wechat_voip_service_request_call(const char *open_id)
+esp_err_t wechat_voip_service_request_call(const char *open_id,
+                                           wechat_voip_call_media_t call_media)
 {
     if (!APP_CONFIG_WECHAT_VOIP_ENABLE || !s_session_enabled) {
         return ESP_ERR_INVALID_STATE;
     }
-    return wechat_voip_thing_request_call(open_id);
+    return wechat_voip_thing_request_call(open_id, call_media);
+}
+
+esp_err_t wechat_voip_service_refresh_contacts_async(void)
+{
+    if (!APP_CONFIG_WECHAT_VOIP_ENABLE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return wechat_voip_thing_refresh_contacts_async();
+}
+
+bool wechat_voip_service_is_enabled(void)
+{
+    return APP_CONFIG_WECHAT_VOIP_ENABLE != 0;
+}
+
+bool wechat_voip_service_is_connected(void)
+{
+    return wechat_voip_service_is_enabled() &&
+           wechat_voip_thing_is_connected();
 }
 
 esp_err_t wechat_voip_service_add_contact(const char *open_id)

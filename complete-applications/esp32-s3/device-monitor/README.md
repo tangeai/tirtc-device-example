@@ -9,12 +9,23 @@
 面向 ESP32-S3 触摸屏设备的 TiRTC 参考工程。它与
 [tangeai/tirtc-server-example](https://github.com/tangeai/tirtc-server-example)
 使用同一套 ThingConnect 设备协议，演示设备如何完成**联网、6 位验证码绑定、H5
-实时查看与对讲、AI 对讲、微信 IoT VoIP、设备间互呼和 OTA**。
+实时查看与对讲、小钛（AI 对讲）、微信 IoT VoIP、设备间互呼和 OTA**。
 
 本示例位于统一设备仓
 [tangeai/tirtc-device-example](https://github.com/tangeai/tirtc-device-example)
-的 `complete-applications/esp32-s3/device-monitor/`。源代码仓不保存固件 `.bin/.zip`；正式固件统一从
+的 `complete-applications/esp32-s3/device-monitor/`。源码 Git 不保存固件二进制；正式固件统一从
 [GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases) 下载。
+
+## 先选一条适合你的路线
+
+| 你的目标 | 从哪里开始 |
+| --- | --- |
+| 先看看设备能做什么 | 直接按下方“首次体验”下载完整镜像，从 `0x0` 烧录 |
+| 修改业务、UI 或板级代码 | 先读 [源码构建与配置](docs/BUILD_AND_CONFIG_CN.md)，再回到功能文档 |
+| 给已经运行本工程的设备升级 | 使用 OTA app，并先读 [烧录与 OTA](docs/FLASH_AND_OTA_CN.md) |
+
+三条路线使用的是同一份 `1.8.0` 源码。第一次接触项目时，建议先把完整体验链路跑通，
+再开始改代码；这样遇到问题时，更容易判断是环境、配置还是代码变化造成的。
 
 ---
 
@@ -27,7 +38,7 @@
 ```
 
 完成这条链路，说明开发板、Wi-Fi、设备身份、MQTT、TiRTC 和音视频驱动已经端到端
-工作。AI、微信 VoIP 和设备互呼应在此基础上逐项体验。
+工作。小钛、微信 VoIP 和设备互呼应在此基础上逐项体验。
 
 ### 开始前
 
@@ -46,16 +57,20 @@
 ### 步骤 1：下载当前固件
 
 打开 [GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases)，
-进入 ESP32-S3 设备端示例 `1.7.6` 对应的 Release，下载：
+进入 ESP32-S3 设备端示例 `1.8.0` 对应的 Release，下载：
 
 ```text
-esp32s3-tirtc-device-monitor-full-v1.7.6.bin
+esp32s3-tirtc-device-monitor-full-v1.8.0.bin
 ```
 
 这是写入地址为 `0x0` 的完整镜像。普通体验者不需要分别选择 bootloader、
 partition table、app 和 storage。
 
-**完成标志：** 文件名为 `esp32s3-tirtc-device-monitor-full-v1.7.6.bin`，并且
+> 完整镜像覆盖整片 16 MB Flash，包括 NVS 和 storage。原有 Wi-Fi、设备绑定和本地设置
+> 会被清除；烧录后请按新设备重新连接 Wi-Fi、获取 6 位验证码并完成绑定。需要保留这些
+> 数据时，应走 OTA，不要烧录 `full` 镜像。
+
+**完成标志：** 文件名为 `esp32s3-tirtc-device-monitor-full-v1.8.0.bin`，并且
 SHA-256 与同一 Release 中的 `SHA256SUMS.txt` 一致。名称含 `ota` 的文件不能用于
 首次完整烧录。
 
@@ -73,7 +88,7 @@ SHA-256 与同一 Release 中的 `SHA256SUMS.txt` 一致。名称含 `ota` 的�
 更完整的说明见 [烧录与 OTA](docs/FLASH_AND_OTA_CN.md)。
 
 **完成标志：** ESP Tool 明确显示烧录完成；按 RESET 后设备进入主页，设置页显示
-固件版本 `1.7.6`。
+固件版本 `1.8.0`。
 
 ### 步骤 3：连接 Wi-Fi
 
@@ -113,7 +128,7 @@ TiRTC 常驻监听。普通体验者不需要手动输入设备 ID 或设备密�
 | 现象 | 先检查 |
 | --- | --- |
 | ESP Tool 没有串口 | USB 线是否支持数据、串口是否被其他工具占用、是否进入下载模式 |
-| 烧录后仍显示旧版本 | 是否选择 `full-v1.7.6.bin`、地址是否为 `0x0`、是否按 RESET |
+| 烧录后仍显示旧版本 | 是否选择 `full-v1.8.0.bin`、地址是否为 `0x0`、是否按 RESET |
 | Wi-Fi 无法连接 | 是否为 2.4 GHz、密码是否正确、路由器是否允许新设备接入 |
 | 没有 6 位验证码 | 是否拿到 IP、系统时间是否同步、设备是否已经绑定 |
 | H5 找不到设备 | 登录账号是否正确、绑定是否成功、设备是否保持在线 |
@@ -131,12 +146,13 @@ TiRTC 常驻监听。普通体验者不需要手动输入设备 ID 或设备密�
 | 能力 | 设备端入口与完成标志 | 服务端协议文档 |
 | --- | --- | --- |
 | H5 实时查看与对讲 | H5 出图、出声，按住说话后设备扬声器播放 | [H5 实时查看与按住说话](https://github.com/tangeai/tirtc-server-example/blob/main/thing-connect/device-h5-live.md) |
-| AI 对讲 | 设备上行语音，收到字幕和 AI 语音回复，退出后资源释放 | [AI 对讲设备接入](https://github.com/tangeai/tirtc-server-example/blob/main/thing-connect/device-ai.md) |
-| 微信 IoT VoIP | 小程序授权后可双向呼叫、接听、挂断和刷新联系人 | [微信 VoIP 对讲设备接入](https://github.com/tangeai/tirtc-server-example/blob/main/thing-connect/device-voip.md) |
-| 设备间互呼 | 云端联系人可见，主被叫接通后双向音视频，结束后房间释放 | [设备呼设备接入](https://github.com/tangeai/tirtc-server-example/blob/main/thing-connect/device-call.md) |
+| 小钛（AI 对讲） | 设备上行语音，接收字幕和语音回复，并可查询设备联系人或发起呼叫 | [AI 对讲设备接入](https://github.com/tangeai/tirtc-server-example/blob/main/thing-connect/device-ai.md) |
+| 微信 IoT VoIP | 小程序授权后可双向呼叫、接听、挂断、刷新联系人和更新备注；设备侧呼叫为语音 | [微信 VoIP 对讲设备接入](https://github.com/tangeai/tirtc-server-example/blob/main/thing-connect/device-voip.md) |
+| 设备间互呼 | 云端联系人可见，支持设备音频或视频呼叫，结束后释放房间 | [设备呼设备接入](https://github.com/tangeai/tirtc-server-example/blob/main/thing-connect/device-call.md) |
 
 多业务共用一套音频、摄像头和 TiRTC 连接资源。应用层负责会话仲裁，H5 可在用户接听
-来电时被抢占；AI、微信 VoIP 和设备互呼互斥。详细边界见
+来电时被抢占；小钛、微信 VoIP 和设备互呼互斥。小钛返回 `accepted` 只表示目标校验及
+应用切换请求已被设备接受，不表示对端已经响铃、接听或建立媒体。详细边界见
 [ThingConnect 对齐说明](docs/THING_CONNECT_ALIGNMENT_CN.md)。
 
 ---
@@ -145,7 +161,7 @@ TiRTC 常驻监听。普通体验者不需要手动输入设备 ID 或设备密�
 
 | 项目 | 当前值 |
 | --- | --- |
-| 示例版本 | `1.7.6` |
+| 示例版本 | `1.8.0` |
 | 芯片 | ESP32-S3，16 MB Flash，8 MB PSRAM |
 | 开发板 | `LCKFB-SZPI-ESP32-S3-VA` |
 | ESP-IDF | `5.5.4` |
@@ -153,21 +169,24 @@ TiRTC 常驻监听。普通体验者不需要手动输入设备 ID 或设备密�
 | 工具链 | Xtensa ESP `14.2.0_20260121` |
 | FreeRTOS tick | `1000 Hz` |
 
-## 源码构建
+## 源码开发
+
+第一次从源码构建前，请先读 [源码构建与配置](docs/BUILD_AND_CONFIG_CN.md)。里面说明了
+环境版本、默认配置、构建输出、多地址网页烧录和常见构建问题。
 
 ```powershell
 . "$env:IDF_PATH\export.ps1"
-idf.py build
+idf.py -B build --no-ccache reconfigure build
 ```
 
-命令行烧录和串口日志：
+构建完成后，网页多地址烧录必须以 `build/flasher_args.json` 为准。需要查看串口日志时：
 
 ```powershell
-idf.py -p COMx flash monitor
+idf.py -p COMx monitor
 ```
 
-把 `COMx` 替换为实际串口。构建成功只证明静态集成和链接通过，不能代替 Wi-Fi、绑定、
-H5、AI、微信 VoIP、设备互呼和 OTA 的真机验证。
+把 `COMx` 替换为实际串口。普通体验者仍应优先使用 Release 中的完整镜像，不需要准备
+ESP-IDF 环境。
 
 ## 工程结构
 
@@ -178,16 +197,19 @@ H5、AI、微信 VoIP、设备互呼和 OTA 的真机验证。
 | `main/connectivity` | 网络抽象和 Wi-Fi STA 管理 |
 | `main/drivers` | 屏幕、触摸、音频和摄像头驱动 |
 | `main/protocols` | HTTP、MQTT、RTC 和 TiRTC 适配 |
-| `main/services` | 绑定、在线、H5、AI、微信 VoIP、设备互呼和 OTA |
+| `main/services` | 绑定、在线、H5、小钛、微信 VoIP、设备互呼和 OTA |
 | `components/tirtc_sdk` | TiRTC 头文件、静态库和版本契约 |
 | `docs` | 上手、协议对齐、功能流程、架构和烧录说明 |
-| `tools` | UI 资源、日志和 Release 打包工具 |
+| `tools` | UI 资源和开发辅助工具 |
 
 ## 文档地图
 
 - [文档入口](docs/README_CN.md)
+- [版本信息](VERSION.md)
+- [变更记录](CHANGELOG.md)
 - [完整用户体验流程](docs/USER_EXPERIENCE_FLOW_CN.md)
 - [从 Wi-Fi 到各项功能](docs/GETTING_STARTED_CN.md)
+- [源码构建与配置](docs/BUILD_AND_CONFIG_CN.md)
 - [烧录与 OTA](docs/FLASH_AND_OTA_CN.md)
 - [设备互呼流程](docs/DEVICE_CALL_FLOW_CN.md)
 - [ThingConnect 协议与功能对齐](docs/THING_CONNECT_ALIGNMENT_CN.md)
@@ -196,7 +218,7 @@ H5、AI、微信 VoIP、设备互呼和 OTA 的真机验证。
 ## 固件发布规则
 
 - Git 只管理源码、文档、脚本和必要的 SDK 静态库。
-- `.bin/.zip` 构建产物不进入 Git 历史。
+- 固件构建产物不进入 Git 历史。
 - 正式烧录包发布到 [GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases)。
 - OTA app 仍由 OTA 服务保存，GitHub Release 用于下载、归档和人工烧录。
 - 每个 Release 必须附带 `SHA256SUMS.txt` 和 `release-manifest.json`。

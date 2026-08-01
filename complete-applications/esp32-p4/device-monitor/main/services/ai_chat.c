@@ -18,13 +18,15 @@
 
 #include "ai_chat_token.h"
 #include "ai_chat_video.h"
-#include "audio_device.h"
 #include "app_memory_policy.h"
+#include "app_task_affinity.h"
+#include "audio_device.h"
 #include "system_time.h"
 #include "tirtc_session.h"
 #include "tiRTC.h"
 
 static const char *TAG = "ai_chat";
+static const char *DIALOG_TAG = "ai_dialog";
 
 #define AI_CHAT_SIGNALING_CMD         0x2100U
 #define AI_CHAT_AUDIO_STREAM_ID       1U
@@ -45,11 +47,23 @@ static const char *TAG = "ai_chat";
 #define AI_CHAT_VIDEO_START_TASK_PRIORITY 5
 #define AI_CHAT_START_TASK_STACK      (16 * 1024)
 #define AI_CHAT_START_TASK_PRIORITY   5
+#define AI_CHAT_START_RETRY_TASK_STACK (3 * 1024)
+#define AI_CHAT_START_RETRY_TASK_PRIORITY 5
+#define AI_CHAT_START_RETRY_POLL_MS   100U
+#define AI_CHAT_START_RETRY_TIMEOUT_MS 30000U
 #define AI_CHAT_SESSION_TASK_STACK    (6 * 1024)
 #define AI_CHAT_SESSION_TASK_PRIORITY 5
 #define AI_CHAT_START_SESSION_SETTLE_MS 80U
 #define AI_CHAT_HEARTBEAT_TASK_STACK  (4 * 1024)
 #define AI_CHAT_HEARTBEAT_TASK_PRIORITY 5
+#define AI_CHAT_DEVICE_ACTION_TASK_STACK (8 * 1024)
+#define AI_CHAT_DEVICE_ACTION_TASK_PRIORITY 5
+#define AI_CHAT_DEVICE_ACTION_ERROR_UNSUPPORTED (-32010)
+#define AI_CHAT_DEVICE_ACTION_ERROR_BUSY        (-32011)
+#define AI_CHAT_DEVICE_ACTION_ERROR_TARGET      (-32012)
+#define AI_CHAT_DEVICE_ACTION_ERROR_INVALID     (-32013)
+#define AI_CHAT_DEVICE_ACTION_ERROR_LOADING     (-32014)
+#define AI_CHAT_DEVICE_ACTION_ERROR_INTERNAL    (-32000)
 #define AI_CHAT_RTC_READY_WAIT_MS     30000U
 #define AI_CHAT_RTC_READY_POLL_MS     100U
 #define AI_CHAT_CONNECT_TIMEOUT_MS    20000U
@@ -114,6 +128,8 @@ typedef struct {
     ai_chat_caption_group_t captions[2];
     uint8_t message_count;
     ai_chat_message_t *messages;
+    bool device_action_pending;
+    uint8_t start_retries;
     uint32_t rx_commands;
     int last_error;
 } ai_chat_state_data_t;
@@ -121,6 +137,10 @@ typedef struct {
 typedef struct {
     uint32_t generation;
 } ai_chat_start_context_t;
+
+typedef struct {
+    uint32_t generation;
+} ai_chat_start_retry_context_t;
 
 static void *ai_chat_calloc_psram(size_t count, size_t size)
 {
@@ -153,6 +173,13 @@ typedef struct {
     uint32_t generation;
 } ai_chat_heartbeat_context_t;
 
+typedef struct {
+    uint32_t generation;
+    tirtc_conn_t conn;
+    char jsonrpc_id_json[AI_CHAT_JSONRPC_ID_MAX];
+    ai_chat_device_action_t action;
+} ai_chat_device_action_context_t;
+
 static SemaphoreHandle_t s_lock;
 static ai_chat_state_data_t s_ai = {
     .state = AI_CHAT_STATE_IDLE,
@@ -161,6 +188,7 @@ static ai_chat_state_data_t s_ai = {
 static ai_chat_media_state_t s_media;
 static portMUX_TYPE s_media_lock = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t s_start_task;
+static TaskHandle_t s_start_retry_task;
 static TaskHandle_t s_session_task;
 static TaskHandle_t s_video_start_task;
 static TaskHandle_t s_heartbeat_task;
@@ -184,6 +212,9 @@ static void ai_chat_notify_media_active(bool active)
 }
 
 static void ai_chat_start_task(void *ctx);
+static void ai_chat_start_retry_task(void *ctx);
+static esp_err_t ai_chat_schedule_start_retry(uint32_t generation,
+                                              const char *reason);
 static void ai_chat_session_task(void *ctx);
 static void ai_chat_connect_timeout_task(void *ctx);
 static void ai_chat_start_session_timeout_task(void *ctx);
@@ -590,6 +621,180 @@ static char *ai_chat_build_notification_json(const char *method)
 
     cJSON_AddStringToObject(root, "jsonrpc", "2.0");
     cJSON_AddStringToObject(root, "method", method);
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json;
+}
+
+static void ai_chat_device_action_set_result(
+    ai_chat_device_action_result_t *result,
+    bool ok,
+    const char *status,
+    const char *message)
+{
+    if (result == NULL) {
+        return;
+    }
+    result->ok = ok;
+    ai_chat_copy_str(result->status, sizeof(result->status), status);
+    ai_chat_copy_str(result->message, sizeof(result->message), message);
+}
+
+static const char *ai_chat_device_action_route_name(
+    ai_chat_device_action_route_t route)
+{
+    switch (route) {
+    case AI_CHAT_DEVICE_ACTION_ROUTE_DEVICE_CALL:
+        return "device_call";
+    case AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP:
+        return "wechat_voip";
+    case AI_CHAT_DEVICE_ACTION_ROUTE_NONE:
+    default:
+        return "none";
+    }
+}
+
+static int ai_chat_device_action_error_code(
+    const ai_chat_device_action_result_t *result)
+{
+    const char *status = result != NULL ? result->status : NULL;
+
+    if (status == NULL) {
+        return AI_CHAT_DEVICE_ACTION_ERROR_INTERNAL;
+    }
+    if (strcmp(status, "unsupported") == 0 ||
+        strcmp(status, "unsupported_call_type") == 0 ||
+        strcmp(status, "unsupported_contact_type") == 0 ||
+        strcmp(status, "wechat_status_unsupported") == 0) {
+        return AI_CHAT_DEVICE_ACTION_ERROR_UNSUPPORTED;
+    }
+    if (strcmp(status, "busy") == 0) {
+        return AI_CHAT_DEVICE_ACTION_ERROR_BUSY;
+    }
+    if (strcmp(status, "not_found") == 0 ||
+        strcmp(status, "contacts_empty") == 0 ||
+        strcmp(status, "ambiguous") == 0 ||
+        strcmp(status, "offline") == 0 ||
+        strcmp(status, "network_offline") == 0) {
+        return AI_CHAT_DEVICE_ACTION_ERROR_TARGET;
+    }
+    if (strcmp(status, "missing_target") == 0 ||
+        strcmp(status, "unsupported_status_filter") == 0 ||
+        strcmp(status, "invalid_request") == 0) {
+        return AI_CHAT_DEVICE_ACTION_ERROR_INVALID;
+    }
+    if (strcmp(status, "contacts_loading") == 0 ||
+        strcmp(status, "contacts_unavailable") == 0 ||
+        strcmp(status, "service_loading") == 0) {
+        return AI_CHAT_DEVICE_ACTION_ERROR_LOADING;
+    }
+    return AI_CHAT_DEVICE_ACTION_ERROR_INTERNAL;
+}
+
+static char *ai_chat_build_device_action_result_json(
+    const char *id_json,
+    const ai_chat_device_action_result_t *result)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON *id = NULL;
+
+    if (root == NULL || id_json == NULL || result == NULL) {
+        cJSON_Delete(root);
+        return NULL;
+    }
+
+    id = cJSON_Parse(id_json);
+    if (id == NULL) {
+        cJSON_Delete(root);
+        return NULL;
+    }
+    cJSON_AddStringToObject(root, "jsonrpc", "2.0");
+    cJSON_AddItemToObject(root, "id", id);
+
+    if (result->ok) {
+        cJSON *payload = cJSON_CreateObject();
+        if (payload == NULL) {
+            cJSON_Delete(root);
+            return NULL;
+        }
+        cJSON_AddBoolToObject(payload, "ok", true);
+        cJSON_AddStringToObject(payload,
+                                "status",
+                                result->status[0] != '\0' ?
+                                    result->status : "ok");
+        cJSON_AddStringToObject(payload,
+                                "message",
+                                result->message[0] != '\0' ?
+                                    result->message : "已开始处理");
+        if (result->call_route != AI_CHAT_DEVICE_ACTION_ROUTE_NONE) {
+            cJSON_AddStringToObject(
+                payload,
+                "contact_type",
+                ai_chat_device_action_route_name(result->call_route));
+        }
+        if (result->call_route == AI_CHAT_DEVICE_ACTION_ROUTE_DEVICE_CALL &&
+            result->target_id[0] != '\0') {
+            cJSON_AddStringToObject(payload,
+                                    "target_device_id",
+                                    result->target_id);
+        }
+        if (result->matched_name[0] != '\0') {
+            cJSON_AddStringToObject(payload,
+                                    "matched_name",
+                                    result->matched_name);
+        }
+        if (result->has_contacts_result) {
+            cJSON *contacts = cJSON_AddArrayToObject(payload, "contacts");
+            if (contacts == NULL) {
+                cJSON_Delete(root);
+                return NULL;
+            }
+            cJSON_AddNumberToObject(payload, "count", result->contact_count);
+            for (uint8_t index = 0U;
+                 index < result->contact_count;
+                 ++index) {
+                const ai_chat_device_action_contact_t *source =
+                    &result->contacts[index];
+                cJSON *contact = cJSON_CreateObject();
+                if (contact == NULL) {
+                    cJSON_Delete(root);
+                    return NULL;
+                }
+                cJSON_AddStringToObject(contact, "name", source->name);
+                cJSON_AddStringToObject(contact,
+                                        "device_id",
+                                        source->device_id);
+                cJSON_AddBoolToObject(contact, "online", source->online);
+                cJSON_AddItemToArray(contacts, contact);
+            }
+        }
+        cJSON_AddItemToObject(root, "result", payload);
+    } else {
+        cJSON *error = cJSON_CreateObject();
+        cJSON *data = cJSON_CreateObject();
+        if (error == NULL || data == NULL) {
+            cJSON_Delete(root);
+            cJSON_Delete(error);
+            cJSON_Delete(data);
+            return NULL;
+        }
+        cJSON_AddNumberToObject(error,
+                               "code",
+                               ai_chat_device_action_error_code(result));
+        cJSON_AddStringToObject(
+            error,
+            "message",
+            result->message[0] != '\0' ?
+                result->message : "设备动作执行失败");
+        cJSON_AddStringToObject(
+            data,
+            "status",
+            result->status[0] != '\0' ? result->status : "failed");
+        cJSON_AddBoolToObject(data, "ok", false);
+        cJSON_AddItemToObject(error, "data", data);
+        cJSON_AddItemToObject(root, "error", error);
+    }
 
     char *json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -1319,11 +1524,246 @@ static void ai_chat_heartbeat_task(void *ctx)
     vTaskDeleteWithCaps(NULL);
 }
 
+static esp_err_t ai_chat_send_device_action_failure(tirtc_conn_t conn,
+                                                    const char *id_json,
+                                                    const char *status,
+                                                    const char *message)
+{
+    ai_chat_device_action_result_t result = {0};
+
+    if (conn == NULL || id_json == NULL || id_json[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ai_chat_device_action_set_result(&result, false, status, message);
+    char *json = ai_chat_build_device_action_result_json(id_json, &result);
+    if (json == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t ret = ai_chat_send_json(conn, json);
+    free(json);
+    return ret;
+}
+
+static void ai_chat_device_action_task(void *arg)
+{
+    ai_chat_device_action_context_t *action_ctx =
+        (ai_chat_device_action_context_t *)arg;
+    ai_chat_device_action_cb_t action_cb = NULL;
+    ai_chat_device_action_committed_cb_t committed_cb = NULL;
+    void *callback_ctx = NULL;
+    ai_chat_device_action_result_t result = {0};
+    esp_err_t send_ret = ESP_ERR_INVALID_STATE;
+    bool valid = false;
+
+    if (action_ctx == NULL) {
+        vTaskDeleteWithCaps(NULL);
+        return;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    valid = ai_chat_generation_matches_locked(action_ctx->generation) &&
+            s_ai.conn == action_ctx->conn &&
+            s_ai.state != AI_CHAT_STATE_IDLE &&
+            s_ai.state != AI_CHAT_STATE_STOPPING;
+    if (valid) {
+        action_cb = s_ai.config.on_device_action;
+        committed_cb = s_ai.config.on_device_action_committed;
+        callback_ctx = s_ai.config.device_action_ctx;
+    }
+    xSemaphoreGive(s_lock);
+
+    if (!valid) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (ai_chat_generation_matches_locked(action_ctx->generation)) {
+            s_ai.device_action_pending = false;
+        }
+        xSemaphoreGive(s_lock);
+        free(action_ctx);
+        vTaskDeleteWithCaps(NULL);
+        return;
+    }
+
+    if (action_cb == NULL) {
+        ai_chat_device_action_set_result(&result,
+                                         false,
+                                         "unsupported",
+                                         "当前固件不支持这个设备动作");
+    } else {
+        esp_err_t action_ret =
+            action_cb(&action_ctx->action, &result, callback_ctx);
+        if (action_ret != ESP_OK) {
+            result.ok = false;
+            if (result.status[0] == '\0') {
+                ai_chat_copy_str(result.status,
+                                 sizeof(result.status),
+                                 esp_err_to_name(action_ret));
+            }
+            if (result.message[0] == '\0') {
+                ai_chat_copy_str(result.message,
+                                 sizeof(result.message),
+                                 "设备动作执行失败");
+            }
+        }
+    }
+
+    char *json = ai_chat_build_device_action_result_json(
+        action_ctx->jsonrpc_id_json,
+        &result);
+    if (json == NULL) {
+        send_ret = ESP_ERR_NO_MEM;
+    } else {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        valid = ai_chat_generation_matches_locked(action_ctx->generation) &&
+                s_ai.conn == action_ctx->conn &&
+                s_ai.state != AI_CHAT_STATE_IDLE &&
+                s_ai.state != AI_CHAT_STATE_STOPPING;
+        xSemaphoreGive(s_lock);
+        send_ret = valid ?
+            ai_chat_send_json(action_ctx->conn, json) :
+            ESP_ERR_INVALID_STATE;
+        free(json);
+    }
+
+    ESP_LOGI(DIALOG_TAG,
+             "device_action up: rpc_id=%s action=%s ok=%d status=%s route=%s count=%u message=\"%s\" send=%s",
+             action_ctx->jsonrpc_id_json,
+             action_ctx->action.action[0] != '\0' ?
+                 action_ctx->action.action : "(empty)",
+             result.ok ? 1 : 0,
+             result.status[0] != '\0' ?
+                 result.status : (result.ok ? "ok" : "failed"),
+             ai_chat_device_action_route_name(result.call_route),
+             (unsigned)result.contact_count,
+             result.message[0] != '\0' ? result.message : "",
+             esp_err_to_name(send_ret));
+    for (uint8_t index = 0U; index < result.contact_count; ++index) {
+        ESP_LOGI(DIALOG_TAG,
+                 "device_action contact: rpc_id=%s index=%u name=\"%s\" online=%d",
+                 action_ctx->jsonrpc_id_json,
+                 (unsigned)index,
+                 result.contacts[index].name,
+                 result.contacts[index].online ? 1 : 0);
+    }
+
+    if (send_ret == ESP_OK &&
+        result.ok &&
+        result.call_route != AI_CHAT_DEVICE_ACTION_ROUTE_NONE &&
+        result.target_id[0] != '\0' &&
+        committed_cb != NULL) {
+        /*
+         * The complete JSON-RPC response has been accepted by TiRTC. The app
+         * lifecycle owner may now close AI Chat and start the selected call.
+         */
+        esp_err_t commit_ret =
+            committed_cb(&action_ctx->action, &result, callback_ctx);
+        if (commit_ret != ESP_OK) {
+            ESP_LOGE(TAG,
+                     "AI Chat device action handoff failed: %s",
+                     esp_err_to_name(commit_ret));
+        }
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (ai_chat_generation_matches_locked(action_ctx->generation)) {
+        s_ai.device_action_pending = false;
+    }
+    xSemaphoreGive(s_lock);
+    free(action_ctx);
+    vTaskDeleteWithCaps(NULL);
+}
+
+static esp_err_t ai_chat_schedule_device_action(tirtc_conn_t conn,
+                                                const ai_chat_event_t *event)
+{
+    if (conn == NULL || event == NULL || !event->jsonrpc_id_valid) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint32_t generation = 0U;
+    bool valid = false;
+    bool busy = false;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    valid = s_ai.conn == conn &&
+            s_ai.state != AI_CHAT_STATE_IDLE &&
+            s_ai.state != AI_CHAT_STATE_STOPPING;
+    if (valid) {
+        generation = s_ai.generation;
+        if (generation == 0U) {
+            valid = false;
+        } else if (s_ai.device_action_pending) {
+            busy = true;
+        } else {
+            s_ai.device_action_pending = true;
+        }
+    }
+    xSemaphoreGive(s_lock);
+    if (!valid || busy || generation == 0U) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ai_chat_device_action_context_t *action_ctx =
+        ai_chat_calloc_psram(1, sizeof(*action_ctx));
+    if (action_ctx == NULL) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (ai_chat_generation_matches_locked(generation)) {
+            s_ai.device_action_pending = false;
+        }
+        xSemaphoreGive(s_lock);
+        return ESP_ERR_NO_MEM;
+    }
+
+    action_ctx->generation = generation;
+    action_ctx->conn = conn;
+    ai_chat_copy_str(action_ctx->jsonrpc_id_json,
+                     sizeof(action_ctx->jsonrpc_id_json),
+                     event->jsonrpc_id_json);
+    ai_chat_copy_str(action_ctx->action.action,
+                     sizeof(action_ctx->action.action),
+                     event->action);
+    ai_chat_copy_str(action_ctx->action.target,
+                     sizeof(action_ctx->action.target),
+                     event->target);
+    ai_chat_copy_str(action_ctx->action.call_type,
+                     sizeof(action_ctx->action.call_type),
+                     event->call_type);
+    ai_chat_copy_str(action_ctx->action.contact_type,
+                     sizeof(action_ctx->action.contact_type),
+                     event->contact_type);
+    ai_chat_copy_str(action_ctx->action.status_filter,
+                     sizeof(action_ctx->action.status_filter),
+                     event->status_filter);
+
+    BaseType_t task_ret = xTaskCreatePinnedToCoreWithCaps(
+        ai_chat_device_action_task,
+        "ai_action",
+        AI_CHAT_DEVICE_ACTION_TASK_STACK,
+        action_ctx,
+        AI_CHAT_DEVICE_ACTION_TASK_PRIORITY,
+        NULL,
+        APP_TASK_CORE_BACKGROUND,
+        AI_CHAT_TASK_ALLOC_CAPS);
+    if (task_ret != pdPASS) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (ai_chat_generation_matches_locked(generation)) {
+            s_ai.device_action_pending = false;
+        }
+        xSemaphoreGive(s_lock);
+        free(action_ctx);
+        ai_chat_log_heap("device action task create failed");
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
 static void ai_chat_connect_timeout_task(void *ctx)
 {
     ai_chat_connect_timeout_context_t *timeout_ctx = (ai_chat_connect_timeout_context_t *)ctx;
     uint32_t generation = timeout_ctx != NULL ? timeout_ctx->generation : 0U;
+    uint32_t retry_generation = 0U;
     bool timed_out = false;
+    bool retry_requested = false;
 
     free(timeout_ctx);
     vTaskDelay(pdMS_TO_TICKS(AI_CHAT_CONNECT_TIMEOUT_MS));
@@ -1332,9 +1772,18 @@ static void ai_chat_connect_timeout_task(void *ctx)
     if (ai_chat_generation_matches_locked(generation) &&
         s_ai.state == AI_CHAT_STATE_CONNECTING &&
         s_ai.conn == NULL) {
-        s_ai.last_error = ESP_ERR_TIMEOUT;
-        ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "connect timeout");
-        (void)ai_chat_next_generation_locked();
+        if (s_ai.start_retries == 0U) {
+            s_ai.start_retries = 1U;
+            s_ai.last_error = 0;
+            retry_generation = ai_chat_next_generation_locked();
+            ai_chat_set_state_locked(AI_CHAT_STATE_STARTING,
+                                     "retrying stalled connect");
+            retry_requested = true;
+        } else {
+            s_ai.last_error = ESP_ERR_TIMEOUT;
+            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "connect timeout");
+            (void)ai_chat_next_generation_locked();
+        }
         timed_out = true;
     }
     xSemaphoreGive(s_lock);
@@ -1346,9 +1795,26 @@ static void ai_chat_connect_timeout_task(void *ctx)
         ai_chat_video_stop(NULL);
         ai_chat_media_stop(NULL);
         tirtc_session_flush_remote_media();
-        esp_err_t disconnect_ret = ai_chat_disconnect_conn(NULL);
+        esp_err_t disconnect_ret = tirtc_session_disconnect();
         if (disconnect_ret != ESP_OK && disconnect_ret != ESP_ERR_INVALID_STATE) {
             ESP_LOGW(TAG, "AI Chat RTC disconnect after timeout failed: %s", esp_err_to_name(disconnect_ret));
+        }
+        if (retry_requested) {
+            esp_err_t retry_ret = ai_chat_schedule_start_retry(
+                retry_generation,
+                "WHIP submit/connect timeout");
+            if (retry_ret != ESP_OK) {
+                xSemaphoreTake(s_lock, portMAX_DELAY);
+                if (ai_chat_generation_matches_locked(retry_generation)) {
+                    s_ai.last_error = retry_ret;
+                    ai_chat_set_state_locked(AI_CHAT_STATE_ERROR,
+                                             "connect retry unavailable");
+                }
+                xSemaphoreGive(s_lock);
+                ESP_LOGE(TAG,
+                         "AI Chat automatic reconnect scheduling failed: %s",
+                         esp_err_to_name(retry_ret));
+            }
         }
     }
 
@@ -1593,10 +2059,156 @@ static void ai_chat_on_whip_connect(int error, tirtc_conn_t conn, void *user_dat
     }
 }
 
+static esp_err_t ai_chat_spawn_start_task(uint32_t generation)
+{
+    ai_chat_start_context_t *start_ctx =
+        ai_chat_calloc_psram(1, sizeof(*start_ctx));
+    if (start_ctx == NULL) {
+        ai_chat_log_heap("start_ctx alloc failed");
+        return ESP_ERR_NO_MEM;
+    }
+    start_ctx->generation = generation;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (!ai_chat_generation_matches_locked(generation) ||
+        s_start_task != NULL) {
+        xSemaphoreGive(s_lock);
+        free(start_ctx);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    BaseType_t task_ret = xTaskCreateWithCaps(ai_chat_start_task,
+                                              "ai_chat_start",
+                                              AI_CHAT_START_TASK_STACK,
+                                              start_ctx,
+                                              AI_CHAT_START_TASK_PRIORITY,
+                                              &s_start_task,
+                                              AI_CHAT_TASK_ALLOC_CAPS);
+    if (task_ret != pdPASS) {
+        s_start_task = NULL;
+        if (ai_chat_generation_matches_locked(generation)) {
+            s_ai.last_error = ESP_ERR_NO_MEM;
+            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "task failed");
+        }
+        xSemaphoreGive(s_lock);
+        free(start_ctx);
+        ai_chat_log_heap("start task create failed");
+        return ESP_ERR_NO_MEM;
+    }
+    xSemaphoreGive(s_lock);
+    return ESP_OK;
+}
+
+static void ai_chat_start_retry_task(void *ctx)
+{
+    ai_chat_start_retry_context_t *retry_ctx =
+        (ai_chat_start_retry_context_t *)ctx;
+    uint32_t generation = retry_ctx != NULL ? retry_ctx->generation : 0U;
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    uint32_t waited_ms = 0U;
+    bool timed_out = false;
+
+    free(retry_ctx);
+    while (waited_ms < AI_CHAT_START_RETRY_TIMEOUT_MS) {
+        bool current = false;
+        bool previous_start_running = false;
+
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        current = ai_chat_generation_matches_locked(generation);
+        previous_start_running = s_start_task != NULL;
+        xSemaphoreGive(s_lock);
+
+        if (!current) {
+            break;
+        }
+        if (!previous_start_running) {
+            ESP_LOGI(TAG,
+                     "AI Chat previous start task released: retry generation=%lu waited=%ums",
+                     (unsigned long)generation,
+                     (unsigned)waited_ms);
+            esp_err_t ret = ai_chat_spawn_start_task(generation);
+            if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG,
+                         "AI Chat deferred start failed: %s",
+                         esp_err_to_name(ret));
+            }
+            break;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(AI_CHAT_START_RETRY_POLL_MS));
+        waited_ms += AI_CHAT_START_RETRY_POLL_MS;
+    }
+
+    if (waited_ms >= AI_CHAT_START_RETRY_TIMEOUT_MS) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (ai_chat_generation_matches_locked(generation)) {
+            s_ai.last_error = ESP_ERR_TIMEOUT;
+            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR,
+                                     "previous connect still stopping");
+            timed_out = true;
+        }
+        xSemaphoreGive(s_lock);
+    }
+    if (timed_out) {
+        ESP_LOGE(TAG,
+                 "AI Chat previous WHIP submit did not return within %ums",
+                 (unsigned)AI_CHAT_START_RETRY_TIMEOUT_MS);
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_start_retry_task == self) {
+        s_start_retry_task = NULL;
+    }
+    xSemaphoreGive(s_lock);
+    vTaskDeleteWithCaps(NULL);
+}
+
+static esp_err_t ai_chat_schedule_start_retry(uint32_t generation,
+                                              const char *reason)
+{
+    ai_chat_start_retry_context_t *retry_ctx =
+        ai_chat_calloc_psram(1, sizeof(*retry_ctx));
+    if (retry_ctx == NULL) {
+        ai_chat_log_heap("start retry context alloc failed");
+        return ESP_ERR_NO_MEM;
+    }
+    retry_ctx->generation = generation;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (!ai_chat_generation_matches_locked(generation) ||
+        s_start_retry_task != NULL) {
+        xSemaphoreGive(s_lock);
+        free(retry_ctx);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGW(TAG,
+             "AI Chat start deferred: reason=%s generation=%lu",
+             reason != NULL ? reason : "previous submit running",
+             (unsigned long)generation);
+    BaseType_t task_ret = xTaskCreateWithCaps(ai_chat_start_retry_task,
+                                              "ai_start_retry",
+                                              AI_CHAT_START_RETRY_TASK_STACK,
+                                              retry_ctx,
+                                              AI_CHAT_START_RETRY_TASK_PRIORITY,
+                                              &s_start_retry_task,
+                                              AI_CHAT_TASK_ALLOC_CAPS);
+    if (task_ret != pdPASS) {
+        s_start_retry_task = NULL;
+        xSemaphoreGive(s_lock);
+        free(retry_ctx);
+        ai_chat_log_heap("start retry task create failed");
+        return ESP_ERR_NO_MEM;
+    }
+    xSemaphoreGive(s_lock);
+    return ESP_OK;
+}
+
 static void ai_chat_start_task(void *ctx)
 {
     ai_chat_start_context_t *start_ctx = (ai_chat_start_context_t *)ctx;
     uint32_t generation = start_ctx != NULL ? start_ctx->generation : 0U;
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
     ai_chat_config_t *config = NULL;
     ai_chat_join_info_t *join_info = NULL;
     esp_err_t ret = ESP_OK;
@@ -1690,6 +2302,12 @@ static void ai_chat_start_task(void *ctx)
              (unsigned)strlen(join_info->peer_id),
              (unsigned)strlen(join_info->token));
     tirtc_session_set_next_connection_auto_media(false);
+    /*
+     * Start the guard before entering the SDK. TiRtcWhipConnect is normally a
+     * quick asynchronous submission, but a stale SDK transport can block the
+     * submission itself, before the former post-submit guard was created.
+     */
+    ai_chat_start_connect_timeout(generation);
     int rc = tirtc_session_whip_connect(join_info->peer_id,
                                         join_info->token,
                                         ai_chat_on_whip_connect,
@@ -1709,14 +2327,16 @@ static void ai_chat_start_task(void *ctx)
                      "AI Chat server rejected WHIP: role_id_len=%u",
                      (unsigned)strlen(join_info->role_id));
         }
-    } else {
-        ai_chat_start_connect_timeout(generation);
     }
 
 finish:
     free(join_info);
     free(config);
-    s_start_task = NULL;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_start_task == self) {
+        s_start_task = NULL;
+    }
+    xSemaphoreGive(s_lock);
     vTaskDeleteWithCaps(NULL);
 }
 
@@ -1865,6 +2485,50 @@ static void ai_chat_handle_event(tirtc_conn_t conn, const ai_chat_event_t *event
     case AI_CHAT_EVENT_END_SESSION:
         (void)ai_chat_close();
         break;
+    case AI_CHAT_EVENT_DEVICE_ACTION: {
+        ESP_LOGI(DIALOG_TAG,
+                 "device_action down: rpc_id=%s action=%s target=\"%s\" status_filter=%s call_type=%s contact_type=%s",
+                 event->jsonrpc_id_json[0] != '\0' ?
+                     event->jsonrpc_id_json : "(missing)",
+                 event->action[0] != '\0' ?
+                     event->action : "(empty)",
+                 event->target,
+                 event->status_filter[0] != '\0' ?
+                     event->status_filter : "(default)",
+                 event->call_type[0] != '\0' ?
+                     event->call_type : "(default)",
+                 event->contact_type[0] != '\0' ?
+                     event->contact_type : "(default)");
+        esp_err_t ret = ai_chat_schedule_device_action(conn, event);
+        if (ret != ESP_OK) {
+            const char *status =
+                ret == ESP_ERR_NO_MEM ? "internal" :
+                ret == ESP_ERR_INVALID_ARG ? "invalid_request" : "busy";
+            const char *message =
+                ret == ESP_ERR_NO_MEM ? "设备资源不足，请稍后再试" :
+                ret == ESP_ERR_INVALID_ARG ? "设备动作参数不完整" :
+                                             "已有设备动作正在执行";
+            ESP_LOGW(TAG,
+                     "AI Chat device_action rejected locally: action=%s ret=%s",
+                     event->action,
+                     esp_err_to_name(ret));
+            esp_err_t send_ret =
+                ai_chat_send_device_action_failure(conn,
+                                                   event->jsonrpc_id_json,
+                                                   status,
+                                                   message);
+            ESP_LOGI(DIALOG_TAG,
+                     "device_action up: rpc_id=%s action=%s ok=0 status=%s route=none count=0 message=\"%s\" send=%s",
+                     event->jsonrpc_id_json[0] != '\0' ?
+                         event->jsonrpc_id_json : "(missing)",
+                     event->action[0] != '\0' ?
+                         event->action : "(empty)",
+                     status,
+                     message,
+                     esp_err_to_name(send_ret));
+        }
+        break;
+    }
     default:
         break;
     }
@@ -1960,9 +2624,11 @@ static void ai_chat_on_connection_error(tirtc_conn_t conn, int error, void *ctx)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     mine = conn != NULL && conn == s_ai.conn;
     if (mine) {
-        s_ai.conn = NULL;
         s_ai.last_error = error;
+        s_ai.cloud_speaking = false;
         s_ai.listening = false;
+        s_ai.device_action_pending = false;
+        (void)ai_chat_next_generation_locked();
         ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "connection error");
     }
     xSemaphoreGive(s_lock);
@@ -1985,6 +2651,8 @@ static void ai_chat_on_disconnected(tirtc_conn_t conn, void *ctx)
         s_ai.conn = NULL;
         s_ai.cloud_speaking = false;
         s_ai.listening = false;
+        s_ai.device_action_pending = false;
+        (void)ai_chat_next_generation_locked();
         ai_chat_set_state_locked(AI_CHAT_STATE_IDLE, "disconnected");
     }
     xSemaphoreGive(s_lock);
@@ -2057,8 +2725,8 @@ esp_err_t ai_chat_init(const ai_chat_config_t *config)
 
 esp_err_t ai_chat_open(void)
 {
-    ai_chat_start_context_t *start_ctx = NULL;
     uint32_t generation = 0;
+    bool wait_previous_start = false;
 
     ESP_RETURN_ON_FALSE(s_lock != NULL, ESP_ERR_INVALID_STATE, TAG, "AI Chat not initialized");
 
@@ -2067,7 +2735,8 @@ esp_err_t ai_chat_open(void)
         xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_STATE;
     }
-    if (s_ai.state == AI_CHAT_STATE_IN_SESSION ||
+    if (s_ai.state == AI_CHAT_STATE_STARTING ||
+        s_ai.state == AI_CHAT_STATE_IN_SESSION ||
         s_ai.state == AI_CHAT_STATE_TOKEN ||
         s_ai.state == AI_CHAT_STATE_CONNECTING ||
         s_ai.state == AI_CHAT_STATE_CONNECTED ||
@@ -2075,15 +2744,22 @@ esp_err_t ai_chat_open(void)
         xSemaphoreGive(s_lock);
         return ESP_OK;
     }
-    if (s_start_task != NULL) {
+    if (s_ai.state == AI_CHAT_STATE_STOPPING || s_ai.conn != NULL) {
         xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_STATE;
     }
+    if (s_start_retry_task != NULL) {
+        xSemaphoreGive(s_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    wait_previous_start = s_start_task != NULL;
     memset(s_ai.session_id, 0, sizeof(s_ai.session_id));
     memset(s_ai.captions, 0, sizeof(s_ai.captions));
     ai_chat_clear_messages_locked();
     s_ai.last_error = 0;
     s_ai.rx_commands = 0;
+    s_ai.device_action_pending = false;
+    s_ai.start_retries = 0U;
     s_ai.cloud_speaking = false;
     s_ai.listening = false;
     generation = ai_chat_next_generation_locked();
@@ -2094,38 +2770,22 @@ esp_err_t ai_chat_open(void)
      * whose final disconnect callback was lost during a network transition. */
     ai_chat_video_stop(NULL);
 
-    start_ctx = ai_chat_calloc_psram(1, sizeof(*start_ctx));
-    if (start_ctx == NULL) {
-        ai_chat_log_heap("start_ctx alloc failed");
-        xSemaphoreTake(s_lock, portMAX_DELAY);
-        if (ai_chat_generation_matches_locked(generation)) {
-            s_ai.last_error = ESP_ERR_NO_MEM;
-            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "task failed");
-        }
-        xSemaphoreGive(s_lock);
-        return ESP_ERR_NO_MEM;
+    if (!wait_previous_start) {
+        ai_chat_log_heap("before start task");
+        return ai_chat_spawn_start_task(generation);
     }
-    start_ctx->generation = generation;
 
-    ai_chat_log_heap("before start task");
-    BaseType_t task_ret = xTaskCreateWithCaps(ai_chat_start_task,
-                                              "ai_chat_start",
-                                              AI_CHAT_START_TASK_STACK,
-                                              start_ctx,
-                                              AI_CHAT_START_TASK_PRIORITY,
-                                              &s_start_task,
-                                              AI_CHAT_TASK_ALLOC_CAPS);
-    if (task_ret != pdPASS) {
-        free(start_ctx);
-        s_start_task = NULL;
-        ai_chat_log_heap("start task create failed");
+    esp_err_t retry_ret =
+        ai_chat_schedule_start_retry(generation, "previous WHIP submit running");
+    if (retry_ret != ESP_OK) {
         xSemaphoreTake(s_lock, portMAX_DELAY);
         if (ai_chat_generation_matches_locked(generation)) {
-            s_ai.last_error = ESP_ERR_NO_MEM;
-            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "task failed");
+            s_ai.last_error = retry_ret;
+            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR,
+                                     "start retry task failed");
         }
         xSemaphoreGive(s_lock);
-        return ESP_ERR_NO_MEM;
+        return retry_ret;
     }
 
     return ESP_OK;
@@ -2144,6 +2804,8 @@ esp_err_t ai_chat_close(void)
     if (s_ai.state == AI_CHAT_STATE_IDLE && conn == NULL) {
         memset(s_ai.captions, 0, sizeof(s_ai.captions));
         ai_chat_clear_messages_locked();
+        s_ai.device_action_pending = false;
+        s_ai.start_retries = 0U;
         xSemaphoreGive(s_lock);
         ai_chat_video_stop(NULL);
         return ESP_OK;
@@ -2152,6 +2814,8 @@ esp_err_t ai_chat_close(void)
     (void)ai_chat_next_generation_locked();
     s_ai.conn = NULL;
     s_ai.cloud_speaking = false;
+    s_ai.device_action_pending = false;
+    s_ai.start_retries = 0U;
     xSemaphoreGive(s_lock);
 
     if (conn != NULL) {

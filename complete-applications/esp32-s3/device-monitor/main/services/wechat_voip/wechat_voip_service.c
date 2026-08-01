@@ -258,6 +258,24 @@ esp_err_t wechat_voip_service_request_call(const char *open_id)
     return wechat_voip_thing_request_call(open_id);
 }
 
+esp_err_t wechat_voip_service_refresh_contacts_async(void)
+{
+    if (!APP_CONFIG_WECHAT_VOIP_ENABLE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return wechat_voip_thing_refresh_contacts_async();
+}
+
+bool wechat_voip_service_is_enabled(void)
+{
+    return APP_CONFIG_WECHAT_VOIP_ENABLE != 0;
+}
+
+bool wechat_voip_service_is_connected(void)
+{
+    return wechat_voip_service_is_enabled() && wechat_voip_thing_is_connected();
+}
+
 esp_err_t wechat_voip_service_add_contact(const char *open_id)
 {
     if (!APP_CONFIG_WECHAT_VOIP_ENABLE) {
@@ -272,6 +290,14 @@ esp_err_t wechat_voip_service_remove_contact(const char *open_id)
         return ESP_ERR_INVALID_STATE;
     }
     return wechat_voip_thing_remove_contact(open_id);
+}
+
+esp_err_t wechat_voip_service_update_contact_remark(const char *open_id, const char *remark)
+{
+    if (!APP_CONFIG_WECHAT_VOIP_ENABLE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return wechat_voip_thing_update_contact_remark_async(open_id, remark);
 }
 
 bool wechat_voip_service_has_incoming_call(void)

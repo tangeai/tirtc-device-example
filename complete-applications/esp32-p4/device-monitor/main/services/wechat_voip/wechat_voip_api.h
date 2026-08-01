@@ -2,6 +2,7 @@
 
 #include "esp_err.h"
 #include "wechat_voip_contacts.h"
+#include "wechat_voip_types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,6 +20,7 @@ esp_err_t wechat_voip_api_request_call(const char *api_base,
                                        const char *mqtt_token,
                                        const char *device_id,
                                        const wechat_voip_auth_user_t *target,
+                                       wechat_voip_call_media_t call_media,
                                        int wx_version_type);
 
 #ifdef __cplusplus

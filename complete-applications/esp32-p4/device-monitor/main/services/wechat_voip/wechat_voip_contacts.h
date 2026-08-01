@@ -14,12 +14,16 @@ extern "C" {
 #define WECHAT_VOIP_OPEN_ID_MAX 96
 #define WECHAT_VOIP_MODEL_ID_MAX 64
 #define WECHAT_VOIP_APP_ID_MAX 64
+#define WECHAT_VOIP_REMARK_MAX 64
 
 typedef struct {
     char open_id[WECHAT_VOIP_OPEN_ID_MAX];
+    char remark[WECHAT_VOIP_REMARK_MAX];
 } wechat_voip_contact_t;
 
 typedef struct {
+    bool ready;
+    bool server_synced;
     uint8_t count;
     wechat_voip_contact_t contacts[WECHAT_VOIP_CONTACT_MAX];
 } wechat_voip_contacts_snapshot_t;
@@ -28,6 +32,7 @@ typedef struct {
     char openid[WECHAT_VOIP_OPEN_ID_MAX];
     char model_id[WECHAT_VOIP_MODEL_ID_MAX];
     char app_id[WECHAT_VOIP_APP_ID_MAX];
+    char remark[WECHAT_VOIP_REMARK_MAX];
 } wechat_voip_auth_user_t;
 
 esp_err_t wechat_voip_contacts_init(void);

@@ -111,12 +111,13 @@ Get-FileHash -Algorithm SHA256 build-verify\tirtc_esp32s3_wifi_link_demo.bin
 
 ## 5. 烧录与上线
 
-```powershell
-idf.py -B build-verify -p COMx flash monitor
-```
+使用 Chrome 或 Edge 打开
+[Espressif ESP Tool](https://espressif.github.io/esptool-js/)，按
+`build-verify/flasher_args.json` 把同一次构建生成的全部 BIN 和地址逐项加入并烧录。
+完成后复位设备，再用 `idf.py -p COMx monitor` 查看串口。
 
-必须使用完整 flash 流程，确保应用、分区表和 `storage` SPIFFS 测试媒体来自同一次
-构建。完整 flash 会重写 `storage`，因此也会清空本地 token 标记；烧录后的首次
+必须烧录清单中的完整分片，确保应用、分区表和 `storage` SPIFFS 测试媒体来自同一次
+构建。重写 `storage` 会清空本地 token 标记；烧录后的首次
 主动连接必须使用新签发的 token。
 
 启动检查点：
@@ -274,7 +275,7 @@ HTTPS endpoint 参数错误
 
 缺少 H264/PCMA 文件
 
-使用完整 `idf.py flash`，不要只烧录 app bin。
+按本次构建的 `flasher_args.json` 在 Espressif ESP Tool 中重写全部分片，不要只烧录 app bin。
 
 异常重定向事件
 

@@ -20,6 +20,10 @@ esp_err_t wechat_voip_api_request_call(const char *api_base,
                                        const char *device_id,
                                        const wechat_voip_auth_user_t *target,
                                        int wx_version_type);
+esp_err_t wechat_voip_api_update_contact_remark(const char *api_base,
+                                                const char *mqtt_token,
+                                                const char *peer_id,
+                                                const char *remark);
 
 #ifdef __cplusplus
 }

@@ -1,6 +1,6 @@
 # ESP32-S3 烧录与 OTA
 
-当前版本：`1.7.6`
+当前版本：`1.8.0`
 
 固件下载：
 [tirtc-device-example Releases](https://github.com/tangeai/tirtc-device-example/releases)
@@ -8,7 +8,7 @@
 ## 普通用户只下载这个文件
 
 ```text
-esp32s3-tirtc-device-monitor-full-v1.7.6.bin
+esp32s3-tirtc-device-monitor-full-v1.8.0.bin
 ```
 
 这是完整镜像，已经包含 bootloader、分区表、OTA 初始数据、应用和 storage。
@@ -20,6 +20,10 @@ esp32s3-tirtc-device-monitor-full-v1.7.6.bin
 
 不要只把 OTA app 写入 `0x0`，也不要把多个文件都填成同一个地址。
 
+> 这个文件按 16 MB Flash 生成，会覆盖整片 Flash。原有 NVS、Wi-Fi、设备绑定和本地设置
+> 都会被清除，烧录后要按新设备重新配置。需要保留这些数据时，请使用正常 OTA 升级，
+> 不要烧录 `full` 镜像。
+
 ## 使用 Espressif ESP Tool 烧录
 
 推荐 Chrome 或 Edge，使用 Espressif 官方工具：
@@ -28,7 +32,7 @@ esp32s3-tirtc-device-monitor-full-v1.7.6.bin
 
 1. 用支持数据传输的 USB 线连接开发板。
 2. 打开 ESP Tool，点击 `Connect` 并选择开发板对应串口。
-3. 点击 `Add File`，添加 `esp32s3-tirtc-device-monitor-full-v1.7.6.bin`。
+3. 点击 `Add File`，添加 `esp32s3-tirtc-device-monitor-full-v1.8.0.bin`。
 4. 在 `Flash Address` 中填写 `0x0`。
 5. 首次使用、版本跨度较大或设备状态不确定时，先擦除闪存。
 6. 点击 `Program`，等待网页明确显示完成。
@@ -53,21 +57,24 @@ esp32s3-tirtc-device-monitor-full-v1.7.6.bin
 
 | 文件 | 用途 |
 | --- | --- |
-| `esp32s3-tirtc-device-monitor-full-v1.7.6.bin` | 普通用户使用 ESP Tool 从 `0x0` 烧录 |
-| `esp32s3-tirtc-device-monitor-ota-v1.7.6.bin` | OTA 服务端 app 固件，不用于 `0x0` 烧录 |
+| `esp32s3-tirtc-device-monitor-full-v1.8.0.bin` | 从 `0x0` 完整烧录；覆盖 16 MB Flash 并重置本地数据 |
+| `esp32s3-tirtc-device-monitor-ota-v1.8.0.bin` | OTA 服务端 app 固件；不写 `0x0`，正常升级保留 NVS 和 storage |
 | `SHA256SUMS.txt` | 下载后完整性校验 |
 | `release-manifest.json` | 版本、来源、Flash 参数和资产清单 |
 
 Windows 校验示例：
 
 ```powershell
-Get-FileHash .\esp32s3-tirtc-device-monitor-full-v1.7.6.bin -Algorithm SHA256
+Get-FileHash .\esp32s3-tirtc-device-monitor-full-v1.8.0.bin -Algorithm SHA256
 ```
 
-结果应与同一 Release 中 `SHA256SUMS.txt` 记录的值一致；文件大小和完整资产清单
-以 `release-manifest.json` 为准。
+结果应与同一 Release 中 `SHA256SUMS.txt` 记录的值一致。完整镜像按 16 MB Flash
+布局合成，OTA app 必须小于或等于 `0x770000`；正式文件大小和完整资产清单以
+`release-manifest.json` 为准。
 
 ## 开机后的首次体验
+
+完整镜像烧录后，设备原有 Wi-Fi、绑定和本地设置已经重置，请重新走一遍首次配置：
 
 1. 点击主页右下角箭头切换到第二页。
 2. 进入“设置” -> “Wi-Fi 设置”，连接 2.4 GHz Wi-Fi。
@@ -90,13 +97,17 @@ Get-FileHash .\esp32s3-tirtc-device-monitor-full-v1.7.6.bin -Algorithm SHA256
 | `0x10000` | app 固件 |
 | `0xf00000` | `storage.bin` |
 
-命令行从源码构建和烧录：
+源码构建：
 
 ```powershell
 . "$env:IDF_PATH\export.ps1"
-idf.py build
-idf.py -p COMx flash monitor
+idf.py -B build --no-ccache reconfigure build
 ```
+
+构建完成后仍使用
+[Espressif ESP Tool](https://espressif.github.io/esptool-js/)，按 `build/flasher_args.json`
+列出的文件与地址进行多地址烧录。详细步骤见 [源码构建与配置](BUILD_AND_CONFIG_CN.md)。
+需要查看串口日志时执行 `idf.py -p COMx monitor`。
 
 ## OTA
 
@@ -107,15 +118,27 @@ GET https://tirtc-device-ota.tange365.com/api/ota/manifest?device_id=<设备ID>&
 ```
 
 OTA 服务只保存 app 固件，不包含 NVS、storage、bootloader 或分区表。线上
-manifest 的 `version` 必须为 `1.7.6`，`size` 和 `sha256` 必须分别与同一
+manifest 的 `version` 必须为 `1.8.0`，`size` 和 `sha256` 必须分别与同一
 Release 的 `release-manifest.json`、`SHA256SUMS.txt` 中 OTA app 记录一致。
 
-设备已经运行 `1.7.6` 时，服务端应返回 `update=false` 和 `reason=up_to_date`。
+正常 OTA 只切换 app 分区，不主动覆盖 NVS 和 storage，因此适合保留 Wi-Fi、设备身份和
+本地设置的版本升级。OTA app 不能当作完整镜像从 `0x0` 烧录。
+
+设备已经运行 `1.8.0` 时，服务端应返回 `update=false` 和 `reason=up_to_date`。
 
 ## 发布边界
 
-- 源码仓不保存 `.bin/.zip`。
+- 源码仓不保存固件二进制。
 - GitHub Releases 保存人工下载和完整烧录资产。
 - OTA 服务保存在线升级所需的 app 固件和 manifest。
 - GitHub Actions artifact 只适合短期构建验证，不作为长期正式下载地址。
 - 构建通过、Release 上传、网页烧录、OTA 升级和真机功能回归是五个独立检查点。
+
+每个版本的公开 Release 只提供以下资产：
+
+- `esp32s3-tirtc-device-monitor-full-v1.8.0.bin`
+- `esp32s3-tirtc-device-monitor-ota-v1.8.0.bin`
+- `SHA256SUMS.txt`
+- `release-manifest.json`
+
+固件大小和 SHA-256 由正式构建产生，不在构建前预填。

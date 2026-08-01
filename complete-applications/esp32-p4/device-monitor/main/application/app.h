@@ -344,6 +344,8 @@ esp_err_t app_accept_call(void);
 esp_err_t app_reject_call(void);
 
 esp_err_t app_wechat_call_contact(const char *open_id);
+esp_err_t app_wechat_call_contact_with_type(const char *open_id,
+                                            app_call_type_t call_type);
 esp_err_t app_wechat_add_contact(const char *open_id);
 esp_err_t app_wechat_remove_contact(const char *open_id);
 esp_err_t app_scan_wechat_contact(void);

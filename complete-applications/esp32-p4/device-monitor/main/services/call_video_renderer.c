@@ -62,7 +62,10 @@ static const char *TAG = "call_video";
     (CALL_VIDEO_MJPEG_MAX_PIXELS * sizeof(uint16_t))
 #define CALL_VIDEO_MJPEG_PPA_STAGING_BYTES \
     (CALL_VIDEO_FRAME_PIXELS * 3U / 2U)
-#define CALL_VIDEO_MJPEG_PORTRAIT_ROTATION  VIDEO_FRAME_ROTATION_CLOCKWISE_90
+#define CALL_VIDEO_MJPEG_FIT_MODE           VIDEO_FRAME_FIT_COVER
+#define CALL_VIDEO_MJPEG_PREVENT_UPSCALE    false
+#define CALL_VIDEO_MJPEG_STARTUP_SAMPLE_US  (1LL * 1000LL * 1000LL)
+#define CALL_VIDEO_MJPEG_GEOMETRY_LOG_LIMIT 4U
 #define CALL_VIDEO_PSRAM_POOL_BYTES        \
     ((CALL_VIDEO_INPUT_SLOT_COUNT * CALL_VIDEO_INPUT_SLOT_CAPACITY) + \
      (CALL_VIDEO_DECODED_SLOT_COUNT * CALL_VIDEO_DECODED_SLOT_CAPACITY) + \
@@ -98,6 +101,8 @@ _Static_assert(APP_TASK_CORE_VIDEO_DECODE != CONFIG_ESP_H264_DUAL_TASK_CORE,
 
 _Static_assert((CALL_VIDEO_MJPEG_DECODE_BYTES % CALL_VIDEO_CACHE_LINE_SIZE) == 0U,
                "MJPEG decode buffer must be cache-line aligned");
+_Static_assert(CALL_VIDEO_MJPEG_MAX_PIXELS >= CALL_VIDEO_FRAME_PIXELS,
+               "MJPEG decoder pool must cover the display viewport");
 
 typedef struct {
     uint8_t *data;
@@ -1459,6 +1464,7 @@ static void call_video_renderer_task(void *arg)
         .source_crop_width = CALL_VIDEO_SOURCE_CROP_WIDTH,
         .source_crop_height = CALL_VIDEO_SOURCE_CROP_HEIGHT,
         .fit_mode = VIDEO_FRAME_FIT_CONTAIN,
+        .prevent_upscale = false,
         .output_rgb565_byte_swap = true,
     };
 
@@ -1743,21 +1749,6 @@ static void call_video_log_mjpeg_stats_if_due(call_video_mjpeg_log_window_t *win
 #endif
 }
 
-static video_frame_rotation_t call_video_mjpeg_resolve_display_rotation(
-    uint32_t source_width,
-    uint32_t source_height)
-{
-    /*
-     * The VoIP profile's camera_rotation field controls how the device's
-     * uplink appears in the WeChat UI. The public downlink contract does not
-     * carry a JPEG rotation field, so normalize portrait payloads locally.
-     * Landscape payloads may already have been oriented by the service.
-     */
-    return source_height > source_width ?
-               CALL_VIDEO_MJPEG_PORTRAIT_ROTATION :
-               VIDEO_FRAME_ROTATION_CLOCKWISE_0;
-}
-
 static void call_video_mjpeg_renderer_task(void *arg)
 {
     (void)arg;
@@ -1766,7 +1757,24 @@ static void call_video_mjpeg_renderer_task(void *arg)
     uint8_t *decode_buffer = NULL;
     call_video_mjpeg_log_window_t log_window = {0};
     int64_t last_decode_warning_us = 0;
+    int64_t last_geometry_log_us = 0;
+    int64_t first_frame_ready_us = 0;
     bool first_frame_logged = false;
+    bool startup_sample_logged = false;
+    uint8_t geometry_change_logs = 0U;
+    uint32_t published_frames = 0U;
+    uint16_t last_source_width = 0U;
+    uint16_t last_source_height = 0U;
+    video_frame_rotation_t last_display_rotation =
+        VIDEO_FRAME_ROTATION_CLOCKWISE_0;
+    uint16_t last_crop_x = 0U;
+    uint16_t last_crop_y = 0U;
+    uint16_t last_crop_width = 0U;
+    uint16_t last_crop_height = 0U;
+    uint16_t last_render_width = 0U;
+    uint16_t last_render_height = 0U;
+    uint16_t last_offset_x = 0U;
+    uint16_t last_offset_y = 0U;
     const jpeg_decode_cfg_t decode_config = {
         .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
         /* Keep the decoder's panel-order big-endian RGB565. The converter
@@ -1799,13 +1807,14 @@ static void call_video_mjpeg_renderer_task(void *arg)
 
     ESP_LOGI(TAG,
              "MJPEG downlink renderer ready: decoder=hardware-jpeg-rgb565 "
-             "rotation=auto(portrait:%s landscape:cw0) "
-             "scale=%s aspect=fit output=RGB565-%ux%u "
-             "source_max=%upx/%u-edge "
+             "rotation=cw0 source_rotation=not-signaled "
+             "scale=%s fit=%s upscale=%s output=RGB565-%ux%u "
+             "source_cap=%upx/%u-edge "
              "input_slots=%u input_cap=%u presentation=latest-%u core=%d",
-             video_frame_rotation_name(CALL_VIDEO_MJPEG_PORTRAIT_ROTATION),
              video_frame_converter_mode_name(
                  video_frame_converter_get_mode(converter)),
+             video_frame_fit_mode_name(CALL_VIDEO_MJPEG_FIT_MODE),
+             CALL_VIDEO_MJPEG_PREVENT_UPSCALE ? "deny" : "allow",
              CALL_VIDEO_RENDER_WIDTH,
              CALL_VIDEO_RENDER_HEIGHT,
              CALL_VIDEO_MJPEG_MAX_PIXELS,
@@ -1875,8 +1884,7 @@ static void call_video_mjpeg_renderer_task(void *arg)
         uint32_t aligned_height = 0U;
         size_t expected_output_size = 0U;
         video_frame_rotation_t display_rotation =
-            call_video_mjpeg_resolve_display_rotation(picture.width,
-                                                      picture.height);
+            VIDEO_FRAME_ROTATION_CLOCKWISE_0;
         if (decode_ret == ESP_OK) {
             if (picture.width == 0U || picture.height == 0U ||
                 picture.width > CALL_VIDEO_MJPEG_MAX_EDGE ||
@@ -1980,29 +1988,151 @@ static void call_video_mjpeg_renderer_task(void *arg)
             call_video_output_finish_write(output_index,
                                            publish,
                                            convert_elapsed_us);
-            if (publish && !first_frame_logged) {
-                first_frame_logged = true;
+            if (publish) {
                 video_frame_converter_stats_t converter_stats = {0};
                 video_frame_converter_get_stats(converter, &converter_stats);
-                ESP_LOGI(TAG,
-                         "MJPEG downlink first frame ready: source=%ux%u "
-                         "stride=%u rotation=%s scale=%s fit=%s "
-                         "crop=%ux%u+%u+%u output=%ux%u "
-                         "decode=%uus convert=%uus",
-                         (unsigned)picture.width,
-                         (unsigned)picture.height,
-                         (unsigned)aligned_width,
-                         video_frame_rotation_name(display_rotation),
-                         video_frame_converter_mode_name(convert_mode),
-                         video_frame_fit_mode_name(VIDEO_FRAME_FIT_COVER),
-                         (unsigned)converter_stats.last_crop_width,
-                         (unsigned)converter_stats.last_crop_height,
-                         (unsigned)converter_stats.last_crop_x,
-                         (unsigned)converter_stats.last_crop_y,
-                         CALL_VIDEO_RENDER_WIDTH,
-                         CALL_VIDEO_RENDER_HEIGHT,
-                         (unsigned)decode_elapsed_us,
-                         (unsigned)convert_elapsed_us);
+                bool geometry_changed =
+                    last_source_width != picture.width ||
+                    last_source_height != picture.height ||
+                    last_display_rotation != display_rotation ||
+                    last_crop_x != converter_stats.last_crop_x ||
+                    last_crop_y != converter_stats.last_crop_y ||
+                    last_crop_width != converter_stats.last_crop_width ||
+                    last_crop_height != converter_stats.last_crop_height ||
+                    last_render_width != converter_stats.last_render_width ||
+                    last_render_height != converter_stats.last_render_height ||
+                    last_offset_x != converter_stats.last_offset_x ||
+                    last_offset_y != converter_stats.last_offset_y;
+                int64_t now_us = esp_timer_get_time();
+                published_frames++;
+
+                if (!first_frame_logged) {
+                    first_frame_logged = true;
+                    first_frame_ready_us = now_us;
+                    if (picture.width < CALL_VIDEO_RENDER_WIDTH ||
+                        picture.height < CALL_VIDEO_RENDER_HEIGHT) {
+                        ESP_LOGI(TAG,
+                                 "MJPEG downlink source below panel: "
+                                 "source=%ux%u render=%ux%u; "
+                                 "uniform upscale active",
+                                 (unsigned)picture.width,
+                                 (unsigned)picture.height,
+                                 (unsigned)converter_stats.last_render_width,
+                                 (unsigned)converter_stats.last_render_height);
+                    }
+                    ESP_LOGI(TAG,
+                             "MJPEG downlink first frame ready: source=%ux%u "
+                             "stride=%u rotation=%s scale=%s fit=%s "
+                             "crop=%ux%u+%u+%u render=%ux%u+%u+%u "
+                             "output=%ux%u payload=%u pts=%u "
+                             "decode=%uus convert=%uus",
+                             (unsigned)picture.width,
+                             (unsigned)picture.height,
+                             (unsigned)aligned_width,
+                             video_frame_rotation_name(display_rotation),
+                             video_frame_converter_mode_name(convert_mode),
+                             video_frame_fit_mode_name(CALL_VIDEO_MJPEG_FIT_MODE),
+                             (unsigned)converter_stats.last_crop_width,
+                             (unsigned)converter_stats.last_crop_height,
+                             (unsigned)converter_stats.last_crop_x,
+                             (unsigned)converter_stats.last_crop_y,
+                             (unsigned)converter_stats.last_render_width,
+                             (unsigned)converter_stats.last_render_height,
+                             (unsigned)converter_stats.last_offset_x,
+                             (unsigned)converter_stats.last_offset_y,
+                             CALL_VIDEO_RENDER_WIDTH,
+                             CALL_VIDEO_RENDER_HEIGHT,
+                             (unsigned)compressed_size,
+                             (unsigned)slot->pts,
+                             (unsigned)decode_elapsed_us,
+                             (unsigned)convert_elapsed_us);
+                    last_geometry_log_us = now_us;
+                } else if (geometry_changed &&
+                           (geometry_change_logs <
+                                CALL_VIDEO_MJPEG_GEOMETRY_LOG_LIMIT ||
+                            now_us - last_geometry_log_us >=
+                                2LL * 1000LL * 1000LL)) {
+                    ESP_LOGI(TAG,
+                             "MJPEG downlink geometry changed: source=%ux%u "
+                             "rotation=%s fit=%s crop=%ux%u+%u+%u "
+                             "render=%ux%u+%u+%u age=%llums frame=%u "
+                             "payload=%u pts=%u",
+                             (unsigned)picture.width,
+                             (unsigned)picture.height,
+                             video_frame_rotation_name(display_rotation),
+                             video_frame_fit_mode_name(CALL_VIDEO_MJPEG_FIT_MODE),
+                             (unsigned)converter_stats.last_crop_width,
+                             (unsigned)converter_stats.last_crop_height,
+                             (unsigned)converter_stats.last_crop_x,
+                             (unsigned)converter_stats.last_crop_y,
+                             (unsigned)converter_stats.last_render_width,
+                             (unsigned)converter_stats.last_render_height,
+                             (unsigned)converter_stats.last_offset_x,
+                             (unsigned)converter_stats.last_offset_y,
+                             first_frame_ready_us != 0 &&
+                                     now_us >= first_frame_ready_us ?
+                                 (unsigned long long)(
+                                     (now_us - first_frame_ready_us) / 1000LL) :
+                                 0ULL,
+                             (unsigned)published_frames,
+                             (unsigned)compressed_size,
+                             (unsigned)slot->pts);
+                    last_geometry_log_us = now_us;
+                    if (geometry_change_logs < UINT8_MAX) {
+                        geometry_change_logs++;
+                    }
+                    if (first_frame_ready_us != 0 &&
+                        now_us - first_frame_ready_us >=
+                            CALL_VIDEO_MJPEG_STARTUP_SAMPLE_US) {
+                        startup_sample_logged = true;
+                    }
+                }
+
+                if (!startup_sample_logged &&
+                    first_frame_ready_us != 0 &&
+                    now_us - first_frame_ready_us >=
+                        CALL_VIDEO_MJPEG_STARTUP_SAMPLE_US) {
+                    startup_sample_logged = true;
+                    ESP_LOGI(TAG,
+                             "MJPEG downlink startup sample: source=%ux%u "
+                             "rotation=%s crop=%ux%u+%u+%u "
+                             "render=%ux%u+%u+%u age=%llums frame=%u "
+                             "payload=%u pts=%u geometry_changed=%d",
+                             (unsigned)picture.width,
+                             (unsigned)picture.height,
+                             video_frame_rotation_name(display_rotation),
+                             (unsigned)converter_stats.last_crop_width,
+                             (unsigned)converter_stats.last_crop_height,
+                             (unsigned)converter_stats.last_crop_x,
+                             (unsigned)converter_stats.last_crop_y,
+                             (unsigned)converter_stats.last_render_width,
+                             (unsigned)converter_stats.last_render_height,
+                             (unsigned)converter_stats.last_offset_x,
+                             (unsigned)converter_stats.last_offset_y,
+                             (unsigned long long)(
+                                 (now_us - first_frame_ready_us) / 1000LL),
+                             (unsigned)published_frames,
+                             (unsigned)compressed_size,
+                             (unsigned)slot->pts,
+                             geometry_changed ? 1 : 0);
+                }
+
+                /*
+                 * Geometry state tracks every published frame, not only a
+                 * throttled log entry. This makes the next transition report
+                 * the actual before/after layout instead of an old baseline.
+                 */
+                last_source_width = (uint16_t)picture.width;
+                last_source_height = (uint16_t)picture.height;
+                last_display_rotation = display_rotation;
+                last_crop_x = converter_stats.last_crop_x;
+                last_crop_y = converter_stats.last_crop_y;
+                last_crop_width = converter_stats.last_crop_width;
+                last_crop_height = converter_stats.last_crop_height;
+                last_render_width = converter_stats.last_render_width;
+                last_render_height = converter_stats.last_render_height;
+                last_offset_x = converter_stats.last_offset_x;
+                last_offset_y = converter_stats.last_offset_y;
             }
         }
         if (convert_attempted && convert_ret != ESP_OK && generation_matches) {
@@ -2020,7 +2150,8 @@ static void call_video_mjpeg_renderer_task(void *arg)
                 now_us - last_decode_warning_us >= 2LL * 1000LL * 1000LL) {
                 ESP_LOGW(TAG,
                          "MJPEG downlink frame rejected: stage=%s ret=%s "
-                         "compressed=%u source=%ux%u aligned=%ux%u output=%ux%u",
+                         "compressed=%u source=%ux%u "
+                         "cap=%upx/%u-edge aligned=%ux%u output=%ux%u",
                          decode_ret != ESP_OK ? "decode" : "scale",
                          esp_err_to_name(decode_ret != ESP_OK ?
                                              decode_ret :
@@ -2028,6 +2159,8 @@ static void call_video_mjpeg_renderer_task(void *arg)
                          (unsigned)compressed_size,
                          (unsigned)picture.width,
                          (unsigned)picture.height,
+                         CALL_VIDEO_MJPEG_MAX_PIXELS,
+                         CALL_VIDEO_MJPEG_MAX_EDGE,
                          (unsigned)aligned_width,
                          (unsigned)aligned_height,
                          CALL_VIDEO_RENDER_WIDTH,
@@ -2124,14 +2257,19 @@ static esp_err_t call_video_prepare_persistent_resources(void)
     const video_frame_converter_config_t mjpeg_converter_config = {
         .output_width = CALL_VIDEO_RENDER_WIDTH,
         .output_height = CALL_VIDEO_RENDER_HEIGHT,
-        /* WeChat may switch between portrait and landscape JPEG sizes. Crop
-         * symmetrically before rotation so the panel is filled without
-         * distorting the decoded picture. */
+        /*
+         * The cloud may change the JPEG source size, but the display contract
+         * stays fixed at 480x320. Crop symmetrically and apply one uniform PPA
+         * scale without a second display-side resize or aspect-ratio
+         * distortion. Adaptive low-resolution renditions are allowed to scale
+         * up so a 320-pixel-wide frame fills the 480-pixel-wide viewport.
+         */
         .source_crop_x = 0U,
         .source_crop_y = 0U,
         .source_crop_width = 0U,
         .source_crop_height = 0U,
-        .fit_mode = VIDEO_FRAME_FIT_COVER,
+        .fit_mode = CALL_VIDEO_MJPEG_FIT_MODE,
+        .prevent_upscale = CALL_VIDEO_MJPEG_PREVENT_UPSCALE,
         .output_rgb565_byte_swap = true,
     };
 

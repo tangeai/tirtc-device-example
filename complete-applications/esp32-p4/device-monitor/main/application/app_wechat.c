@@ -133,7 +133,17 @@ static void app_wechat_scan_result_cb(esp_err_t result,
 
 esp_err_t app_wechat_call_contact(const char *open_id)
 {
+	return app_wechat_call_contact_with_type(open_id, APP_CALL_TYPE_VIDEO);
+}
+
+esp_err_t app_wechat_call_contact_with_type(const char *open_id,
+					    app_call_type_t call_type)
+{
 	if (open_id == NULL || open_id[0] == '\0') {
+		return ESP_ERR_INVALID_ARG;
+	}
+	if (call_type != APP_CALL_TYPE_AUDIO &&
+	    call_type != APP_CALL_TYPE_VIDEO) {
 		return ESP_ERR_INVALID_ARG;
 	}
 	if (app_get_active_app() != APP_ID_WECHAT) {
@@ -143,8 +153,14 @@ esp_err_t app_wechat_call_contact(const char *open_id)
 		return ESP_ERR_INVALID_STATE;
 	}
 
-	ESP_LOGD(TAG, "wechat contact call requested");
-	return wechat_voip_service_request_call(open_id);
+	wechat_voip_call_media_t call_media =
+		call_type == APP_CALL_TYPE_VIDEO ?
+			WECHAT_VOIP_CALL_MEDIA_VIDEO :
+			WECHAT_VOIP_CALL_MEDIA_AUDIO;
+	ESP_LOGD(TAG,
+		 "wechat contact call requested: media=%s",
+		 call_media == WECHAT_VOIP_CALL_MEDIA_VIDEO ? "video" : "audio");
+	return wechat_voip_service_request_call(open_id, call_media);
 }
 
 esp_err_t app_wechat_add_contact(const char *open_id)
