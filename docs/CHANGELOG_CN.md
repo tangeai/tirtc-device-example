@@ -1,5 +1,12 @@
 # 版本变更记录
 
+## 2026.08.02.1：ESP32-P4 Device App 1.3.1 完整镜像补充
+
+- 新增 `esp32p4-tirtc-device-monitor-full-v1.3.1.bin`，供开发者从 `0x0` 直接烧录体验。
+- 完整镜像只进入 GitHub Release，不进入 Git 历史；原 `2026.08.02` Tag 保持不动。
+- P4 源码、SDK 和正式构建输入未变化；补丁更新只收口公开文档、manifest 和发布资产。
+- 完整烧录会清除 NVS、Wi-Fi 和绑定信息，烧录后需要重新配置。
+
 ## 2026.08.02：ESP32-P4 Device App 1.3.1
 
 ### 媒体链路
@@ -24,7 +31,7 @@
 
 - 来源 Tag：`esp32-p4-device-app-v1.3.1`，commit `7391464`。
 - 统一 Tag：`tirtc-device-examples-v2026.08.02`。
-- P4 继续按源码范围交付，不上传 BIN；其他项目和固件保持上一 Release。
+- 首次 Release 按源码范围交付；后续由 `tirtc-device-examples-v2026.08.02.1` 补充完整镜像。
 - 最终公开快照完成静态门禁和干净构建。运行时通话、重复切换与长稳验证单独记录，
   不用构建结果代替真机证据。
 

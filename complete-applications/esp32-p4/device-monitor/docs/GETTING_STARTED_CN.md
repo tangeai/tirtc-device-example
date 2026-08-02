@@ -17,10 +17,11 @@ P4+C6 前置检查、构建、烧录、首次联网和基础功能确认。项�
 | TiRTC SDK | `2.3.0` ESP32-P4 定制兼容快照 |
 | Flash | `16MB` |
 | 网络 | 2.4 GHz Wi-Fi，可访问 TiRTC/ThingConnect 服务 |
-| 交付形式 | 源码；本版本没有可直接下载的 P4 APP BIN |
+| 交付形式 | 源码与 `0x0` 完整烧录镜像 |
 
-至少准备：目标板、可靠的 USB 数据线、稳定供电、能进入下载模式的 P4 USB/串口口、
-一台安装了 Git 和 ESP-IDF 的电脑。摄像头、LCD、触摸和音频 codec 应按目标板原理图连接。
+至少准备：目标板、可靠的 USB 数据线、稳定供电、能进入下载模式的 P4 USB/串口口，以及
+一台使用 Chrome 或 Edge 的电脑。直接烧录完整镜像不要求安装 ESP-IDF；修改源码时再安装
+Git 和 ESP-IDF `5.5.4`。摄像头、LCD、触摸和音频 codec 应按目标板原理图连接。
 
 ## 2. 理解 P4 和 C6 的边界
 
@@ -44,7 +45,7 @@ P4 负责 UI、摄像头、音频、编解码和 TiRTC 应用；C6 只负责 Wi-
 ```powershell
 git clone https://github.com/tangeai/tirtc-device-example.git
 cd tirtc-device-example
-git checkout tirtc-device-examples-v2026.08.02
+git checkout tirtc-device-examples-v2026.08.02.1
 cd complete-applications/esp32-p4/device-monitor
 ```
 
@@ -150,20 +151,47 @@ idf.py menuconfig
 
 ## 7. 使用 Espressif Web Serial 烧录 P4
 
-本项目不提供预编译 P4 BIN，因此烧录前要先完成第 5 节的本地构建。
+### 7.1 快速体验：烧录 Release 完整镜像
+
+从 `tirtc-device-examples-v2026.08.02.1` Release 下载：
+
+```text
+esp32p4-tirtc-device-monitor-full-v1.3.1.bin
+```
+
+文件大小应为 `16,777,216` bytes，SHA-256 应为：
+
+```text
+3F55403C60CE371D81239CD5EC028FBFD1A27CAC0B693EB925CB1C60F3CFE1C5
+```
+
+PowerShell 可执行：
+
+```powershell
+Get-FileHash -Algorithm SHA256 .\esp32p4-tirtc-device-monitor-full-v1.3.1.bin
+```
+
+然后：
 
 1. 使用 Chrome 或 Edge 打开 [Espressif Web Serial 烧录工具](https://espressif.github.io/esptool-js/)。
 2. 连接 P4 下载口；自动进入下载模式失败时，按住 `BOOT`，点按 `RESET`，再松开 `BOOT`。
 3. 选择浏览器弹出的 P4 串口，不要误选 C6 端口。
-4. 打开 `build/flasher_args.json`，逐项添加其中列出的 BIN 和 offset。
-5. 使用构建记录中的 flash mode 和 `16MB` flash size，开始烧录并等待校验完成。
-6. 复位 P4，重新打开串口日志。
+4. 添加完整镜像，烧录地址填 `0x0`。
+5. Flash Size 选择 `16MB`，Flash Mode/频率使用 `DIO/80MHz`。
+6. 开始烧录，校验完成后复位 P4。
+
+完整镜像包含 bootloader `0x2000`、partition table `0x8000`、空 otadata `0xd000`、APP
+`0x10000` 和 storage `0xe80000`。NVS 区域为 `FF`，所以完整烧录一定会清除原有 NVS、Wi-Fi
+和设备绑定。重启后从第 8 节重新配网和绑定，这是预期行为。
+
+### 7.2 源码开发：烧录本地构建分片
+
+需要修改代码时，先完成第 5 节的本地构建，再打开 `build/flasher_args.json`，逐项添加其中
+列出的 BIN 和 offset。Flash mode、频率和大小均以本次构建记录为准。
 
 不要把 `build/tirtc_esp32p4_device_app.bin` 单独写到 `0x0`。它只是应用镜像，还需要
-bootloader、partition table、OTA data 和 `storage` 镜像。
-
-第一次从其他分区布局切换到本工程时，可以先擦除 P4 Flash。擦除会同时清掉 NVS 中的
-Wi-Fi 和绑定身份；日常更新不必反复擦除。
+bootloader、partition table、OTA data 和 `storage` 镜像。只有上面的 Release `full` 镜像
+是可以直接从 `0x0` 烧录的完整文件。
 
 需要串口日志时执行：
 
@@ -354,8 +382,9 @@ worker 是否唤醒、会话 generation 是否仍有效，再看 SDK 返回值�
 公开源码固定到来源 Tag 和 commit，应用/SDK 版本及静态库哈希已有记录。公开候选已在
 ESP-IDF `5.5.4` 完成一次干净构建：应用镜像 `6,924,512` bytes，SHA-256
 `EBD5FE3B930BA000FDBE7094F287AD66CBB745D56F8D167ED4890895A691DFA5`，编译错误为 0，最小
-app 分区剩余 `0x95720` bytes（8%）。构建产物只作本地验证，不上传、不进入 Git。P4 APP
-仍按源码发布，没有预编译 BIN。
+app 分区剩余 `0x95720` bytes（8%）。正式完整镜像只上传 GitHub Release，不进入 Git；大小
+`16,777,216` bytes，SHA-256
+`3F55403C60CE371D81239CD5EC028FBFD1A27CAC0B693EB925CB1C60F3CFE1C5`。
 
 干净构建证明候选能在记录的环境中完成编译和链接。烧录成功、C6/SDIO 可用、平台在线、
 音视频首帧和长稳结果仍要按上面的步骤在目标板上分别确认。这样记录问题时，大家能立刻知道

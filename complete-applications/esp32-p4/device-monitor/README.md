@@ -9,27 +9,31 @@
 H264/JPEG 编解码、触摸屏和音频设备，与 C6 提供的远程 Wi-Fi、TiRTC、ThingConnect、
 微信 VoIP 和 AI Chat 组合成一套可以继续开发的工程。
 
-本项目只发布源码，不提供 P4 APP 预编译 BIN。第一次接触这块板也不用先读完全部架构，
-按下面的“最快上手”逐步做即可。
+本项目同时提供源码和 `0x0` 完整烧录镜像。想先体验功能可以直接下载 BIN；需要改代码时，
+再按 ESP-IDF 流程构建。BIN 只在 GitHub Release 中分发，不进入 Git 历史。
 
 ## 从这里开始
 
 | 你现在要做什么 | 直接阅读 |
 | --- | --- |
+| 下载完整镜像，直接烧录体验 | [固件下载与校验](../../../docs/RELEASES_CN.md) |
 | 配环境、构建、烧录并完成首次联网 | [开发者上手指南](docs/GETTING_STARTED_CN.md) |
 | 理解摄像头、编解码、PSRAM、AEC 和连接归属 | [P4 媒体架构](docs/P4_MEDIA_ARCHITECTURE.md) |
 | 核对应用、SDK、工具链和静态库哈希 | [VERSION.md](VERSION.md) |
 | 核对源码来自哪个 Tag、公开时排除了什么 | [SOURCE_PROVENANCE.md](SOURCE_PROVENANCE.md) |
 
-最快上手路径：
+直接体验：
 
 1. 确认 P4 主芯片和 C6 Wi-Fi 从芯片都能正常上电。
-2. 安装 ESP-IDF `5.5.4`，检出统一仓 Tag `tirtc-device-examples-v2026.08.02`。
-3. 在本目录执行 `idf.py set-target esp32p4` 和 `idf.py build`。
-4. 按 `build/flasher_args.json`，在
-   [Espressif Web Serial 烧录工具](https://espressif.github.io/esptool-js/)中添加全部镜像及 offset。
-5. 重启后在屏幕连接 2.4 GHz Wi-Fi，再按提示完成 6 位码绑定。
-6. 先跑“网络测试”和“TiRTC 测试”，再进入 IPC、设备呼叫、微信 VoIP 和 AI Chat。
+2. 从 `tirtc-device-examples-v2026.08.02.1` Release 下载
+   `esp32p4-tirtc-device-monitor-full-v1.3.1.bin` 并核对 SHA-256。
+3. 在 [Espressif Web Serial 烧录工具](https://espressif.github.io/esptool-js/)中选择 P4 端口，
+   从 `0x0` 以 `16MB`、`DIO/80MHz` 烧录。
+4. 重启后重新连接 2.4 GHz Wi-Fi 并完成绑定，再运行“网络测试”和“TiRTC 测试”。
+
+完整镜像会清除现有 NVS、Wi-Fi 和绑定信息。需要开发时，检出统一仓 Tag
+`tirtc-device-examples-v2026.08.02.1`，再按[开发者上手指南](docs/GETTING_STARTED_CN.md)
+完成源码构建和分片烧录。
 
 ## 版本与平台
 
@@ -46,7 +50,7 @@ H264/JPEG 编解码、触摸屏和音频设备，与 C6 提供的远程 Wi-Fi、
 | FreeRTOS tick | `1000Hz` |
 | 屏幕 | `480x320` 横屏触摸屏 |
 | Flash | `16MB`，双 OTA 分区 |
-| 发布形式 | 源码、必要配置和公开文档；没有 P4 APP 预编译 BIN |
+| 发布形式 | 源码与 `esp32p4-tirtc-device-monitor-full-v1.3.1.bin` 完整镜像 |
 
 ## P4 和 C6 各自负责什么
 
@@ -154,8 +158,8 @@ system ready: ESP32-P4 TiRTC dashboard
 ```
 
 屏幕随后进入 Wi-Fi 或绑定流程。公开候选已在 ESP-IDF `5.5.4` 完成一次干净构建，应用镜像
-为 `6,924,512` bytes，未出现编译错误；本地构建产物不上传，也不进入 Git。Wi-Fi、绑定、
-TiRTC、首帧、双向音频和长稳仍要在目标板逐项验证。
+为 `6,924,512` bytes，未出现编译错误。由该构建生成的 `16MB` 完整镜像只上传 GitHub
+Release，不进入 Git。Wi-Fi、绑定、TiRTC、首帧、双向音频和长稳仍要在目标板逐项验证。
 
 ## 目录
 

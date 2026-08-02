@@ -9,8 +9,8 @@
 | 发布日期 | `2026-08-02` |
 | 来源 Tag | `esp32-p4-device-app-v1.3.1` |
 | 来源 commit | `739146438dd4b65512bb8198731bd2c8a1eb1275` |
-| 统一仓 Tag | `tirtc-device-examples-v2026.08.02` |
-| 发布范围 | 源码、必要配置和公开文档；不提供 P4 APP 预编译 BIN |
+| 统一仓 Tag | `tirtc-device-examples-v2026.08.02.1` |
+| 发布范围 | 源码、公开文档和 `0x0` 完整烧录镜像 |
 | 目标芯片 | ESP32-P4 |
 | 目标开发板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |
 | 网络架构 | ESP32-P4 host + ESP32-C6 ESP-Hosted/SDIO slave |
@@ -81,11 +81,16 @@ HTTP DNS disable 回移让 `/v1/connect` 使用平台 DNS resolver，避免 SDK 
 源码默认不包含真实 Wi-Fi 密码、设备密钥、access key、token 或个人账号。设备凭证通过
 绑定流程写入 NVS。
 
-本版本按源码范围发布，不生成或上传 P4 APP 预编译 BIN。公开候选已在 ESP-IDF `5.5.4`
-完成一次干净构建：`project_version=1.3.1`，应用镜像 `6,924,512` bytes，SHA-256
+公开候选已在 ESP-IDF `5.5.4` 完成一次干净构建：`project_version=1.3.1`，应用镜像
+`6,924,512` bytes，SHA-256
 `EBD5FE3B930BA000FDBE7094F287AD66CBB745D56F8D167ED4890895A691DFA5`，编译错误为 0；构建
-产物只用于本地校验，不进入 Git 或 Release。构建日志中的 Windows CMake object-path length
-warning 没有转化为编译错误，最小 app 分区剩余 `0x95720` bytes（8%）。
+目录和分片产物不进入 Git。构建日志中的 Windows CMake object-path length warning 没有转化
+为编译错误，最小 app 分区剩余 `0x95720` bytes（8%）。
+
+Release 资产 `esp32p4-tirtc-device-monitor-full-v1.3.1.bin` 为 `16,777,216` bytes，SHA-256
+`3F55403C60CE371D81239CD5EC028FBFD1A27CAC0B693EB925CB1C60F3CFE1C5`。它从 `0x0` 以
+`16MB`、`DIO/80MHz` 烧录，只在 GitHub Release 分发。镜像中的 NVS 区为 `FF`，完整烧录会
+清除已有 Wi-Fi 和绑定信息。
 
 这些证据不等同于烧录、ESP-Hosted/SDIO、联网或音视频运行证明。TinyH264 同步保护和阻塞
 诊断已经进入源码，但永久阻塞时的安全回收仍需要目标板长时间运行验证。详细来源与字节保持

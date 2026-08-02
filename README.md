@@ -34,7 +34,7 @@
 ```bash
 git clone https://github.com/tangeai/tirtc-device-example.git
 cd tirtc-device-example
-git checkout tirtc-device-examples-v2026.08.02
+git checkout tirtc-device-examples-v2026.08.02.1
 ```
 
 然后进入下表中的项目目录。每个项目 README 都给出依赖、配置、构建、烧录、成功现象和排障入口。
@@ -60,10 +60,11 @@ git checkout tirtc-device-examples-v2026.08.02
 | 平台 | 应用 | 版本 | TiRTC SDK | 来源版本 | Release 交付 |
 | --- | --- | --- | --- | --- | --- |
 | ESP32-S3 | [Device Monitor](complete-applications/esp32-s3/device-monitor/README.md) | `1.8.0` | `2.2.0` | Tag `v1.8.0` / commit `8211e3b` | 源码、完整镜像与 OTA app |
-| ESP32-P4 | [Device App](complete-applications/esp32-p4/device-monitor/README.md) | `1.3.1` | `2.3.0` 定制兼容快照 | Tag `esp32-p4-device-app-v1.3.1` / commit `7391464` | 源码 |
+| ESP32-P4 | [Device App](complete-applications/esp32-p4/device-monitor/README.md) | `1.3.1` | `2.3.0` 定制兼容快照 | Tag `esp32-p4-device-app-v1.3.1` / commit `7391464` | 源码与 `0x0` 完整镜像 |
 | G32S10X | [Device Monitor](complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | Tag `v0.1.1` / commit `5630152` | 源码、主固件与两个 YAFFS 镜像 |
 
-最新更新由 `tirtc-device-examples-v2026.08.02` 锁定，只更新 ESP32-P4 Device App `1.3.1`。
+最新更新由 `tirtc-device-examples-v2026.08.02.1` 锁定，只更新 ESP32-P4 Device App `1.3.1`
+的交付说明和完整烧录镜像。
 其他项目保持上一公开版本；S3 固件继续从 `2026.07.31` Release 下载，不重复上传。
 每次发布的源码范围、构建证据和附件 SHA-256 见当次 `release-manifest.json` 与
 [版本与证据清单](docs/VERSIONS_CN.md)。
@@ -87,7 +88,10 @@ AI 对讲和设备互呼，并输出稳定、脱敏的状态日志；它不是�
 不进入 Git 历史。ESP32 固件使用
 [Espressif ESP Tool](https://espressif.github.io/esptool-js/) 按 Release 清单烧录。
 
-ESP32-P4 Device App `1.3.1` 按源码范围交付，不提供预编译 BIN。
+ESP32-P4 Device App `1.3.1` 提供源码和
+`esp32p4-tirtc-device-monitor-full-v1.3.1.bin`。完整镜像只在 GitHub Release 中分发，
+从 `0x0` 烧录；它会清除现有 NVS、Wi-Fi 和绑定信息，具体步骤见
+[固件下载与校验](docs/RELEASES_CN.md)。
 
 ## 构建入口
 

@@ -12,7 +12,7 @@
 | Tag object | `9e08fffb1d6a4b200cf97af299c9e20a1fba1f24` |
 | 来源 commit | `739146438dd4b65512bb8198731bd2c8a1eb1275` |
 | 比较基线 | `esp32-p4-device-app-v1.3.0` / `dacf8e65b25ea4d0282fc9314e46a18607691fb4` |
-| 统一仓 Tag | `tirtc-device-examples-v2026.08.02` |
+| 统一仓 Tag | `tirtc-device-examples-v2026.08.02.1` |
 | 公开路径 | `complete-applications/esp32-p4/device-monitor/` |
 | 目标开发板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |
 | ESP-IDF | `5.5.4` |
@@ -44,7 +44,7 @@
 
 - 来源仓 Git 元数据、内部协作文档和本机 IDE 配置。
 - `build/`、`managed_components/`、日志、固件镜像和发布附件目录。
-- P4 APP BIN、ELF、MAP 或其他本地构建输出。
+- P4 APP BIN、ELF、MAP 或其他本地构建输出不进入 Git；正式完整镜像单独作为 Release 资产。
 
 README、VERSION、开发者上手指南和媒体架构文档按统一仓风格整理。其余保留来源路径用于
 逐文件一致性校验；Windows 与 Git 之间可能出现 CRLF/LF 工作树表现差异，发布校验以 Git
@@ -76,13 +76,18 @@ DNS resolver，以避开 SDK 自定义 DNS 缓存过期时的递归锁。
 
 ## 发布和验证边界
 
-本项目按源码发布，不生成或上传 P4 APP 预编译 BIN。当前文档与静态校验可以证明：
+本项目同时发布源码和 `esp32p4-tirtc-device-monitor-full-v1.3.1.bin`。完整镜像只上传 GitHub
+Release，不进入 Git；大小为 `16,777,216` bytes，SHA-256 为
+`3F55403C60CE371D81239CD5EC028FBFD1A27CAC0B693EB925CB1C60F3CFE1C5`，烧录地址为 `0x0`。
+当前文档与静态校验可以证明：
 
 - 公开路径来自明确的来源 Tag 和 commit。
 - SDK 版本、兼容回移和关键文件哈希可重复核对。
 - 构建产物、开发机配置和真实凭据不属于公开源码范围。
 - ESP-IDF `5.5.4` 干净构建完成，应用镜像为 `6,924,512` bytes，SHA-256 为
   `EBD5FE3B930BA000FDBE7094F287AD66CBB745D56F8D167ED4890895A691DFA5`，编译错误为 0。
+- 完整镜像中的 bootloader、partition table、空 otadata、APP 和 storage 分别对应构建输出
+  `0x2000`、`0x8000`、`0xd000`、`0x10000` 和 `0xe80000`；NVS 区为 `FF`。
 
 这些证据不能代替：
 

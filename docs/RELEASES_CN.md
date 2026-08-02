@@ -7,25 +7,41 @@
 Git `main` 保存源码、文档、必要脚本和 SDK 静态库；构建生成的固件、维护包和其他二进制
 附件不进入 Git 历史。
 
-## 2026-08-02 Release
+## 2026-08-02.1 Release
 
 统一 Tag：
 
 ```text
-tirtc-device-examples-v2026.08.02
+tirtc-device-examples-v2026.08.02.1
 ```
 
-本次只更新 ESP32-P4 Device App `1.3.1`，按源码范围交付。Release 上传：
+本次为 ESP32-P4 Device App `1.3.1` 补充完整烧录镜像。Release 上传：
 
 | 文件 | 用途 |
 | --- | --- |
+| `esp32p4-tirtc-device-monitor-full-v1.3.1.bin` | P4 `16MB` 完整镜像，ESP Tool 从 `0x0` 烧录 |
 | `release-manifest.json` | 统一 Tag、P4 来源 Tag/commit、逐文件 SHA-256、SDK 与构建证据 |
-| `SHA256SUMS.txt` | 校验 manifest 下载完整性 |
+| `SHA256SUMS.txt` | 校验完整镜像和 manifest 下载完整性 |
 
-P4 不创建占位 BIN，也不把本地构建产物放进 Git。开发者请检出统一 Tag 后进入
+完整镜像大小为 `16,777,216` bytes，SHA-256 为
+`3F55403C60CE371D81239CD5EC028FBFD1A27CAC0B693EB925CB1C60F3CFE1C5`。使用
+[Espressif ESP Tool](https://espressif.github.io/esptool-js/) 选择 P4 串口，烧录地址填 `0x0`，
+Flash Size 选择 `16MB`，Flash Mode/频率使用 `DIO/80MHz`。
+
+镜像包含 bootloader `0x2000`、partition table `0x8000`、空 otadata `0xd000`、APP
+`0x10000` 和 storage `0xe80000`。NVS 区域填充为 `FF`，因此完整烧录会清除设备原有 NVS、
+Wi-Fi 和绑定信息；重启后需要重新配网和绑定。需要改代码的开发者仍可检出统一 Tag，进入
 [`complete-applications/esp32-p4/device-monitor`](../complete-applications/esp32-p4/device-monitor/README.md)
-按项目说明构建。S3 日志示例 `0.3.0` 和 S3 Device Monitor `1.8.0` 的固件继续从
-`2026-07-31` Release 下载，本次不重复上传。
+按项目说明自行构建和分片烧录。
+
+BIN 只存放在 GitHub Release，不进入 Git 历史。S3 日志示例 `0.3.0` 和 S3 Device Monitor
+`1.8.0` 的固件继续从 `2026-07-31` Release 下载，本次不重复上传。
+
+## 2026-08-02 Release（已由补丁 Release 替代）
+
+统一 Tag `tirtc-device-examples-v2026.08.02` 保持不动。该次 Release 最初只提供 P4 `1.3.1`
+源码、`release-manifest.json` 和 `SHA256SUMS.txt`，没有 P4 BIN。需要完整镜像的开发者应使用
+上面的 `tirtc-device-examples-v2026.08.02.1` Release。
 
 ## 2026-07-31 Release
 
