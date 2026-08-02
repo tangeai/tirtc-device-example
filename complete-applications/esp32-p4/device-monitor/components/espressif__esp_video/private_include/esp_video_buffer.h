@@ -63,6 +63,7 @@ struct esp_video_buffer_element {
     esp_video_buffer_node_t node;                     /*!< List node */
     struct esp_video_buffer *video_buffer;            /*!< Source buffer object */
     uint32_t index;                                   /*!< List node index */
+    uint32_t sequence;                                /*!< Stream completion sequence */
     uint8_t *buffer;                                  /*!< Buffer space to fill data */
 
     uint32_t valid_size;                              /*!< Valid data size */

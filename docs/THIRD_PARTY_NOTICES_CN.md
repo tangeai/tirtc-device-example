@@ -7,6 +7,12 @@
 - `components/tirtc_sdk/` 或 `sdk/` 中的 TiRTC SDK 头文件与目标平台静态库。
 - 第三方字体、图像、音视频测试素材和生成资源。
 
+ESP32-P4 Device App `1.3.1` 使用 TiRTC `2.3.0` 定制兼容快照。其公开 API 版本不变，
+P4 静态库以 Nano baseline `aaad3da251bac90e0642b51b3279a1f40ca9fa9a` 为基础，并带有从
+`fde4f1c58d2dc28f3d3d04e25dd49bc3a399fea6` 回移的 HTTP DNS cache disable 补丁。
+该快照的身份和逐文件 SHA-256 以项目 `components/tirtc_sdk/VERSION.md`、
+`SHA256SUMS.txt` 和 `SOURCE_PROVENANCE.md` 为准。
+
 项目明确标记为自生成且按仓库根许可分发的测试素材，以项目内 `media/README.md` 的来源、
 内容和 SHA-256 声明为准；这不改变编解码器实现本身的许可。
 

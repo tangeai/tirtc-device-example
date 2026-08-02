@@ -22,35 +22,15 @@
 #include "media_dma_reserve.h"
 #include "video_frame_converter.h"
 
+#ifndef CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
+#define CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS 0
+#endif
+
 static const char *TAG = "call_video";
 
-#define CALL_VIDEO_INPUT_SLOT_COUNT       16U
-#define CALL_VIDEO_INPUT_SLOT_CAPACITY    (256U * 1024U)
-#define CALL_VIDEO_SOURCE_CROP_X          0U
-#define CALL_VIDEO_SOURCE_CROP_Y          0U
-#define CALL_VIDEO_SOURCE_CROP_WIDTH      480U
-#define CALL_VIDEO_SOURCE_CROP_HEIGHT     320U
-#define CALL_VIDEO_DECODED_SLOT_COUNT     3U
 #define CALL_VIDEO_DECODED_SLOT_CAPACITY  \
     (CALL_VIDEO_SOURCE_CROP_WIDTH * CALL_VIDEO_SOURCE_CROP_HEIGHT * 3U / 2U)
-#define CALL_VIDEO_OUTPUT_SLOT_COUNT      3U
 #define CALL_VIDEO_OUTPUT_SLOT_INVALID    UINT8_MAX
-#define CALL_VIDEO_TASK_STACK_SIZE        (16U * 1024U)
-#define CALL_VIDEO_MJPEG_TASK_STACK_SIZE  (8U * 1024U)
-#define CALL_VIDEO_CONVERT_TASK_STACK_SIZE (8U * 1024U)
-/*
- * Keep audio ahead of video, but let the software decoder consume the complete
- * H264 reference chain before lower-priority camera/control work. Falling
- * behind the compressed stream forces an IDR recovery and costs much more than
- * delaying one uplink frame. Conversion stays one level lower and blocks on
- * its queue/PPA instead of polling.
- */
-#define CALL_VIDEO_TASK_PRIORITY          16U
-#define CALL_VIDEO_CONVERT_TASK_PRIORITY  14U
-#define CALL_VIDEO_START_TIMEOUT_MS       5000U
-#define CALL_VIDEO_STOP_TIMEOUT_MS        3000U
-#define CALL_VIDEO_MJPEG_DECODE_TIMEOUT_MS 100
-#define CALL_VIDEO_STATS_INTERVAL_US      (5LL * 1000LL * 1000LL)
 #define CALL_VIDEO_H264_BASELINE_PROFILE_IDC 66U
 #define CALL_VIDEO_H264_CONSTRAINT_SET1_FLAG 0x40U
 #define CALL_VIDEO_FRAME_PIXELS           (CALL_VIDEO_RENDER_WIDTH * CALL_VIDEO_RENDER_HEIGHT)
@@ -88,9 +68,31 @@ _Static_assert((CALL_VIDEO_RENDER_WIDTH % 16U) == 0U &&
                    (CALL_VIDEO_RENDER_HEIGHT % 16U) == 0U,
                "hardware JPEG output dimensions must be aligned to 16 pixels");
 
-#if !CONFIG_FREERTOS_UNICORE
-_Static_assert(APP_TASK_CORE_VIDEO_DECODE != CONFIG_ESP_H264_DUAL_TASK_CORE,
+#if CALL_VIDEO_H264_DUAL_TASK_ENABLE
+#define CALL_VIDEO_H264_DECODER_MODE       "dual-task"
+#else
+#define CALL_VIDEO_H264_DECODER_MODE       "single-task"
+#endif
+
+#if !CONFIG_FREERTOS_UNICORE && CALL_VIDEO_H264_DUAL_TASK_ENABLE
+_Static_assert(APP_TASK_CORE_VIDEO_DECODE != CALL_VIDEO_H264_HELPER_TASK_CORE,
                "TinyH264 helper must run on the core opposite the decoder caller");
+_Static_assert(CALL_VIDEO_H264_HELPER_TASK_PRIORITY > 0U &&
+                   CALL_VIDEO_H264_HELPER_TASK_PRIORITY < configMAX_PRIORITIES,
+               "TinyH264 helper priority must be a valid FreeRTOS priority");
+_Static_assert(CALL_VIDEO_H264_HELPER_TASK_PRIORITY > CALL_VIDEO_TASK_PRIORITY,
+               "TinyH264 helper must outrank its synchronously waiting caller");
+_Static_assert(CALL_VIDEO_H264_HELPER_TASK_PRIORITY >=
+                   APP_TASK_PRIORITY_AUDIO_PLAYBACK,
+               "TinyH264 helper must not be starved by continuous audio playback");
+_Static_assert(CALL_VIDEO_H264_HELPER_TASK_PRIORITY <
+                   APP_TASK_PRIORITY_AUDIO_CAPTURE,
+               "audio capture must remain the highest-priority media deadline");
+#endif
+
+#if !CONFIG_FREERTOS_UNICORE
+_Static_assert(APP_TASK_CORE_VIDEO_DECODE != APP_TASK_CORE_VIDEO_CONVERT,
+               "H264 decode and display conversion must use separate cores");
 #endif
 
 #if CONFIG_CACHE_L2_CACHE_LINE_SIZE > CONFIG_CACHE_L1_CACHE_LINE_SIZE
@@ -112,6 +114,9 @@ typedef struct {
     uint32_t pts;
     uint32_t generation;
     int64_t queued_at_us;
+    uint32_t trace_frame_index;
+    int64_t trace_received_at_us;
+    int64_t trace_decode_started_at_us;
 } call_video_input_slot_t;
 
 typedef struct {
@@ -133,7 +138,10 @@ typedef struct {
     size_t data_len;
     uint16_t width;
     uint16_t height;
+    uint32_t pts;
     uint32_t generation;
+    call_video_frame_trace_t trace;
+    int64_t trace_ready_at_us;
 } call_video_decoded_slot_t;
 
 typedef enum {
@@ -147,6 +155,9 @@ typedef struct {
     uint16_t *pixels;
     call_video_output_state_t state;
     uint32_t sequence;
+    uint32_t pts;
+    call_video_frame_trace_t trace;
+    int64_t trace_ready_at_us;
 } call_video_output_slot_t;
 
 typedef struct {
@@ -175,6 +186,13 @@ typedef struct {
     bool start_pending;
     bool running;
     bool stop_requested;
+    bool faulted;
+    bool decode_in_progress;
+    int64_t decode_started_at_us;
+    uint32_t decode_generation;
+    uint32_t decode_pts;
+    size_t decode_payload_bytes;
+    bool decode_key_frame;
     bool waiting_for_key_frame;
     bool latency_recovery_pending;
     bool h264_profile_known;
@@ -186,6 +204,7 @@ typedef struct {
     bool h264_format_error_logged;
     bool h264_missing_parameter_sets_logged;
     bool frame_ready;
+    bool session_active;
     esp_err_t start_result;
     uint32_t generation;
     uint32_t h264_sps_hash;
@@ -195,6 +214,7 @@ typedef struct {
     uint8_t h264_level_idc;
     uint16_t source_width;
     uint16_t source_height;
+    uint32_t startup_trace_frames;
     uint32_t received_frames;
     uint64_t received_bytes;
     uint32_t submitted_frames;
@@ -206,6 +226,16 @@ typedef struct {
     uint32_t decode_failures;
     uint32_t latest_sequence;
     uint32_t presented_frames;
+    uint32_t stale_received_frames;
+    uint32_t stale_presented_frames;
+    bool received_pts_valid;
+    uint32_t received_pts;
+    bool presented_pts_valid;
+    uint32_t presented_pts;
+    int64_t last_received_at_us;
+    uint32_t receive_gap_window_max_us;
+    int64_t last_presented_at_us;
+    uint32_t present_gap_window_max_us;
     uint32_t decode_process_calls;
     uint64_t decode_time_us;
     uint32_t decode_access_units;
@@ -245,6 +275,44 @@ static call_video_renderer_t s_renderer = {
     .presented_output_slot = CALL_VIDEO_OUTPUT_SLOT_INVALID,
     .codec = CALL_VIDEO_CODEC_H264,
 };
+
+static uint32_t call_video_elapsed_us(int64_t started_at_us, int64_t finished_at_us)
+{
+    if (started_at_us <= 0 || finished_at_us <= started_at_us) {
+        return 0U;
+    }
+
+    uint64_t elapsed_us = (uint64_t)(finished_at_us - started_at_us);
+    return elapsed_us > UINT32_MAX ? UINT32_MAX : (uint32_t)elapsed_us;
+}
+
+static bool call_video_pts_is_newer(uint32_t current, uint32_t previous)
+{
+    return (int32_t)(current - previous) > 0;
+}
+
+static void call_video_note_received(int64_t received_at_us, uint32_t pts)
+{
+    taskENTER_CRITICAL(&s_renderer.lock);
+    if (s_renderer.last_received_at_us > 0 &&
+        received_at_us > s_renderer.last_received_at_us) {
+        uint32_t gap_us = call_video_elapsed_us(s_renderer.last_received_at_us,
+                                                received_at_us);
+        if (gap_us > s_renderer.receive_gap_window_max_us) {
+            s_renderer.receive_gap_window_max_us = gap_us;
+        }
+    }
+    s_renderer.last_received_at_us = received_at_us;
+    if (s_renderer.received_pts_valid &&
+        (pts != 0U || s_renderer.received_pts != 0U) &&
+        !call_video_pts_is_newer(pts, s_renderer.received_pts)) {
+        s_renderer.stale_received_frames++;
+    } else {
+        s_renderer.received_pts = pts;
+        s_renderer.received_pts_valid = true;
+    }
+    taskEXIT_CRITICAL(&s_renderer.lock);
+}
 
 static const char *call_video_codec_name(call_video_codec_t codec)
 {
@@ -540,6 +608,105 @@ static bool call_video_stop_requested(void)
     return requested;
 }
 
+static const char *call_video_task_state_name(eTaskState state)
+{
+    switch (state) {
+    case eRunning:
+        return "run";
+    case eReady:
+        return "ready";
+    case eBlocked:
+        return "blocked";
+    case eSuspended:
+        return "suspended";
+    case eDeleted:
+        return "deleted";
+    case eInvalid:
+    default:
+        return "invalid";
+    }
+}
+
+static void call_video_log_task_snapshot(const char *role,
+                                         const char *expected_name,
+                                         TaskHandle_t task)
+{
+    if (task == NULL) {
+        ESP_LOGE(TAG,
+                 "H264 hang task: role=%s task=%s missing",
+                 role,
+                 expected_name);
+        return;
+    }
+
+    ESP_LOGE(TAG,
+             "H264 hang task: role=%s task=%s state=%s prio=%u core=%ld hwm=%u",
+             role,
+             pcTaskGetName(task),
+             call_video_task_state_name(eTaskGetState(task)),
+             (unsigned)uxTaskPriorityGet(task),
+             (long)xTaskGetCoreID(task),
+             (unsigned)uxTaskGetStackHighWaterMark(task));
+}
+
+static void call_video_log_named_task_snapshot(const char *role,
+                                               const char *task_name)
+{
+    call_video_log_task_snapshot(role, task_name, xTaskGetHandle(task_name));
+}
+
+static bool call_video_renderer_detect_decode_fault(int64_t now_us)
+{
+    bool faulted = false;
+    bool newly_faulted = false;
+    uint64_t blocked_us = 0U;
+    uint32_t generation = 0U;
+    uint32_t pts = 0U;
+    size_t payload_bytes = 0U;
+    bool key_frame = false;
+    TaskHandle_t decode_task = NULL;
+
+    taskENTER_CRITICAL(&s_renderer.lock);
+    if (s_renderer.codec == CALL_VIDEO_CODEC_H264 &&
+        s_renderer.running &&
+        s_renderer.decode_in_progress &&
+        s_renderer.decode_started_at_us > 0 &&
+        now_us > s_renderer.decode_started_at_us) {
+        blocked_us = (uint64_t)(now_us - s_renderer.decode_started_at_us);
+        if (!s_renderer.faulted &&
+            blocked_us >= CALL_VIDEO_DECODE_HANG_TIMEOUT_US) {
+            s_renderer.faulted = true;
+            newly_faulted = true;
+        }
+        generation = s_renderer.decode_generation;
+        pts = s_renderer.decode_pts;
+        payload_bytes = s_renderer.decode_payload_bytes;
+        key_frame = s_renderer.decode_key_frame;
+        decode_task = s_renderer.task;
+    }
+    faulted = s_renderer.faulted;
+    taskEXIT_CRITICAL(&s_renderer.lock);
+
+    if (newly_faulted) {
+        ESP_LOGE(TAG,
+                 "H264 decoder stalled: blocked=%llums gen=%lu pts=%lu bytes=%u key=%d q=%lu/%lu; quarantined",
+                 (unsigned long long)(blocked_us / 1000ULL),
+                 (unsigned long)generation,
+                 (unsigned long)pts,
+                 (unsigned)payload_bytes,
+                 key_frame ? 1 : 0,
+                 s_renderer.ready_slots != NULL ?
+                     (unsigned long)uxQueueMessagesWaiting(s_renderer.ready_slots) : 0UL,
+                 s_renderer.decoded_ready_slots != NULL ?
+                     (unsigned long)uxQueueMessagesWaiting(s_renderer.decoded_ready_slots) : 0UL);
+        call_video_log_task_snapshot("caller", "call_h264_rx", decode_task);
+        call_video_log_named_task_snapshot("helper", "h264FilterTask");
+        call_video_log_named_task_snapshot("capture", "audio_capture");
+        call_video_log_named_task_snapshot("playback", "media_audio_rx");
+    }
+    return faulted;
+}
+
 static void call_video_return_slot(uint8_t index)
 {
     if (s_renderer.free_slots != NULL) {
@@ -701,8 +868,14 @@ static esp_err_t call_video_decoder_create(esp_h264_dec_handle_t *decoder,
     esp_h264_dec_cfg_sw_t config = {
         .pic_type = ESP_H264_RAW_FMT_I420,
     };
+    const esp_h264_dec_sw_task_cfg_t task_config = {
+        .dual_task_enable = CALL_VIDEO_H264_DUAL_TASK_ENABLE != 0U,
+        .dual_task_core = CALL_VIDEO_H264_HELPER_TASK_CORE,
+        .dual_task_priority = CALL_VIDEO_H264_HELPER_TASK_PRIORITY,
+    };
 
-    if (esp_h264_dec_sw_new(&config, decoder) != ESP_H264_ERR_OK) {
+    if (esp_h264_dec_sw_new_with_task_config(&config, &task_config, decoder) !=
+        ESP_H264_ERR_OK) {
         return ESP_ERR_NO_MEM;
     }
     if (esp_h264_dec_sw_get_param_hd(*decoder, parameters) != ESP_H264_ERR_OK ||
@@ -851,6 +1024,8 @@ typedef struct {
     uint32_t decoded_frames;
     uint32_t converted_frames;
     uint32_t presented_frames;
+    uint32_t stale_received_frames;
+    uint32_t stale_presented_frames;
     uint32_t dropped_frames;
     uint32_t conversion_dropped_frames;
     uint32_t decode_failures;
@@ -883,11 +1058,6 @@ typedef struct {
 static void call_video_log_stats_if_due(call_video_log_window_t *window,
                                         video_frame_converter_handle_t converter)
 {
-#if !CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
-    (void)window;
-    (void)converter;
-    return;
-#else
     int64_t now_us = esp_timer_get_time();
     if (window->last_log_us == 0) {
         window->last_log_us = now_us;
@@ -903,6 +1073,9 @@ static void call_video_log_stats_if_due(call_video_log_window_t *window,
     };
     uint16_t source_width = 0;
     uint16_t source_height = 0;
+    bool session_active = false;
+    uint32_t receive_gap_max_us = 0;
+    uint32_t present_gap_max_us = 0;
     taskENTER_CRITICAL(&s_renderer.lock);
     current.received_frames = s_renderer.received_frames;
     current.received_bytes = s_renderer.received_bytes;
@@ -910,6 +1083,8 @@ static void call_video_log_stats_if_due(call_video_log_window_t *window,
     current.decoded_frames = s_renderer.decoded_frames;
     current.converted_frames = s_renderer.converted_frames;
     current.presented_frames = s_renderer.presented_frames;
+    current.stale_received_frames = s_renderer.stale_received_frames;
+    current.stale_presented_frames = s_renderer.stale_presented_frames;
     current.dropped_frames = s_renderer.dropped_frames;
     current.conversion_dropped_frames = s_renderer.conversion_dropped_frames;
     current.decode_failures = s_renderer.decode_failures;
@@ -938,6 +1113,11 @@ static void call_video_log_stats_if_due(call_video_log_window_t *window,
     current.input_overflows = s_renderer.input_overflows;
     source_width = s_renderer.source_width;
     source_height = s_renderer.source_height;
+    session_active = s_renderer.session_active;
+    receive_gap_max_us = s_renderer.receive_gap_window_max_us;
+    present_gap_max_us = s_renderer.present_gap_window_max_us;
+    s_renderer.receive_gap_window_max_us = 0;
+    s_renderer.present_gap_window_max_us = 0;
     taskEXIT_CRITICAL(&s_renderer.lock);
     video_frame_converter_get_stats(converter, &current.converter);
 
@@ -947,6 +1127,10 @@ static void call_video_log_stats_if_due(call_video_log_window_t *window,
     uint32_t decoded_delta = current.decoded_frames - window->decoded_frames;
     uint32_t converted_delta = current.converted_frames - window->converted_frames;
     uint32_t presented_delta = current.presented_frames - window->presented_frames;
+    uint32_t stale_received_delta =
+        current.stale_received_frames - window->stale_received_frames;
+    uint32_t stale_presented_delta =
+        current.stale_presented_frames - window->stale_presented_frames;
     uint32_t dropped_delta = current.dropped_frames - window->dropped_frames;
     uint32_t conversion_dropped_delta =
         current.conversion_dropped_frames - window->conversion_dropped_frames;
@@ -1024,56 +1208,102 @@ static void call_video_log_stats_if_due(call_video_log_window_t *window,
     uint32_t decoded_queue_depth = s_renderer.decoded_ready_slots != NULL ?
                                    (uint32_t)uxQueueMessagesWaiting(s_renderer.decoded_ready_slots) : 0U;
 
-    ESP_LOGI(TAG,
-             "H264 downlink stats: src=%ux%u rx=%u.%ufps/%ukbps queued=%u.%ufps "
-             "decoded=%u.%ufps converted=%u.%ufps presented=%u.%ufps "
-             "drop=input:%u display:%u fail=decode:%u convert:%u q=input:%u display:%u "
-             "mode=%s decode_us=au:%u max:%u proc:%u key:%u delta:%u copy:%u/%u "
-             "convert_us=%u/%u phases=%u/%u/%u sw:%u queue_age_us=%u/%u "
-             "sync=create:%u restart:%u reset:%u overflow:%u ui_handoff_us=%u/%u",
-             source_width,
-             source_height,
-             received_fps_x10 / 10U,
-             received_fps_x10 % 10U,
-             received_kbps,
-             queued_fps_x10 / 10U,
-             queued_fps_x10 % 10U,
-             decoded_fps_x10 / 10U,
-             decoded_fps_x10 % 10U,
-             converted_fps_x10 / 10U,
-             converted_fps_x10 % 10U,
-             presented_fps_x10 / 10U,
-             presented_fps_x10 % 10U,
-             dropped_delta,
-             conversion_dropped_delta,
-             failure_delta,
-             conversion_failure_delta,
-             input_queue_depth,
-             decoded_queue_depth,
-             video_frame_converter_mode_name(video_frame_converter_get_mode(converter)),
-             average_access_unit_us,
-             current.decode_access_unit_max_us,
-             average_decode_us,
-             average_key_us,
-             average_delta_us,
-             average_copy_us,
-             current.decode_copy_max_us,
-             average_convert_us,
-             current.convert_max_us,
-             average_pack_us,
-             average_ppa_us,
-             average_swap_us,
-             average_software_us,
-             average_queue_age_us,
-             current.input_queue_age_max_us,
-             decoder_creations_delta,
-             decoder_restarts_delta,
-             discontinuities_delta,
-             input_overflows_delta,
-             average_present_copy_us,
-             current.present_copy_max_us);
+    if (!session_active) {
+        *window = current;
+        return;
+    }
+
+    if (CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS) {
+        ESP_LOGI(TAG,
+                 "H264 downlink stats: src=%ux%u rx=%u.%ufps/%ukbps queued=%u.%ufps "
+                 "decoded=%u.%ufps converted=%u.%ufps presented=%u.%ufps "
+                 "drop=input:%u display:%u fail=decode:%u convert:%u q=input:%u display:%u "
+                 "mode=%s decode_us=au:%u max:%u proc:%u key:%u delta:%u copy:%u/%u "
+                 "convert_us=%u/%u phases=%u/%u/%u sw:%u queue_age_us=%u/%u "
+                 "sync=create:%u restart:%u reset:%u overflow:%u ui_handoff_us=%u/%u "
+                 "cadence_ms=rx:%u present:%u stale_pts=rx:%u present:%u",
+                 source_width,
+                 source_height,
+                 received_fps_x10 / 10U,
+                 received_fps_x10 % 10U,
+                 received_kbps,
+                 queued_fps_x10 / 10U,
+                 queued_fps_x10 % 10U,
+                 decoded_fps_x10 / 10U,
+                 decoded_fps_x10 % 10U,
+                 converted_fps_x10 / 10U,
+                 converted_fps_x10 % 10U,
+                 presented_fps_x10 / 10U,
+                 presented_fps_x10 % 10U,
+                 dropped_delta,
+                 conversion_dropped_delta,
+                 failure_delta,
+                 conversion_failure_delta,
+                 input_queue_depth,
+                 decoded_queue_depth,
+                 video_frame_converter_mode_name(video_frame_converter_get_mode(converter)),
+                 average_access_unit_us,
+                 current.decode_access_unit_max_us,
+                 average_decode_us,
+                 average_key_us,
+                 average_delta_us,
+                 average_copy_us,
+                 current.decode_copy_max_us,
+                 average_convert_us,
+                 current.convert_max_us,
+                 average_pack_us,
+                 average_ppa_us,
+                 average_swap_us,
+                 average_software_us,
+                 average_queue_age_us,
+                 current.input_queue_age_max_us,
+                 decoder_creations_delta,
+                 decoder_restarts_delta,
+                 discontinuities_delta,
+                 input_overflows_delta,
+                 average_present_copy_us,
+                 current.present_copy_max_us,
+                 receive_gap_max_us / 1000U,
+                 present_gap_max_us / 1000U,
+                 stale_received_delta,
+                 stale_presented_delta);
+    } else {
+        ESP_LOGI(TAG,
+                 "VRX %ux%u in=%u.%u/%uk q/d/c/o=%u.%u/%u.%u/%u.%u/%u.%u "
+                 "drop=%u/%u fail=%u/%u age=%u/%ums depth=%u/%u "
+                 "ms=au/cvt/ppa:%u/%u/%u gap=%u/%u old=%u/%u reset=%u/%u",
+                 source_width,
+                 source_height,
+                 received_fps_x10 / 10U,
+                 received_fps_x10 % 10U,
+                 received_kbps,
+                 queued_fps_x10 / 10U,
+                 queued_fps_x10 % 10U,
+                 decoded_fps_x10 / 10U,
+                 decoded_fps_x10 % 10U,
+                 converted_fps_x10 / 10U,
+                 converted_fps_x10 % 10U,
+                 presented_fps_x10 / 10U,
+                 presented_fps_x10 % 10U,
+                 dropped_delta,
+                 conversion_dropped_delta,
+                 failure_delta,
+                 conversion_failure_delta,
+                 average_queue_age_us / 1000U,
+                 current.input_queue_age_max_us / 1000U,
+                 input_queue_depth,
+                 decoded_queue_depth,
+                 average_access_unit_us / 1000U,
+                 average_convert_us / 1000U,
+                 average_ppa_us / 1000U,
+                 receive_gap_max_us / 1000U,
+                 present_gap_max_us / 1000U,
+                 stale_received_delta,
+                 stale_presented_delta,
+                 decoder_restarts_delta,
+                 discontinuities_delta);
+    }
     *window = current;
-#endif
 }
 
 static esp_err_t call_video_copy_display_i420(const uint8_t *source,
@@ -1139,13 +1369,13 @@ static esp_err_t call_video_copy_display_i420(const uint8_t *source,
 
 static esp_err_t call_video_queue_decoded_frame(const esp_h264_dec_out_frame_t *frame,
                                                  esp_h264_dec_param_sw_handle_t parameters,
-                                                 uint32_t generation,
-                                                 bool key_frame)
+                                                 const call_video_input_slot_t *input_slot)
 {
     esp_h264_resolution_t resolution = {0};
     uint8_t index = 0;
 
-    ESP_RETURN_ON_FALSE(frame != NULL && frame->outbuf != NULL && frame->out_size > 0U,
+    ESP_RETURN_ON_FALSE(frame != NULL && frame->outbuf != NULL && frame->out_size > 0U &&
+                            input_slot != NULL,
                         ESP_ERR_INVALID_ARG,
                         TAG,
                         "invalid decoded frame");
@@ -1164,13 +1394,13 @@ static esp_err_t call_video_queue_decoded_frame(const esp_h264_dec_out_frame_t *
     bool generation_matches = false;
     bool waiting_for_key_frame = false;
     taskENTER_CRITICAL(&s_renderer.lock);
-    generation_matches = generation == s_renderer.generation;
+    generation_matches = input_slot->generation == s_renderer.generation;
     waiting_for_key_frame = s_renderer.waiting_for_key_frame;
     taskEXIT_CRITICAL(&s_renderer.lock);
     if (!generation_matches) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (waiting_for_key_frame && !key_frame) {
+    if (waiting_for_key_frame && !input_slot->key_frame) {
         return ESP_ERR_NOT_FINISHED;
     }
 
@@ -1202,10 +1432,31 @@ static esp_err_t call_video_queue_decoded_frame(const esp_h264_dec_out_frame_t *
     slot->data_len = CALL_VIDEO_DECODED_SLOT_CAPACITY;
     slot->width = CALL_VIDEO_SOURCE_CROP_WIDTH;
     slot->height = CALL_VIDEO_SOURCE_CROP_HEIGHT;
-    slot->generation = generation;
+    slot->pts = frame->pts;
+    slot->generation = input_slot->generation;
+    memset(&slot->trace, 0, sizeof(slot->trace));
+    slot->trace_ready_at_us = esp_timer_get_time();
+    if (input_slot->trace_frame_index > 0U) {
+        uint32_t decode_total_us = call_video_elapsed_us(
+            input_slot->trace_decode_started_at_us,
+            slot->trace_ready_at_us);
+        slot->trace.frame_index = input_slot->trace_frame_index;
+        slot->trace.pts = input_slot->pts;
+        slot->trace.payload_bytes = (uint32_t)input_slot->data_len;
+        slot->trace.submit_us = call_video_elapsed_us(input_slot->trace_received_at_us,
+                                                      input_slot->queued_at_us);
+        slot->trace.input_wait_us = call_video_elapsed_us(
+            input_slot->queued_at_us,
+            input_slot->trace_decode_started_at_us);
+        slot->trace.decode_copy_us = copy_elapsed_us;
+        slot->trace.decode_us = decode_total_us > copy_elapsed_us ?
+                                    decode_total_us - copy_elapsed_us : 0U;
+        slot->trace.key_frame = input_slot->key_frame;
+        slot->trace.decoder_bootstrap = input_slot->decoder_bootstrap;
+    }
 
     taskENTER_CRITICAL(&s_renderer.lock);
-    generation_matches = generation == s_renderer.generation;
+    generation_matches = input_slot->generation == s_renderer.generation;
     s_renderer.decode_copy_time_us += copy_elapsed_us;
     if (copy_elapsed_us > s_renderer.decode_copy_max_us) {
         s_renderer.decode_copy_max_us = copy_elapsed_us;
@@ -1227,7 +1478,7 @@ static esp_err_t call_video_queue_decoded_frame(const esp_h264_dec_out_frame_t *
     s_renderer.source_width = resolution.width;
     s_renderer.source_height = resolution.height;
     s_renderer.decoded_frames++;
-    if (s_renderer.generation == generation) {
+    if (s_renderer.generation == input_slot->generation) {
         s_renderer.waiting_for_key_frame = false;
     }
     taskEXIT_CRITICAL(&s_renderer.lock);
@@ -1266,8 +1517,7 @@ static esp_err_t call_video_decode_slot(esp_h264_dec_handle_t decoder,
         if (output.out_size > 0U) {
             esp_err_t queue_ret = call_video_queue_decoded_frame(&output,
                                                                   parameters,
-                                                                  slot->generation,
-                                                                  slot->key_frame);
+                                                                  slot);
             if (queue_ret == ESP_ERR_NOT_FINISHED) {
                 /* Display pressure is not a decoder failure. The decoded
                  * reference state is already valid, so skip presentation and
@@ -1315,6 +1565,11 @@ static esp_err_t call_video_output_begin_write(uint8_t *slot_index, uint16_t **p
     }
 
     s_renderer.output_slots[selected].state = CALL_VIDEO_OUTPUT_WRITING;
+    s_renderer.output_slots[selected].pts = 0;
+    memset(&s_renderer.output_slots[selected].trace,
+           0,
+           sizeof(s_renderer.output_slots[selected].trace));
+    s_renderer.output_slots[selected].trace_ready_at_us = 0;
     *slot_index = selected;
     *pixels = s_renderer.output_slots[selected].pixels;
     xSemaphoreGive(s_renderer.frame_mutex);
@@ -1323,7 +1578,8 @@ static esp_err_t call_video_output_begin_write(uint8_t *slot_index, uint16_t **p
 
 static void call_video_output_finish_write(uint8_t slot_index,
                                            bool publish,
-                                           uint32_t convert_elapsed_us)
+                                           uint32_t convert_elapsed_us,
+                                           uint32_t source_pts)
 {
     if (slot_index >= CALL_VIDEO_OUTPUT_SLOT_COUNT || s_renderer.frame_mutex == NULL ||
         xSemaphoreTake(s_renderer.frame_mutex, portMAX_DELAY) != pdTRUE) {
@@ -1350,6 +1606,7 @@ static void call_video_output_finish_write(uint8_t slot_index,
     taskENTER_CRITICAL(&s_renderer.lock);
     s_renderer.latest_sequence++;
     slot->sequence = s_renderer.latest_sequence;
+    slot->pts = source_pts;
     s_renderer.frame_ready = true;
     s_renderer.converted_frames++;
     s_renderer.convert_time_us += convert_elapsed_us;
@@ -1399,6 +1656,11 @@ static void call_video_converter_task(void *arg)
         }
 
         int64_t convert_started_us = esp_timer_get_time();
+        if (slot->trace.frame_index > 0U) {
+            slot->trace.decoded_wait_us = call_video_elapsed_us(
+                slot->trace_ready_at_us,
+                convert_started_us);
+        }
         esp_err_t convert_ret = video_frame_converter_i420_to_rgb565(converter,
                                                                      slot->data,
                                                                      slot->width,
@@ -1407,6 +1669,12 @@ static void call_video_converter_task(void *arg)
                                                                      NULL);
         uint32_t convert_elapsed_us =
             (uint32_t)(esp_timer_get_time() - convert_started_us);
+        if (output_index < CALL_VIDEO_OUTPUT_SLOT_COUNT &&
+            slot->trace.frame_index > 0U) {
+            s_renderer.output_slots[output_index].trace = slot->trace;
+            s_renderer.output_slots[output_index].trace.convert_us = convert_elapsed_us;
+            s_renderer.output_slots[output_index].trace_ready_at_us = esp_timer_get_time();
+        }
         video_frame_converter_stats_t converter_stats = {0};
         video_frame_converter_get_stats(converter, &converter_stats);
         taskENTER_CRITICAL(&s_renderer.lock);
@@ -1421,7 +1689,8 @@ static void call_video_converter_task(void *arg)
         bool generation_matches = slot->generation == generation;
         call_video_output_finish_write(output_index,
                                        convert_ret == ESP_OK && generation_matches,
-                                       convert_elapsed_us);
+                                       convert_elapsed_us,
+                                       slot->pts);
         if (convert_ret != ESP_OK && generation_matches) {
             taskENTER_CRITICAL(&s_renderer.lock);
             s_renderer.conversion_failures++;
@@ -1454,6 +1723,11 @@ static void call_video_renderer_task(void *arg)
     esp_h264_dec_param_sw_handle_t parameters = NULL;
     video_frame_converter_handle_t converter = NULL;
     call_video_log_window_t log_window = {0};
+    int64_t last_input_received_at_us = 0;
+    int64_t last_decode_completed_at_us = 0;
+    int64_t last_stall_log_at_us = 0;
+    uint32_t last_trace_generation = UINT32_MAX;
+    uint32_t decoder_generation = UINT32_MAX;
     const video_frame_converter_config_t converter_config = {
         .output_width = CALL_VIDEO_RENDER_WIDTH,
         .output_height = CALL_VIDEO_RENDER_HEIGHT,
@@ -1481,6 +1755,7 @@ static void call_video_renderer_task(void *arg)
         if (startup_ret == ESP_OK) {
             taskENTER_CRITICAL(&s_renderer.lock);
             s_renderer.decoder_creations++;
+            decoder_generation = s_renderer.generation;
             taskEXIT_CRITICAL(&s_renderer.lock);
         }
     }
@@ -1517,10 +1792,11 @@ static void call_video_renderer_task(void *arg)
     }
 
     ESP_LOGI(TAG,
-             "H264 downlink renderer ready: decoder=dual-task conversion=pipelined-%s output=%ux%u "
+             "H264 downlink renderer ready: decoder=%s conversion=pipelined-%s output=%ux%u "
              "source_crop=%ux%u+%u+%u orientation=panel-owned input_slots=%u input_cap=%u decoded_slots=%u "
-             "decoded_cap=%u presentation=latest-%u priorities=rx:%u helper:%u convert:%u "
-             "cores=decode:%d helper:%d convert:smp ui:%d camera:%d",
+             "decoded_cap=%u presentation=latest-%u priorities=decode:%u helper:%u convert:%u "
+             "cores=decode:%d helper:%d convert:%d ui:%d camera:%d",
+             CALL_VIDEO_H264_DECODER_MODE,
              video_frame_converter_mode_name(video_frame_converter_get_mode(converter)),
              CALL_VIDEO_RENDER_WIDTH,
              CALL_VIDEO_RENDER_HEIGHT,
@@ -1534,10 +1810,11 @@ static void call_video_renderer_task(void *arg)
              CALL_VIDEO_DECODED_SLOT_CAPACITY,
              CALL_VIDEO_OUTPUT_SLOT_COUNT,
              CALL_VIDEO_TASK_PRIORITY,
-             CONFIG_ESP_H264_DUAL_TASK_PRIORITY,
+             CALL_VIDEO_H264_HELPER_TASK_PRIORITY,
              CALL_VIDEO_CONVERT_TASK_PRIORITY,
              APP_TASK_CORE_VIDEO_DECODE,
-             CONFIG_ESP_H264_DUAL_TASK_CORE,
+             CALL_VIDEO_H264_HELPER_TASK_CORE,
+             APP_TASK_CORE_VIDEO_CONVERT,
              APP_TASK_CORE_UI,
              APP_TASK_CORE_CAMERA);
 
@@ -1565,19 +1842,52 @@ static void call_video_renderer_task(void *arg)
             continue;
         }
 
+        if (slot->generation != last_trace_generation) {
+            /* The renderer stays warm between calls. A new generation is a
+             * new timing epoch, so the idle interval must not be reported as
+             * a decode/input stall for the first frame of the next peer. */
+            last_trace_generation = slot->generation;
+            last_input_received_at_us = 0;
+            last_decode_completed_at_us = 0;
+            last_stall_log_at_us = 0;
+        }
+
         int64_t dequeued_at_us = esp_timer_get_time();
         uint32_t queue_age_us = slot->queued_at_us > 0 && dequeued_at_us > slot->queued_at_us ?
                                     (uint32_t)(dequeued_at_us - slot->queued_at_us) : 0U;
+        bool latency_recovery_armed = false;
         taskENTER_CRITICAL(&s_renderer.lock);
         s_renderer.input_queue_age_samples++;
         s_renderer.input_queue_age_us += queue_age_us;
         if (queue_age_us > s_renderer.input_queue_age_max_us) {
             s_renderer.input_queue_age_max_us = queue_age_us;
         }
+        if (queue_age_us >= CALL_VIDEO_LATENCY_RECOVERY_US &&
+            !s_renderer.latency_recovery_pending) {
+            s_renderer.latency_recovery_pending = true;
+            latency_recovery_armed = true;
+        }
         taskEXIT_CRITICAL(&s_renderer.lock);
+        if (latency_recovery_armed) {
+            ESP_LOGW(TAG,
+                     "H264 latency recovery armed: queue_age=%luus q=%lu; waiting for fresh IDR",
+                     (unsigned long)queue_age_us,
+                     (unsigned long)uxQueueMessagesWaiting(s_renderer.ready_slots));
+        }
 
         bool dma_escrow_lent = false;
         esp_err_t decode_ret = ESP_OK;
+        if (decoder != NULL && decoder_generation != slot->generation) {
+            /* A generation is one continuous H264 reference chain. Flushes,
+             * peer changes, and IDR recovery must not reuse DPB/SPS/PPS state
+             * from the previous chain merely because the worker stayed warm. */
+            taskENTER_CRITICAL(&s_renderer.lock);
+            s_renderer.decoder_restarts++;
+            taskEXIT_CRITICAL(&s_renderer.lock);
+            call_video_decoder_destroy(&decoder);
+            parameters = NULL;
+            decoder_generation = UINT32_MAX;
+        }
         if (decoder == NULL) {
             decode_ret = call_video_decoder_dma_guard_begin(
                 &dma_escrow_lent,
@@ -1588,15 +1898,53 @@ static void call_video_renderer_task(void *arg)
                     taskENTER_CRITICAL(&s_renderer.lock);
                     s_renderer.decoder_creations++;
                     taskEXIT_CRITICAL(&s_renderer.lock);
+                    decoder_generation = slot->generation;
                 }
             }
         }
         int64_t access_unit_started_us = esp_timer_get_time();
+        slot->trace_decode_started_at_us = access_unit_started_us;
+        taskENTER_CRITICAL(&s_renderer.lock);
+        s_renderer.decode_in_progress = true;
+        s_renderer.decode_started_at_us = access_unit_started_us;
+        s_renderer.decode_generation = slot->generation;
+        s_renderer.decode_pts = slot->pts;
+        s_renderer.decode_payload_bytes = slot->data_len;
+        s_renderer.decode_key_frame = slot->key_frame;
+        taskEXIT_CRITICAL(&s_renderer.lock);
         if (decode_ret == ESP_OK) {
             decode_ret = call_video_decode_slot(decoder, parameters, slot);
         }
-        uint32_t access_unit_elapsed_us =
-            (uint32_t)(esp_timer_get_time() - access_unit_started_us);
+        int64_t access_unit_finished_us = esp_timer_get_time();
+        bool decode_timed_out = false;
+        taskENTER_CRITICAL(&s_renderer.lock);
+        decode_timed_out = s_renderer.faulted && s_renderer.decode_in_progress;
+        s_renderer.decode_in_progress = false;
+        s_renderer.decode_started_at_us = 0;
+        s_renderer.decode_generation = 0U;
+        s_renderer.decode_pts = 0U;
+        s_renderer.decode_payload_bytes = 0U;
+        s_renderer.decode_key_frame = false;
+        if (decode_timed_out) {
+            /* The call eventually returned, so the decoder can now be
+             * destroyed safely and rebuilt from a fresh IDR. */
+            s_renderer.faulted = false;
+        }
+        taskEXIT_CRITICAL(&s_renderer.lock);
+        if (decode_timed_out) {
+            decode_ret = ESP_FAIL;
+        }
+        uint32_t access_unit_elapsed_us = call_video_elapsed_us(
+            access_unit_started_us,
+            access_unit_finished_us);
+        uint32_t input_gap_us = call_video_elapsed_us(
+            last_input_received_at_us,
+            slot->trace_received_at_us);
+        uint32_t decode_completion_gap_us = call_video_elapsed_us(
+            last_decode_completed_at_us,
+            access_unit_finished_us);
+        last_input_received_at_us = slot->trace_received_at_us;
+        last_decode_completed_at_us = access_unit_finished_us;
         uint32_t slot_generation = slot->generation;
         bool slot_key_frame = slot->key_frame;
         taskENTER_CRITICAL(&s_renderer.lock);
@@ -1614,8 +1962,41 @@ static void call_video_renderer_task(void *arg)
         }
         bool generation_stale = slot_generation != s_renderer.generation;
         taskEXIT_CRITICAL(&s_renderer.lock);
+        bool slow_decode = access_unit_elapsed_us >= CALL_VIDEO_SLOW_DECODE_US;
+        bool input_gap = input_gap_us >= CALL_VIDEO_INPUT_GAP_US;
+        if (!generation_stale &&
+            (slow_decode || input_gap) &&
+            (last_stall_log_at_us == 0 ||
+             access_unit_finished_us - last_stall_log_at_us >=
+                 CALL_VIDEO_STALL_LOG_INTERVAL_US)) {
+            uint32_t input_queue_depth = s_renderer.ready_slots != NULL ?
+                (uint32_t)uxQueueMessagesWaiting(s_renderer.ready_slots) : 0U;
+            uint32_t conversion_queue_depth = s_renderer.decoded_ready_slots != NULL ?
+                (uint32_t)uxQueueMessagesWaiting(s_renderer.decoded_ready_slots) : 0U;
+            ESP_LOGW(TAG,
+                     "video stall: stage=%s decode=%luus input_gap=%luus done_gap=%luus "
+                     "queue_age=%luus key=%d bytes=%u q=%lu/%lu hwm=%u",
+                     slow_decode ? "decode" : "input",
+                     (unsigned long)access_unit_elapsed_us,
+                     (unsigned long)input_gap_us,
+                     (unsigned long)decode_completion_gap_us,
+                     (unsigned long)queue_age_us,
+                     slot_key_frame ? 1 : 0,
+                     (unsigned)slot->data_len,
+                     (unsigned long)input_queue_depth,
+                     (unsigned long)conversion_queue_depth,
+                     (unsigned)uxTaskGetStackHighWaterMark(NULL));
+            last_stall_log_at_us = access_unit_finished_us;
+        }
         call_video_decoder_dma_guard_end(dma_escrow_lent, decode_ret, "H264");
         call_video_return_slot(index);
+        if (s_renderer.ready_slots != NULL &&
+            uxQueueMessagesWaiting(s_renderer.ready_slots) > 0U) {
+            /* At a 1 kHz tick, a one-tick delay can expire almost immediately
+             * at the tick boundary. Two milliseconds guarantee an IDLE0
+             * scheduling window while preserving normal no-backlog latency. */
+            vTaskDelay(pdMS_TO_TICKS(CALL_VIDEO_DECODE_BACKLOG_YIELD_MS));
+        }
         if (generation_stale) {
             if (decoder != NULL) {
                 taskENTER_CRITICAL(&s_renderer.lock);
@@ -1624,6 +2005,7 @@ static void call_video_renderer_task(void *arg)
             }
             call_video_decoder_destroy(&decoder);
             parameters = NULL;
+            decoder_generation = UINT32_MAX;
             call_video_log_stats_if_due(&log_window, converter);
             continue;
         }
@@ -1638,6 +2020,7 @@ static void call_video_renderer_task(void *arg)
             call_video_mark_discontinuity();
             call_video_decoder_destroy(&decoder);
             parameters = NULL;
+            decoder_generation = UINT32_MAX;
         }
         call_video_log_stats_if_due(&log_window, converter);
     }
@@ -1655,6 +2038,12 @@ task_exit:
     taskENTER_CRITICAL(&s_renderer.lock);
     s_renderer.running = false;
     s_renderer.task = NULL;
+    s_renderer.decode_in_progress = false;
+    s_renderer.decode_started_at_us = 0;
+    s_renderer.decode_generation = 0U;
+    s_renderer.decode_pts = 0U;
+    s_renderer.decode_payload_bytes = 0U;
+    s_renderer.decode_key_frame = false;
     taskEXIT_CRITICAL(&s_renderer.lock);
     xSemaphoreGive(s_renderer.stop_done);
     vTaskDeleteWithCaps(NULL);
@@ -1987,7 +2376,8 @@ static void call_video_mjpeg_renderer_task(void *arg)
             bool publish = convert_ret == ESP_OK && generation_matches;
             call_video_output_finish_write(output_index,
                                            publish,
-                                           convert_elapsed_us);
+                                           convert_elapsed_us,
+                                           slot->pts);
             if (publish) {
                 video_frame_converter_stats_t converter_stats = {0};
                 video_frame_converter_get_stats(converter, &converter_stats);
@@ -2411,7 +2801,16 @@ esp_err_t call_video_renderer_start_for_codec(call_video_codec_t codec)
                             "reserve persistent MJPEG decoder failed");
     }
 
+    if (call_video_renderer_detect_decode_fault(esp_timer_get_time())) {
+        ESP_LOGE(TAG, "%s downlink renderer is quarantined", call_video_codec_name(codec));
+        return ESP_ERR_INVALID_STATE;
+    }
+
     taskENTER_CRITICAL(&s_renderer.lock);
+    if (s_renderer.faulted) {
+        taskEXIT_CRITICAL(&s_renderer.lock);
+        return ESP_ERR_INVALID_STATE;
+    }
     if (s_renderer.running || s_renderer.start_pending) {
         bool same_codec = s_renderer.codec == codec;
         taskEXIT_CRITICAL(&s_renderer.lock);
@@ -2424,14 +2823,23 @@ esp_err_t call_video_renderer_start_for_codec(call_video_codec_t codec)
     s_renderer.codec = codec;
     s_renderer.start_pending = true;
     s_renderer.stop_requested = false;
+    s_renderer.faulted = false;
+    s_renderer.decode_in_progress = false;
+    s_renderer.decode_started_at_us = 0;
+    s_renderer.decode_generation = 0U;
+    s_renderer.decode_pts = 0U;
+    s_renderer.decode_payload_bytes = 0U;
+    s_renderer.decode_key_frame = false;
     s_renderer.waiting_for_key_frame = codec == CALL_VIDEO_CODEC_H264;
     s_renderer.latency_recovery_pending = false;
     call_video_reset_h264_stream_state_locked();
     s_renderer.frame_ready = false;
+    s_renderer.session_active = false;
     s_renderer.start_result = ESP_ERR_INVALID_STATE;
     s_renderer.generation++;
     s_renderer.source_width = 0;
     s_renderer.source_height = 0;
+    s_renderer.startup_trace_frames = 0;
     s_renderer.received_frames = 0;
     s_renderer.received_bytes = 0;
     s_renderer.submitted_frames = 0;
@@ -2443,6 +2851,16 @@ esp_err_t call_video_renderer_start_for_codec(call_video_codec_t codec)
     s_renderer.decode_failures = 0;
     s_renderer.latest_sequence = 0;
     s_renderer.presented_frames = 0;
+    s_renderer.stale_received_frames = 0;
+    s_renderer.stale_presented_frames = 0;
+    s_renderer.received_pts_valid = false;
+    s_renderer.received_pts = 0;
+    s_renderer.presented_pts_valid = false;
+    s_renderer.presented_pts = 0;
+    s_renderer.last_received_at_us = 0;
+    s_renderer.receive_gap_window_max_us = 0;
+    s_renderer.last_presented_at_us = 0;
+    s_renderer.present_gap_window_max_us = 0;
     s_renderer.decode_process_calls = 0;
     s_renderer.decode_time_us = 0;
     s_renderer.decode_access_units = 0;
@@ -2549,6 +2967,13 @@ esp_err_t call_video_renderer_stop(void)
         submit_locked = xSemaphoreTake(s_renderer.submit_mutex,
                                        pdMS_TO_TICKS(CALL_VIDEO_STOP_TIMEOUT_MS)) == pdTRUE;
         if (!submit_locked) {
+            if (!call_video_renderer_detect_decode_fault(esp_timer_get_time())) {
+                taskENTER_CRITICAL(&s_renderer.lock);
+                s_renderer.faulted = true;
+                taskEXIT_CRITICAL(&s_renderer.lock);
+                ESP_LOGE(TAG, "%s downlink submit path did not quiesce",
+                         call_video_codec_name(codec));
+            }
             return ESP_ERR_TIMEOUT;
         }
     }
@@ -2559,6 +2984,11 @@ esp_err_t call_video_renderer_stop(void)
         ESP_LOGE(TAG,
                  "%s downlink renderer stop timed out",
                  call_video_codec_name(codec));
+        if (!call_video_renderer_detect_decode_fault(esp_timer_get_time())) {
+            taskENTER_CRITICAL(&s_renderer.lock);
+            s_renderer.faulted = true;
+            taskEXIT_CRITICAL(&s_renderer.lock);
+        }
         if (submit_locked) {
             xSemaphoreGive(s_renderer.submit_mutex);
         }
@@ -2581,6 +3011,14 @@ esp_err_t call_video_renderer_stop(void)
     s_renderer.start_pending = false;
     s_renderer.running = false;
     s_renderer.frame_ready = false;
+    s_renderer.session_active = false;
+    s_renderer.faulted = false;
+    s_renderer.decode_in_progress = false;
+    s_renderer.decode_started_at_us = 0;
+    s_renderer.decode_generation = 0U;
+    s_renderer.decode_pts = 0U;
+    s_renderer.decode_payload_bytes = 0U;
+    s_renderer.decode_key_frame = false;
     taskEXIT_CRITICAL(&s_renderer.lock);
     if (frame_locked) {
         xSemaphoreGive(s_renderer.frame_mutex);
@@ -2606,6 +3044,16 @@ void call_video_renderer_flush(void)
     s_renderer.latency_recovery_pending = false;
     call_video_reset_h264_stream_state_locked();
     s_renderer.frame_ready = false;
+    s_renderer.session_active = false;
+    s_renderer.startup_trace_frames = 0;
+    s_renderer.received_pts_valid = false;
+    s_renderer.received_pts = 0;
+    s_renderer.presented_pts_valid = false;
+    s_renderer.presented_pts = 0;
+    s_renderer.last_received_at_us = 0;
+    s_renderer.receive_gap_window_max_us = 0;
+    s_renderer.last_presented_at_us = 0;
+    s_renderer.present_gap_window_max_us = 0;
     taskEXIT_CRITICAL(&s_renderer.lock);
     if (s_renderer.frame_mutex != NULL &&
         xSemaphoreTake(s_renderer.frame_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
@@ -2641,8 +3089,13 @@ esp_err_t call_video_renderer_submit_h264(const uint8_t *data,
     bool effective_key_frame = false;
     bool decoder_bootstrap = false;
     uint32_t generation = 0;
+    uint32_t trace_frame_index = 0;
+    int64_t trace_received_at_us = esp_timer_get_time();
 
     ESP_RETURN_ON_FALSE(data != NULL && data_len > 0U, ESP_ERR_INVALID_ARG, TAG, "invalid H264 frame");
+    if (call_video_renderer_detect_decode_fault(trace_received_at_us)) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (s_renderer.submit_mutex == NULL ||
         xSemaphoreTake(s_renderer.submit_mutex, pdMS_TO_TICKS(20)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
@@ -2658,9 +3111,17 @@ esp_err_t call_video_renderer_submit_h264(const uint8_t *data,
         xSemaphoreGive(s_renderer.submit_mutex);
         return ESP_ERR_INVALID_STATE;
     }
+    call_video_note_received(trace_received_at_us, pts);
     taskENTER_CRITICAL(&s_renderer.lock);
+    s_renderer.session_active = true;
     s_renderer.received_frames++;
     s_renderer.received_bytes += data_len;
+    if (s_renderer.startup_trace_frames < UINT32_MAX) {
+        s_renderer.startup_trace_frames++;
+    }
+    if (s_renderer.startup_trace_frames <= CALL_VIDEO_STARTUP_TRACE_FRAMES) {
+        trace_frame_index = s_renderer.startup_trace_frames;
+    }
     taskEXIT_CRITICAL(&s_renderer.lock);
     if (data_len > CALL_VIDEO_INPUT_SLOT_CAPACITY) {
         taskENTER_CRITICAL(&s_renderer.lock);
@@ -2712,6 +3173,15 @@ esp_err_t call_video_renderer_submit_h264(const uint8_t *data,
         }
         ESP_LOGD(TAG, "H264 rx recovered at IDR");
     }
+    if (latency_recovery_pending && !effective_key_frame) {
+        /* Once the decoder is late, extending the dependent P-frame chain only
+         * increases latency. Returning a drop asks TiRTC for a fresh IDR. */
+        taskENTER_CRITICAL(&s_renderer.lock);
+        s_renderer.dropped_frames++;
+        taskEXIT_CRITICAL(&s_renderer.lock);
+        xSemaphoreGive(s_renderer.submit_mutex);
+        return ESP_ERR_NOT_FINISHED;
+    }
     if (xQueueReceive(s_renderer.free_slots, &index, 0) != pdTRUE) {
         taskENTER_CRITICAL(&s_renderer.lock);
         s_renderer.dropped_frames++;
@@ -2730,6 +3200,9 @@ esp_err_t call_video_renderer_submit_h264(const uint8_t *data,
     slot->pts = pts;
     slot->generation = generation;
     slot->queued_at_us = esp_timer_get_time();
+    slot->trace_frame_index = trace_frame_index;
+    slot->trace_received_at_us = trace_received_at_us;
+    slot->trace_decode_started_at_us = 0;
     if (xQueueSend(s_renderer.ready_slots, &index, 0) != pdTRUE) {
         call_video_return_slot(index);
         taskENTER_CRITICAL(&s_renderer.lock);
@@ -2754,6 +3227,7 @@ esp_err_t call_video_renderer_submit_mjpeg(const uint8_t *data,
     uint8_t index = 0U;
     bool running = false;
     uint32_t generation = 0U;
+    int64_t received_at_us = esp_timer_get_time();
 
     ESP_RETURN_ON_FALSE(data != NULL && data_len > 0U,
                         ESP_ERR_INVALID_ARG,
@@ -2774,7 +3248,9 @@ esp_err_t call_video_renderer_submit_mjpeg(const uint8_t *data,
         return ESP_ERR_INVALID_STATE;
     }
 
+    call_video_note_received(received_at_us, pts);
     taskENTER_CRITICAL(&s_renderer.lock);
+    s_renderer.session_active = true;
     s_renderer.received_frames++;
     s_renderer.received_bytes += data_len;
     taskEXIT_CRITICAL(&s_renderer.lock);
@@ -2830,12 +3306,16 @@ esp_err_t call_video_renderer_submit_mjpeg(const uint8_t *data,
 
 esp_err_t call_video_renderer_present_next_rgb565(const uint16_t **pixels,
                                                    size_t *pixel_count,
-                                                   uint32_t *sequence)
+                                                   uint32_t *sequence,
+                                                   call_video_frame_trace_t *trace)
 {
     ESP_RETURN_ON_FALSE(pixels != NULL && pixel_count != NULL,
                         ESP_ERR_INVALID_ARG,
                         TAG,
                         "invalid video presentation request");
+    if (trace != NULL) {
+        memset(trace, 0, sizeof(*trace));
+    }
     if (s_renderer.frame_mutex == NULL ||
         xSemaphoreTake(s_renderer.frame_mutex, pdMS_TO_TICKS(20)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
@@ -2853,7 +3333,27 @@ esp_err_t call_video_renderer_present_next_rgb565(const uint16_t **pixels,
         xSemaphoreGive(s_renderer.frame_mutex);
         return ESP_ERR_NOT_FOUND;
     }
+
+    taskENTER_CRITICAL(&s_renderer.lock);
+    if (s_renderer.presented_pts_valid &&
+        (ready->pts != 0U || s_renderer.presented_pts != 0U) &&
+        !call_video_pts_is_newer(ready->pts, s_renderer.presented_pts)) {
+        /* Observe timestamp regressions without changing media behavior. PTS
+         * alone is not sufficient evidence to discard a decoded H264 frame. */
+        s_renderer.stale_presented_frames++;
+    } else {
+        s_renderer.presented_pts = ready->pts;
+        s_renderer.presented_pts_valid = true;
+    }
+    taskEXIT_CRITICAL(&s_renderer.lock);
+
     int64_t handoff_started_us = esp_timer_get_time();
+    if (trace != NULL && ready->trace.frame_index > 0U) {
+        ready->trace.output_wait_us = call_video_elapsed_us(
+            ready->trace_ready_at_us,
+            handoff_started_us);
+        *trace = ready->trace;
+    }
     if (s_renderer.presented_output_slot < CALL_VIDEO_OUTPUT_SLOT_COUNT) {
         s_renderer.output_slots[s_renderer.presented_output_slot].state = CALL_VIDEO_OUTPUT_FREE;
     }
@@ -2865,8 +3365,18 @@ esp_err_t call_video_renderer_present_next_rgb565(const uint16_t **pixels,
         *sequence = ready->sequence;
     }
     uint32_t handoff_elapsed_us = (uint32_t)(esp_timer_get_time() - handoff_started_us);
+    int64_t presented_at_us = esp_timer_get_time();
     taskENTER_CRITICAL(&s_renderer.lock);
     s_renderer.presented_frames++;
+    if (s_renderer.last_presented_at_us > 0 &&
+        presented_at_us > s_renderer.last_presented_at_us) {
+        uint32_t gap_us = call_video_elapsed_us(s_renderer.last_presented_at_us,
+                                                presented_at_us);
+        if (gap_us > s_renderer.present_gap_window_max_us) {
+            s_renderer.present_gap_window_max_us = gap_us;
+        }
+    }
+    s_renderer.last_presented_at_us = presented_at_us;
     s_renderer.present_copy_time_us += handoff_elapsed_us;
     if (handoff_elapsed_us > s_renderer.present_copy_max_us) {
         s_renderer.present_copy_max_us = handoff_elapsed_us;
@@ -2894,6 +3404,9 @@ void call_video_renderer_get_stats(call_video_renderer_stats_t *stats)
     if (stats == NULL) {
         return;
     }
+    /* Runtime/UI polling must still expose a decoder stall if TiRTC stops
+     * invoking the media callback after the input queue begins rejecting it. */
+    (void)call_video_renderer_detect_decode_fault(esp_timer_get_time());
     memset(stats, 0, sizeof(*stats));
     taskENTER_CRITICAL(&s_renderer.lock);
     stats->running = s_renderer.running;
@@ -2908,6 +3421,8 @@ void call_video_renderer_get_stats(call_video_renderer_stats_t *stats)
     stats->decoded_frames = s_renderer.decoded_frames;
     stats->converted_frames = s_renderer.converted_frames;
     stats->presented_frames = s_renderer.presented_frames;
+    stats->stale_received_frames = s_renderer.stale_received_frames;
+    stats->stale_presented_frames = s_renderer.stale_presented_frames;
     stats->dropped_frames = s_renderer.dropped_frames;
     stats->conversion_dropped_frames = s_renderer.conversion_dropped_frames;
     stats->decode_failures = s_renderer.decode_failures;

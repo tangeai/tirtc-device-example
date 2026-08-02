@@ -36,6 +36,7 @@ struct esp_video_stream {
 
     struct v4l2_format format;              /*!< Video stream format */
     struct esp_video_buffer_info buf_info;  /*!< Video stream buffer information */
+    uint32_t next_sequence;                 /*!< Next completion sequence */
 
     esp_video_buffer_list_t queued_list;    /*!< Workqueue buffer elements list */
     esp_video_buffer_list_t done_list;      /*!< Done buffer elements list */

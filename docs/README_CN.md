@@ -6,8 +6,8 @@
 2. 日志示例用于观察 ThingConnect、AI 对讲和设备呼叫的协议状态。
 3. 完整应用用于带屏设备、真实音视频硬件和完整业务体验。
 
-2026-07-31 更新包含 ESP32-S3 日志示例 `0.3.0`、ESP32-S3 Device Monitor `1.8.0`
-和 ESP32-P4 Device App `1.3.0`。其他项目保持上一公开版本。
+2026-08-02 更新 ESP32-P4 Device App `1.3.1`。ESP32-S3 日志示例 `0.3.0`、
+ESP32-S3 Device Monitor `1.8.0` 和其他项目保持上一公开版本。
 
 ## 按手头任务找文档
 
@@ -48,7 +48,7 @@
 | --- | --- | --- | --- |
 | [完整应用总览](../complete-applications/README.md) | - | - | 选择目标开发板 |
 | [ESP32-S3 Device Monitor](../complete-applications/esp32-s3/device-monitor/README.md) | `1.8.0` | `2.2.0` | 绑定、H5、AI、微信、设备呼叫和 OTA |
-| [ESP32-P4 Device App](../complete-applications/esp32-p4/device-monitor/README.md) | `1.3.0` | `2.3.0` | Hosted 网络、P4 媒体链路和完整业务 |
+| [ESP32-P4 Device App](../complete-applications/esp32-p4/device-monitor/README.md) | `1.3.1` | `2.3.0` 定制兼容快照 | Hosted 网络、P4 媒体链路和完整业务 |
 | [G32S10X Device Monitor](../complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | G32S10X 完整设备能力与君正平台适配 |
 | [固件下载与校验](RELEASES_CN.md) | - | - | Release 下载、烧录入口和一致性校验 |
 

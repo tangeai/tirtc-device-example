@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 #include "freertos/FreeRTOS.h"
-#include "sdkconfig.h"
+#include "media_tuning.h"
 
 #define TIRTC_SESSION_CONTROL_EVENT_WAIT_TICKS  pdMS_TO_TICKS(20)
 #define TIRTC_SESSION_TEARDOWN_EVENT_WAIT_TICKS pdMS_TO_TICKS(100)
@@ -31,6 +31,11 @@
 #define TIRTC_SESSION_SEND_BUFFER_VIDEO_THROTTLE_PCT    70U
 #define TIRTC_SESSION_SEND_BUFFER_DROP_PCT              85U
 #define TIRTC_SESSION_SEND_BUFFER_LOG_PERIOD_MS         1000U
+/* Sample outside the realtime tasks, but serialize the connection query with
+ * every other SDK call. Two samples per second keep the 4 Mbit/s worst-case
+ * growth below the throttle-to-drop margin without adding a 5 Hz SDK query to
+ * the media hot path. */
+#define TIRTC_SESSION_SEND_BUFFER_QUERY_PERIOD_MS       500U
 
 /*
  * Keep enough PSRAM-backed slots to absorb an IDR send burst without dropping
@@ -47,14 +52,38 @@
  * high-motion burst adds allocator latency exactly where the send path is most
  * sensitive.
  */
-#define TIRTC_SESSION_VIDEO_TX_PREALLOC_BYTES           CONFIG_APP_RTC_H264_OUTPUT_BUFFER_BYTES
+#define TIRTC_SESSION_VIDEO_TX_PREALLOC_BYTES           APP_MEDIA_H264_OUTPUT_BUFFER_BYTES
 #define TIRTC_SESSION_VIDEO_TX_ALLOC_ALIGN_BYTES        (64U * 1024U)
 #define TIRTC_SESSION_VIDEO_TX_TASK_STACK               (8 * 1024)
+/*
+ * Audio and downlink decode keep realtime precedence on CPU0. Video freshness
+ * is measured from queue admission, so uplink capture does not need to compete
+ * at the same priority merely because capture/encode work took longer.
+ */
 #define TIRTC_SESSION_VIDEO_TX_TASK_PRIORITY            15
 #define TIRTC_SESSION_VIDEO_TX_SDK_API_LOCK_WAIT_MS     40U
 #define TIRTC_SESSION_VIDEO_TX_SDK_API_LOCK_WAIT_TICKS  pdMS_TO_TICKS(TIRTC_SESSION_VIDEO_TX_SDK_API_LOCK_WAIT_MS)
 #define TIRTC_SESSION_VIDEO_TX_MAX_AGE_US               600000ULL
 #define TIRTC_SESSION_VIDEO_TX_ISSUE_LOG_PERIOD_MS      1000U
+/*
+ * Keep normal media logging quiet, but expose a blocking SDK send call that
+ * can starve camera cadence. The five-second limiter keeps this diagnostic
+ * usable during a prolonged weak-network interval without loading UART.
+ */
+#define TIRTC_SESSION_VIDEO_TX_STALL_US                  100000ULL
+#define TIRTC_SESSION_VIDEO_TX_STALL_LOG_INTERVAL_US     5000000ULL
+/* The stable 15 fps profile should advance every 67 ms. Treat 2.5 s without
+ * one accepted frame as a real pipeline stall, then emit one compact line per
+ * 10 s. */
+#define TIRTC_SESSION_VIDEO_TX_LIVENESS_TIMEOUT_US       2500000ULL
+#define TIRTC_SESSION_VIDEO_TX_LIVENESS_LOG_INTERVAL_US  10000000ULL
+/* A video call should produce its first packet promptly and then keep packets
+ * flowing even for a static scene. After three silent seconds, reassert the
+ * protocol subscription at a deliberately slow cadence instead of tearing
+ * down an otherwise healthy P2P connection. */
+#define TIRTC_SESSION_VIDEO_RX_LIVENESS_TIMEOUT_US        3000000ULL
+#define TIRTC_SESSION_VIDEO_RX_RECOVERY_INTERVAL_US       8000000ULL
+#define TIRTC_SESSION_VIDEO_RX_LIVENESS_LOG_INTERVAL_US  10000000ULL
 /*
  * The audio queue is an overload reserve, not a latency budget. Keep at most
  * two 20 ms capture frames pending and discard speech that is already too old

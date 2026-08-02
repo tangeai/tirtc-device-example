@@ -7,6 +7,26 @@
 Git `main` 保存源码、文档、必要脚本和 SDK 静态库；构建生成的固件、维护包和其他二进制
 附件不进入 Git 历史。
 
+## 2026-08-02 Release
+
+统一 Tag：
+
+```text
+tirtc-device-examples-v2026.08.02
+```
+
+本次只更新 ESP32-P4 Device App `1.3.1`，按源码范围交付。Release 上传：
+
+| 文件 | 用途 |
+| --- | --- |
+| `release-manifest.json` | 统一 Tag、P4 来源 Tag/commit、逐文件 SHA-256、SDK 与构建证据 |
+| `SHA256SUMS.txt` | 校验 manifest 下载完整性 |
+
+P4 不创建占位 BIN，也不把本地构建产物放进 Git。开发者请检出统一 Tag 后进入
+[`complete-applications/esp32-p4/device-monitor`](../complete-applications/esp32-p4/device-monitor/README.md)
+按项目说明构建。S3 日志示例 `0.3.0` 和 S3 Device Monitor `1.8.0` 的固件继续从
+`2026-07-31` Release 下载，本次不重复上传。
+
 ## 2026-07-31 Release
 
 统一 Tag：

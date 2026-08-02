@@ -32,6 +32,7 @@
 #include "camera_driver.h"
 #include "media_dma_reserve.h"
 #include "media_governor.h"
+#include "media_tuning.h"
 #include "video_yuv420_scaler.h"
 
 static const char *TAG = "camera_pipeline";
@@ -41,70 +42,34 @@ static const char *TAG = "camera_pipeline";
 #endif
 
 #define CAMERA_PIPELINE_TASK_STACK       (9U * 1024U)
-#define CAMERA_PIPELINE_TASK_PRIORITY    13U
+#define CAMERA_PIPELINE_TASK_PRIORITY    14U
 #define CAMERA_PIPELINE_RETRY_DELAY_MS   200U
 #define CAMERA_PIPELINE_START_DELAY_MS   40U
 #define CAMERA_PIPELINE_LOG_INTERVAL_MS  5000U
 #define CAMERA_PIPELINE_H264_OPEN_RETRY_MS 2000U
 #define CAMERA_PIPELINE_H264_BUFFER_CNT  1U
-#ifndef CONFIG_APP_RTC_H264_BITRATE
-#define CONFIG_APP_RTC_H264_BITRATE 4000000
-#endif
-#ifndef CONFIG_APP_RTC_H264_FPS
-#define CONFIG_APP_RTC_H264_FPS 20
-#endif
 #ifndef CONFIG_APP_RTC_H264_DIRECT_HW_ENCODER
 #define CONFIG_APP_RTC_H264_DIRECT_HW_ENCODER 0
 #endif
 #ifndef CONFIG_APP_RTC_H264_RESOURCE_FALLBACK_ENABLE
 #define CONFIG_APP_RTC_H264_RESOURCE_FALLBACK_ENABLE 0
 #endif
-#ifndef CONFIG_APP_RTC_H264_GOP
-#define CONFIG_APP_RTC_H264_GOP CONFIG_APP_RTC_H264_FPS
-#endif
-#ifndef CONFIG_APP_RTC_H264_MIN_QP
-#define CONFIG_APP_RTC_H264_MIN_QP 34
-#endif
-#ifndef CONFIG_APP_RTC_H264_MAX_QP
-#define CONFIG_APP_RTC_H264_MAX_QP 45
-#endif
-#ifndef CONFIG_APP_RTC_H264_OUTPUT_BUFFER_BYTES
-#define CONFIG_APP_RTC_H264_OUTPUT_BUFFER_BYTES (1024U * 1024U)
-#endif
-#ifndef CONFIG_APP_RTC_H264_MAX_DELTA_PAYLOAD_BYTES
-#define CONFIG_APP_RTC_H264_MAX_DELTA_PAYLOAD_BYTES (128U * 1024U)
-#endif
-#ifndef CONFIG_APP_RTC_H264_STARTUP_GUARD_MS
-#define CONFIG_APP_RTC_H264_STARTUP_GUARD_MS 2500
-#endif
-#ifndef CONFIG_APP_RTC_H264_STARTUP_MAX_DELTA_PAYLOAD_BYTES
-#define CONFIG_APP_RTC_H264_STARTUP_MAX_DELTA_PAYLOAD_BYTES (128U * 1024U)
-#endif
-#ifndef CONFIG_APP_CAMERA_FRAME_TRACE_INITIAL_COUNT
-#define CONFIG_APP_CAMERA_FRAME_TRACE_INITIAL_COUNT 0
-#endif
-#ifndef CONFIG_APP_CAMERA_FRAME_TRACE_INTERVAL_MS
-#define CONFIG_APP_CAMERA_FRAME_TRACE_INTERVAL_MS 10000
-#endif
-#ifndef CONFIG_APP_RTC_H264_KEY_FRAME_REQUEST_MIN_INTERVAL_MS
-#define CONFIG_APP_RTC_H264_KEY_FRAME_REQUEST_MIN_INTERVAL_MS 2000
-#endif
-#define CAMERA_PIPELINE_H264_BITRATE     CONFIG_APP_RTC_H264_BITRATE
-#define CAMERA_PIPELINE_H264_MIN_QP      CONFIG_APP_RTC_H264_MIN_QP
-#define CAMERA_PIPELINE_H264_MAX_QP      CONFIG_APP_RTC_H264_MAX_QP
+#define CAMERA_PIPELINE_H264_BITRATE     APP_MEDIA_RTC_H264_BITRATE_BPS
+#define CAMERA_PIPELINE_H264_MIN_QP      APP_MEDIA_RTC_H264_MIN_QP
+#define CAMERA_PIPELINE_H264_MAX_QP      APP_MEDIA_RTC_H264_MAX_QP
 #define CAMERA_PIPELINE_H264_RESOURCE_FALLBACK_ENABLE \
     CONFIG_APP_RTC_H264_RESOURCE_FALLBACK_ENABLE
 #define CAMERA_PIPELINE_H264_DIM_ALIGN   16U
 #define CAMERA_PIPELINE_H264_MIN_WIDTH   320U
 #define CAMERA_PIPELINE_H264_MIN_HEIGHT  240U
 #define CAMERA_PIPELINE_H264_INTERNAL_MARGIN 2048U
-#define CAMERA_PIPELINE_H264_FALLBACK_OUTPUT_BUFFER_BYTES CONFIG_APP_RTC_H264_OUTPUT_BUFFER_BYTES
-#define CAMERA_PIPELINE_H264_FALLBACK_MAX_DELTA_PAYLOAD CONFIG_APP_RTC_H264_MAX_DELTA_PAYLOAD_BYTES
+#define CAMERA_PIPELINE_H264_FALLBACK_OUTPUT_BUFFER_BYTES APP_MEDIA_H264_OUTPUT_BUFFER_BYTES
+#define CAMERA_PIPELINE_H264_FALLBACK_MAX_DELTA_PAYLOAD APP_MEDIA_H264_MAX_DELTA_PAYLOAD_BYTES
 #define CAMERA_PIPELINE_FALLBACK_DMA_FREE_MIN_BYTES     (8U * 1024U)
 #define CAMERA_PIPELINE_FALLBACK_DMA_LARGEST_MIN_BYTES  (4U * 1024U)
 #define CAMERA_PIPELINE_TRANSPORT_GUARD_LOG_INTERVAL_MS 1000U
-#define CAMERA_PIPELINE_FRAME_TRACE_INITIAL_COUNT       CONFIG_APP_CAMERA_FRAME_TRACE_INITIAL_COUNT
-#define CAMERA_PIPELINE_FRAME_TRACE_INTERVAL_MS         CONFIG_APP_CAMERA_FRAME_TRACE_INTERVAL_MS
+#define CAMERA_PIPELINE_FRAME_TRACE_INITIAL_COUNT       APP_MEDIA_CAMERA_FRAME_TRACE_INITIAL_COUNT
+#define CAMERA_PIPELINE_FRAME_TRACE_INTERVAL_MS         APP_MEDIA_CAMERA_FRAME_TRACE_INTERVAL_MS
 #define CAMERA_PIPELINE_FRAME_TRACE_SLOW_STAGE_US       75000U
 #define CAMERA_PIPELINE_FRAME_TRACE_SLOW_LOOP_US        100000U
 #define CAMERA_PIPELINE_FRAME_TRACE_LARGE_PAYLOAD_BYTES (224U * 1024U)
@@ -112,7 +77,7 @@ static const char *TAG = "camera_pipeline";
 #define CAMERA_PIPELINE_LUMA_PROBE_SAMPLES \
     (CAMERA_PIPELINE_LUMA_PROBE_GRID * CAMERA_PIPELINE_LUMA_PROBE_GRID)
 #define CAMERA_PIPELINE_KEY_FRAME_REQUEST_MIN_INTERVAL_US \
-    ((uint64_t)CONFIG_APP_RTC_H264_KEY_FRAME_REQUEST_MIN_INTERVAL_MS * 1000ULL)
+    ((uint64_t)APP_MEDIA_H264_KEY_FRAME_REQUEST_MIN_INTERVAL_MS * 1000ULL)
 #if CONFIG_CACHE_L2_CACHE_LINE_SIZE > CONFIG_CACHE_L1_CACHE_LINE_SIZE
 #define CAMERA_PIPELINE_CACHE_LINE_SIZE CONFIG_CACHE_L2_CACHE_LINE_SIZE
 #else
@@ -202,8 +167,24 @@ static uint32_t camera_pipeline_interval_ms(uint8_t fps)
     if (fps == 0U) {
         return 1000U;
     }
-    uint32_t interval = 1000U / fps;
+    /* Round up so a nominal rate is an upper bound. At 15 fps this gives a
+     * stable 67 ms cadence (14.9 fps) instead of overscheduling at 66 ms. */
+    uint32_t interval = (1000U + fps - 1U) / fps;
     return interval == 0U ? 1U : interval;
+}
+
+static uint8_t camera_pipeline_h264_gop_for_fps(uint8_t fps)
+{
+    uint32_t safe_fps = fps > 0U ? fps : 1U;
+    uint32_t gop_frames =
+        (safe_fps * APP_MEDIA_H264_GOP_DURATION_MS + 999U) / 1000U;
+
+    if (gop_frames == 0U) {
+        gop_frames = 1U;
+    } else if (gop_frames > 255U) {
+        gop_frames = 255U;
+    }
+    return (uint8_t)gop_frames;
 }
 
 static uint64_t camera_pipeline_abs_delta_us(uint64_t a, uint64_t b)
@@ -334,14 +315,27 @@ static void camera_pipeline_luma_stats_reset_window(camera_pipeline_luma_stats_t
 static bool camera_pipeline_time_due(TickType_t now, TickType_t *last_tick, uint32_t interval_ms)
 {
     TickType_t interval_ticks = pdMS_TO_TICKS(interval_ms == 0U ? 1U : interval_ms);
-    if (*last_tick == 0 || (now - *last_tick) >= interval_ticks) {
+    if (*last_tick == 0) {
         *last_tick = now;
+        return true;
+    }
+
+    TickType_t elapsed_ticks = now - *last_tick;
+    if (elapsed_ticks >= interval_ticks) {
+        /* Keep the capture clock phase-locked. Advancing from `now` makes
+         * every scheduler wake-up delay permanent and turns a configured
+         * realtime target into a visibly uneven lower-rate stream. Skip
+         * missed periods, but retain the original cadence for the next frame. */
+        TickType_t elapsed_periods = elapsed_ticks / interval_ticks;
+        *last_tick += elapsed_periods * interval_ticks;
         return true;
     }
     return false;
 }
 
-static uint32_t camera_pipeline_wait_until_due_ms(TickType_t now, TickType_t last_tick, uint32_t interval_ms)
+static uint32_t camera_pipeline_wait_until_due_ms(TickType_t now,
+                                                  TickType_t last_tick,
+                                                  uint32_t interval_ms)
 {
     if (last_tick == 0) {
         return 1U;
@@ -524,10 +518,10 @@ static bool camera_pipeline_should_hold_video_for_transport(size_t payload_len,
 
     size_t max_delta = policy != NULL ? policy->h264_max_delta_payload_bytes :
                        CAMERA_PIPELINE_H264_FALLBACK_MAX_DELTA_PAYLOAD;
-#if CONFIG_APP_RTC_H264_STARTUP_GUARD_MS > 0
-    if (stream_age_ms < CONFIG_APP_RTC_H264_STARTUP_GUARD_MS &&
-        max_delta > CONFIG_APP_RTC_H264_STARTUP_MAX_DELTA_PAYLOAD_BYTES) {
-        max_delta = CONFIG_APP_RTC_H264_STARTUP_MAX_DELTA_PAYLOAD_BYTES;
+#if APP_MEDIA_H264_STARTUP_GUARD_MS > 0
+    if (stream_age_ms < APP_MEDIA_H264_STARTUP_GUARD_MS &&
+        max_delta > APP_MEDIA_H264_STARTUP_MAX_DELTA_PAYLOAD_BYTES) {
+        max_delta = APP_MEDIA_H264_STARTUP_MAX_DELTA_PAYLOAD_BYTES;
     }
 #endif
     if (effective_max_delta != NULL) {
@@ -999,9 +993,9 @@ static esp_err_t camera_pipeline_h264_open(camera_pipeline_h264_encoder_t *enc,
                               min_qp : CAMERA_PIPELINE_H264_MIN_QP;
     uint8_t safe_max_qp = max_qp >= safe_min_qp && max_qp <= 51U ?
                               max_qp : CAMERA_PIPELINE_H264_MAX_QP;
-    uint8_t safe_gop = CONFIG_APP_RTC_H264_GOP > 0 ? CONFIG_APP_RTC_H264_GOP : safe_fps;
+    uint8_t safe_gop = camera_pipeline_h264_gop_for_fps(safe_fps);
     size_t safe_output_buffer_bytes =
-        output_buffer_bytes == 0U ? CONFIG_APP_RTC_H264_OUTPUT_BUFFER_BYTES : output_buffer_bytes;
+        output_buffer_bytes == 0U ? APP_MEDIA_H264_OUTPUT_BUFFER_BYTES : output_buffer_bytes;
 
     APP_LOG_DETAIL(TAG,
                    "H264 encoder open request: mode=%s size=%ux%u fps=%u gop=%u bitrate=%u qp=%u-%u ref_internal_est=%u internal_free=%u internal_largest=%u dma_largest=%u psram_free=%u psram_largest=%u",
@@ -1339,9 +1333,9 @@ static bool camera_pipeline_h264_matches(const camera_pipeline_h264_encoder_t *e
                               min_qp : CAMERA_PIPELINE_H264_MIN_QP;
     uint8_t safe_max_qp = max_qp >= safe_min_qp && max_qp <= 51U ?
                               max_qp : CAMERA_PIPELINE_H264_MAX_QP;
-    uint8_t safe_gop = CONFIG_APP_RTC_H264_GOP > 0 ? CONFIG_APP_RTC_H264_GOP : safe_fps;
+    uint8_t safe_gop = camera_pipeline_h264_gop_for_fps(safe_fps);
     size_t safe_output_buffer_bytes =
-        output_buffer_bytes == 0U ? CONFIG_APP_RTC_H264_OUTPUT_BUFFER_BYTES : output_buffer_bytes;
+        output_buffer_bytes == 0U ? APP_MEDIA_H264_OUTPUT_BUFFER_BYTES : output_buffer_bytes;
 
     return enc != NULL &&
            camera_pipeline_h264_is_open(enc) &&
@@ -1369,7 +1363,7 @@ static bool camera_pipeline_h264_static_config_matches(
                               max_qp : CAMERA_PIPELINE_H264_MAX_QP;
     size_t safe_output_buffer_bytes =
         output_buffer_bytes == 0U ?
-            CONFIG_APP_RTC_H264_OUTPUT_BUFFER_BYTES :
+            APP_MEDIA_H264_OUTPUT_BUFFER_BYTES :
             output_buffer_bytes;
 
     return enc != NULL &&
@@ -1393,8 +1387,7 @@ static esp_err_t camera_pipeline_h264_update_rate(camera_pipeline_h264_encoder_t
     const uint8_t safe_fps = fps == 0U ? 12U : fps;
     const uint32_t safe_bitrate_bps =
         bitrate_bps == 0U ? CAMERA_PIPELINE_H264_BITRATE : bitrate_bps;
-    const uint8_t safe_gop =
-        CONFIG_APP_RTC_H264_GOP > 0 ? CONFIG_APP_RTC_H264_GOP : safe_fps;
+    const uint8_t safe_gop = camera_pipeline_h264_gop_for_fps(safe_fps);
     const uint8_t old_fps = enc->fps;
     const uint8_t old_gop = enc->gop;
     const uint32_t old_bitrate_bps = enc->bitrate_bps;
@@ -1948,6 +1941,7 @@ static void camera_pipeline_task(void *arg)
     uint16_t h264_fallback_height = 0;
     bool key_frame_required_after_drop = false;
     bool backpressure_key_request_pending = false;
+    bool backpressure_hold_counted = false;
 
     ESP_LOGI(TAG, "camera pipeline starting: mode=h264_upstream_only");
     camera_pipeline_reset_metrics();
@@ -2093,37 +2087,50 @@ static void camera_pipeline_task(void *arg)
 
         uint32_t rtc_interval_ms = camera_pipeline_interval_ms(policy.rtc_video_fps);
         TickType_t now_tick = xTaskGetTickCount();
-        bool do_rtc = runtime.rtc_enabled &&
-                      runtime.video_cb != NULL &&
-                      policy.rtc_video_fps > 0U &&
-                      camera_pipeline_time_due(now_tick, &last_rtc_tick, rtc_interval_ms);
+        bool rtc_ready = runtime.rtc_enabled &&
+                         runtime.video_cb != NULL &&
+                         policy.rtc_video_fps > 0U;
 
+        /* A short transport hold must not consume the next capture deadline.
+         * Resume immediately when pressure clears instead of adding another
+         * complete frame interval to the network pause. */
+        if (rtc_ready && media_governor_is_network_backpressured()) {
+            TickType_t interval_ticks =
+                pdMS_TO_TICKS(rtc_interval_ms == 0U ? 1U : rtc_interval_ms);
+            bool frame_was_due = last_rtc_tick == 0 ||
+                                 now_tick - last_rtc_tick >= interval_ticks;
+            if (frame_was_due && !backpressure_hold_counted) {
+                drop_count++;
+                backpressure_skip_count++;
+                backpressure_hold_counted = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
+        backpressure_hold_counted = false;
+
+        bool do_rtc = rtc_ready &&
+                      camera_pipeline_time_due(now_tick, &last_rtc_tick, rtc_interval_ms);
         if (!do_rtc) {
             uint32_t wait_ms = 5U;
             if (runtime.rtc_enabled && runtime.video_cb != NULL && policy.rtc_video_fps > 0U) {
-                wait_ms = camera_pipeline_wait_until_due_ms(now_tick, last_rtc_tick, rtc_interval_ms);
+                wait_ms = camera_pipeline_wait_until_due_ms(now_tick,
+                                                            last_rtc_tick,
+                                                            rtc_interval_ms);
             }
             vTaskDelay(pdMS_TO_TICKS(wait_ms));
             continue;
         }
-        if (media_governor_is_network_backpressured()) {
-            drop_count++;
-            backpressure_skip_count++;
-            continue;
-        }
+
+        /* Capture only at the RTC cadence. The driver already returns the
+         * newest completed frame; extra dequeue/requeue cycles would select
+         * older buffers and add needless full-duplex scheduling pressure. */
         camera_driver_frame_t frame = {0};
         int64_t loop_start_us = esp_timer_get_time();
-        if (last_frame_start_us != 0U && loop_start_us > (int64_t)last_frame_start_us) {
-            uint64_t gap_us = (uint64_t)loop_start_us - last_frame_start_us;
-            frame_gap_us_total += gap_us;
-            if (gap_us > max_frame_gap_us) {
-                max_frame_gap_us = gap_us;
-            }
-        }
-        last_frame_start_us = (uint64_t)loop_start_us;
         int64_t capture_start_us = loop_start_us;
         ret = camera_driver_capture(&frame);
-        int64_t capture_us = esp_timer_get_time() - capture_start_us;
+        int64_t capture_done_us = esp_timer_get_time();
+        int64_t capture_us = capture_done_us - capture_start_us;
         if (ret != ESP_OK) {
             capture_fail_count++;
             ESP_LOGW(TAG, "camera capture failed: %s", esp_err_to_name(ret));
@@ -2133,7 +2140,19 @@ static void camera_pipeline_task(void *arg)
         capture_us_total += (uint64_t)capture_us;
         capture_sample_count++;
         camera_stale_frame_drain_count += frame.stale_frames_dropped;
+
+        if (last_frame_start_us != 0U &&
+            capture_done_us > (int64_t)last_frame_start_us) {
+            uint64_t gap_us = (uint64_t)capture_done_us - last_frame_start_us;
+            frame_gap_us_total += gap_us;
+            if (gap_us > max_frame_gap_us) {
+                max_frame_gap_us = gap_us;
+            }
+        }
+        last_frame_start_us = (uint64_t)capture_done_us;
         if (last_camera_sequence_valid) {
+            /* The P4 camera V4L2 driver may leave sequence at zero. Treat a
+             * positive delta as diagnostics only; never gate video on it. */
             uint32_t sequence_delta = frame.sequence - last_camera_sequence;
             if (sequence_delta > 0U) {
                 camera_sequence_delta_total_x10 += (uint64_t)sequence_delta * 10ULL;
@@ -2531,11 +2550,11 @@ static void camera_pipeline_task(void *arg)
          * after H264 encode makes hardware-encoder jitter look like frame-time
          * jitter to the RTC stack and can show up as tiny visual stalls.
          */
-        uint64_t pts_us = (uint64_t)capture_start_us;
+        uint64_t pts_us = (uint64_t)capture_done_us;
         int64_t callback_start_us = esp_timer_get_time();
         uint64_t media_timestamp_lag_us =
-            callback_start_us > capture_start_us ?
-                (uint64_t)(callback_start_us - capture_start_us) :
+            callback_start_us > capture_done_us ?
+                (uint64_t)(callback_start_us - capture_done_us) :
                 camera_pipeline_abs_delta_us((uint64_t)callback_start_us, pts_us);
         media_timestamp_lag_us_total += media_timestamp_lag_us;
         media_timestamp_sample_count++;
@@ -2610,12 +2629,15 @@ static void camera_pipeline_task(void *arg)
                 uint8_t head2 = h264_len > 2U ? h264_data[2] : 0;
                 uint8_t head3 = h264_len > 3U ? h264_data[3] : 0;
                 ESP_LOGI(TAG,
-                         "camera pipeline first upstream frame: source=%ux%u input=%s output=%ux%u media=h264 key=%d payload=%u seq=%lu drain=%lu head=%02X%02X%02X%02X capture=%lldus convert=%lldus encode=%lldus sync_in=%lldus hw=%lldus sync_out=%lldus cb=%lldus loop=%lldus",
+                         "camera pipeline first upstream frame: source=%ux%u input=%s output=%ux%u@%u gop=%u bitrate=%u media=h264 key=%d payload=%u seq=%lu drain=%lu head=%02X%02X%02X%02X capture=%lldus convert=%lldus encode=%lldus sync_in=%lldus hw=%lldus sync_out=%lldus cb=%lldus loop=%lldus",
                          source_width,
                          source_height,
                          h264_input_path,
                          h264.width,
                          h264.height,
+                         (unsigned)h264.fps,
+                         (unsigned)h264.gop,
+                         (unsigned)h264.bitrate_bps,
                          key_frame ? 1 : 0,
                          (unsigned)h264_len,
                          (unsigned long)source_sequence,
@@ -2662,10 +2684,15 @@ static void camera_pipeline_task(void *arg)
                 elapsed_ms = 1U;
             }
             uint32_t avg_payload = upstream_count > 0U ? total_payload_bytes / upstream_count : 0U;
-#if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
             uint32_t avg_capture_us = capture_sample_count > 0U ? (uint32_t)(capture_us_total / capture_sample_count) : 0U;
             uint32_t avg_convert_us = convert_sample_count > 0U ? (uint32_t)(convert_us_total / convert_sample_count) : 0U;
             uint32_t avg_encode_us = encode_sample_count > 0U ? (uint32_t)(encode_us_total / encode_sample_count) : 0U;
+            uint32_t avg_callback_us = callback_sample_count > 0U ? (uint32_t)(callback_us_total / callback_sample_count) : 0U;
+            uint32_t avg_loop_us = loop_sample_count > 0U ? (uint32_t)(loop_us_total / loop_sample_count) : 0U;
+            uint32_t avg_gap_us = encoded_frame_count > 1U ?
+                                  (uint32_t)(frame_gap_us_total / (encoded_frame_count - 1U)) :
+                                  0U;
+#if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
             uint32_t avg_h264_sync_in_us = encode_sample_count > 0U ?
                                            (uint32_t)(h264_sync_in_us_total / encode_sample_count) :
                                            0U;
@@ -2675,8 +2702,6 @@ static void camera_pipeline_task(void *arg)
             uint32_t avg_h264_sync_out_us = encode_sample_count > 0U ?
                                             (uint32_t)(h264_sync_out_us_total / encode_sample_count) :
                                             0U;
-            uint32_t avg_callback_us = callback_sample_count > 0U ? (uint32_t)(callback_us_total / callback_sample_count) : 0U;
-            uint32_t avg_loop_us = loop_sample_count > 0U ? (uint32_t)(loop_us_total / loop_sample_count) : 0U;
             uint32_t avg_media_timestamp_lag_us =
                 media_timestamp_sample_count > 0U ?
                     (uint32_t)(media_timestamp_lag_us_total / media_timestamp_sample_count) :
@@ -2689,9 +2714,6 @@ static void camera_pipeline_task(void *arg)
                 camera_pipeline_luma_delta_x10(&source_luma_stats);
             uint32_t encoder_luma_delta_x10 =
                 camera_pipeline_luma_delta_x10(&encoder_luma_stats);
-            uint32_t avg_gap_us = encoded_frame_count > 1U ?
-                                  (uint32_t)(frame_gap_us_total / (encoded_frame_count - 1U)) :
-                                  0U;
             uint32_t min_payload = min_payload_bytes == UINT32_MAX ? 0U : min_payload_bytes;
 #endif
             uint32_t measured_fps_x10 = (uint32_t)(((uint64_t)upstream_count * 10000ULL) / elapsed_ms);
@@ -2774,6 +2796,32 @@ static void camera_pipeline_task(void *arg)
                      (unsigned)psram_free,
                      (unsigned)psram_largest,
                      (unsigned)h264.capture_buffer_size);
+#else
+            ESP_LOGI(TAG,
+                     "CAM %ux%u@%u f=%lu.%lu br=%luk gap=%lu/%llums "
+                     "us=c/s/e/cb/l:%lu/%lu/%lu/%lu/%lu "
+                     "drop=%lu/%lu/%lu/%lu drain=%lu fail=%lu/%lu/%lu",
+                     (unsigned)h264.width,
+                     (unsigned)h264.height,
+                     (unsigned)policy.rtc_video_fps,
+                     (unsigned long)(measured_fps_x10 / 10U),
+                     (unsigned long)(measured_fps_x10 % 10U),
+                     (unsigned long)measured_bitrate_kbps,
+                     (unsigned long)(avg_gap_us / 1000U),
+                     (unsigned long long)(max_frame_gap_us / 1000ULL),
+                     (unsigned long)avg_capture_us,
+                     (unsigned long)avg_convert_us,
+                     (unsigned long)avg_encode_us,
+                     (unsigned long)avg_callback_us,
+                     (unsigned long)avg_loop_us,
+                     (unsigned long)drop_count,
+                     (unsigned long)backpressure_skip_count,
+                     (unsigned long)transport_guard_drop_count,
+                     (unsigned long)key_wait_drop_count,
+                     (unsigned long)camera_stale_frame_drain_count,
+                     (unsigned long)capture_fail_count,
+                     (unsigned long)convert_fail_count,
+                     (unsigned long)encode_fail_count);
 #endif
             last_stats_tick = now_tick;
             upstream_count = 0;
@@ -3227,7 +3275,7 @@ void camera_pipeline_request_key_frame(void)
                        "H264 key-frame request coalesced: reason=%s age_ms=%" PRIu64 " min_ms=%u",
                  drop_reason,
                  drop_age_us / 1000ULL,
-                 (unsigned)CONFIG_APP_RTC_H264_KEY_FRAME_REQUEST_MIN_INTERVAL_MS);
+                 (unsigned)APP_MEDIA_H264_KEY_FRAME_REQUEST_MIN_INTERVAL_MS);
     }
 }
 

@@ -93,6 +93,12 @@ typedef enum {
     DISPLAY_APP_SYSTEM,
 } display_app_id_t;
 
+typedef enum {
+    DISPLAY_MEMORY_HEALTH_NORMAL = 0,
+    DISPLAY_MEMORY_HEALTH_WARNING,
+    DISPLAY_MEMORY_HEALTH_CRITICAL,
+} display_memory_health_t;
+
 typedef struct {
     char ssid[33];
     int8_t rssi;
@@ -145,6 +151,9 @@ typedef struct {
     char device_uuid[DISPLAY_DEVICE_UUID_MAX_LEN];
     uint8_t cpu_usage_percent;
     bool device_door_open;
+    size_t memory_internal_free;
+    size_t memory_internal_largest;
+    display_memory_health_t memory_health;
 
     bool rtc_connected;
     bool rtc_call_active;

@@ -4,13 +4,10 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
-#include "sdkconfig.h"
+
+#include "app_memory_policy.h"
 
 static const char *TAG = "media_dma";
-
-#ifndef CONFIG_APP_DMA_ESCROW_BYTES
-#define CONFIG_APP_DMA_ESCROW_BYTES (96U * 1024U)
-#endif
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint8_t *s_escrow;
@@ -30,7 +27,7 @@ static void media_dma_reserve_log(const char *action,
              reason != NULL ? reason : "unknown",
              esp_err_to_name(ret),
              (unsigned)bytes,
-             (unsigned)CONFIG_APP_DMA_ESCROW_BYTES,
+             (unsigned)APP_MEMORY_DMA_ESCROW_BYTES,
              s_escrow != NULL ? 1 : 0,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
@@ -75,7 +72,7 @@ void media_dma_reserve_release(const char *reason)
 esp_err_t media_dma_reserve_reclaim(const char *reason)
 {
     uint8_t *ptr = NULL;
-    size_t bytes = CONFIG_APP_DMA_ESCROW_BYTES;
+    size_t bytes = APP_MEMORY_DMA_ESCROW_BYTES;
 
     if (bytes == 0U) {
         return ESP_OK;
@@ -136,7 +133,7 @@ void media_dma_reserve_get_snapshot(media_dma_reserve_snapshot_t *snapshot)
     taskENTER_CRITICAL(&s_lock);
     *snapshot = (media_dma_reserve_snapshot_t) {
         .reserved = s_escrow != NULL,
-        .configured_bytes = CONFIG_APP_DMA_ESCROW_BYTES,
+        .configured_bytes = APP_MEMORY_DMA_ESCROW_BYTES,
         .reserved_bytes = s_escrow_size,
         .release_count = s_release_count,
         .reclaim_count = s_reclaim_count,

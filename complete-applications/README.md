@@ -14,8 +14,8 @@
 | 平台 | 项目 | 版本 | 入口 |
 | --- | --- | --- | --- |
 | ESP32-S3 | Device Monitor | `1.8.0` | [README](esp32-s3/device-monitor/README.md) |
-| ESP32-P4 | Device App | `1.3.0` | [README](esp32-p4/device-monitor/README.md) |
+| ESP32-P4 | Device App | `1.3.1` | [README](esp32-p4/device-monitor/README.md) |
 | G32S10X | Device Monitor | `0.1.1` | [README](g32s10x/device-monitor/README.md) |
 
-ESP32-P4 Device App `1.3.0` 本次提供源码。其余项目的正式构建产物只通过
+ESP32-P4 Device App `1.3.1` 本次提供源码。其余项目的正式构建产物只通过
 [GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases) 分发，不进入 Git 历史。

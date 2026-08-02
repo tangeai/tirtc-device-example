@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include "freertos/FreeRTOS.h"
 #include "esp_h264_dec.h"
 #include "h264bsd_decoder.h"
 #include "esp_h264_check.h"
@@ -91,11 +92,21 @@ static esp_h264_err_t dec_del(esp_h264_dec_handle_t dec)
     return ESP_H264_ERR_OK;
 }
 
-esp_h264_err_t esp_h264_dec_sw_new(const esp_h264_dec_cfg_sw_t *cfg, esp_h264_dec_handle_t *out_dec)
+static esp_h264_err_t esp_h264_dec_sw_new_internal(
+    const esp_h264_dec_cfg_sw_t *cfg,
+    const esp_h264_dec_sw_task_cfg_t *task_cfg,
+    esp_h264_dec_handle_t *out_dec)
 {
     /* Parameter check */
     ESP_H264_RET_ON_FALSE(cfg && out_dec, ESP_H264_ERR_ARG, TAG, "Invalid h264 configure and handle parameter");
     ESP_H264_RET_ON_FALSE(cfg->pic_type == ESP_H264_RAW_FMT_I420, ESP_H264_ERR_ARG, TAG, "Un-supported h264 picture type parameter");
+    ESP_H264_RET_ON_FALSE(task_cfg == NULL || !task_cfg->dual_task_enable ||
+                             (task_cfg->dual_task_core < configNUMBER_OF_CORES &&
+                              task_cfg->dual_task_priority > 0U &&
+                              task_cfg->dual_task_priority < configMAX_PRIORITIES),
+                         ESP_H264_ERR_ARG,
+                         TAG,
+                         "Invalid helper task configuration");
 
     *out_dec = NULL;
     ESP_H264_LOGI(TAG, "tinyh264 version: %s ", esp_tinyh264_get_version());
@@ -107,11 +118,17 @@ esp_h264_err_t esp_h264_dec_sw_new(const esp_h264_dec_cfg_sw_t *cfg, esp_h264_de
     /* Parameter initalization */
     esp_h264_err_t ret = ESP_H264_ERR_OK;
     h264bsd_cfg_t tinyh264_cfg = H264BSD_CFG_DEFAULT();
-#if (CONFIG_ESP_H264_DUAL_TASK)
-    tinyh264_cfg.dualTaskEnable = 1;
-    tinyh264_cfg.dualTaskCore = CONFIG_ESP_H264_DUAL_TASK_CORE;
-    tinyh264_cfg.dualTaskPriority = CONFIG_ESP_H264_DUAL_TASK_PRIORITY;
+    if (task_cfg != NULL) {
+        tinyh264_cfg.dualTaskEnable = task_cfg->dual_task_enable ? 1U : 0U;
+        tinyh264_cfg.dualTaskCore = task_cfg->dual_task_core;
+        tinyh264_cfg.dualTaskPriority = task_cfg->dual_task_priority;
+    } else {
+#if defined(CONFIG_ESP_H264_DUAL_TASK) && CONFIG_ESP_H264_DUAL_TASK
+        tinyh264_cfg.dualTaskEnable = 1;
+        tinyh264_cfg.dualTaskCore = CONFIG_ESP_H264_DUAL_TASK_CORE;
+        tinyh264_cfg.dualTaskPriority = CONFIG_ESP_H264_DUAL_TASK_PRIORITY;
 #endif
+    }
     sw_hd->dec_hd = h264bsdAlloc(&tinyh264_cfg);
     ESP_H264_GOTO_ON_FALSE(sw_hd->dec_hd != NULL, ret, __dec_exit__, TAG, "No memory for decoder handle");
 
@@ -127,6 +144,24 @@ __dec_exit__:
     /** Delete the decoder handle */
     dec_del(&sw_hd->base);
     return ret;
+}
+
+esp_h264_err_t esp_h264_dec_sw_new(const esp_h264_dec_cfg_sw_t *cfg,
+                                   esp_h264_dec_handle_t *out_dec)
+{
+    return esp_h264_dec_sw_new_internal(cfg, NULL, out_dec);
+}
+
+esp_h264_err_t esp_h264_dec_sw_new_with_task_config(
+    const esp_h264_dec_cfg_sw_t *cfg,
+    const esp_h264_dec_sw_task_cfg_t *task_cfg,
+    esp_h264_dec_handle_t *out_dec)
+{
+    ESP_H264_RET_ON_FALSE(task_cfg != NULL,
+                         ESP_H264_ERR_ARG,
+                         TAG,
+                         "Invalid helper task configuration");
+    return esp_h264_dec_sw_new_internal(cfg, task_cfg, out_dec);
 }
 
 esp_h264_err_t esp_h264_dec_sw_get_param_hd(esp_h264_dec_handle_t dec, esp_h264_dec_param_sw_handle_t *out_param)

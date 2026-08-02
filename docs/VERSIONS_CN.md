@@ -3,6 +3,25 @@
 本文件把开发来源、统一公开源码、正式构建、Release 资产和目标板运行证据分开记录。开发侧
 Tag 锁定来源版本；统一公开 Tag 锁定筛选后的源码与文档；Release manifest 记录附件及 SHA-256。
 
+## 2026-08-02 更新
+
+| 分类 | 项目 | 发布仓路径 | 版本 | TiRTC SDK | 来源身份 |
+| --- | --- | --- | --- | --- | --- |
+| 完整应用 | ESP32-P4 Device App | `complete-applications/esp32-p4/device-monitor` | `1.3.1` | `2.3.0` 定制兼容快照 | `esp32-p4-device-app-v1.3.1` / `7391464` |
+
+本次只更新 P4 完整应用。SDK 对外 API 版本仍为 `2.3.0`，静态库来自 Nano baseline
+`aaad3da251bac90e0642b51b3279a1f40ca9fa9a`，并带有从
+`fde4f1c58d2dc28f3d3d04e25dd49bc3a399fea6` 回移的 HTTP DNS cache disable 兼容补丁。
+P4 `libTiRTC.a` SHA-256 为
+`b0a38061b0c63ad0c556f73bb2ecc47c6fd84823b7524f774fe09916f577b4c6`。
+
+| 项目 | 静态来源核验 | 正式构建 | 发布交付 |
+| --- | --- | --- | --- |
+| ESP32-P4 Device App `1.3.1` | Tag、版本、SDK 快照、源码增量、媒体参数和凭据已核对 | 最终公开快照执行 ESP-IDF `5.5.4` 干净构建，结果见本次 manifest | 源码 |
+
+本次统一发布不上传 P4 BIN，也不重复上传旧 S3 固件。目标板运行、通话长稳和故障恢复是独立
+证据层；尤其 TinyH264 helper 真正卡死后的任务回收仍需真机重复通话与长时间运行验证。
+
 ## 2026-07-31 更新
 
 | 分类 | 项目 | 发布仓路径 | 版本 | TiRTC SDK | 来源身份 |
@@ -46,10 +65,10 @@ MJPEG，并由 P4 硬件 JPEG 解码后以 `cover` 显示到 `480x320` 屏幕。
 
 ## 一致性契约
 
-本次 `release-manifest.json` 记录：
+每次 `release-manifest.json` 记录：
 
 - 统一发布 Tag 和 commit。
-- 三个本次更新项目的发布仓路径、来源身份、版本和 TiRTC SDK。
+- 本次更新项目的发布仓路径、来源身份、版本和 TiRTC SDK。
 - 每个项目的源码文件清单及 SHA-256。
 - Release notes 和实际上传附件的文件名、用途、大小和 SHA-256。
 - 构建项目的 ESP-IDF、命令、产物用途和 Flash 地址；P4 APP 记录源码交付形态。

@@ -57,6 +57,9 @@ static uint32_t s_client_count;
 static uint16_t s_target_width = HARDWARE_BOARD_CAMERA_WIDTH;
 static uint16_t s_target_height = HARDWARE_BOARD_CAMERA_HEIGHT;
 static uint8_t s_target_fps = 30;
+static uint8_t s_sensor_fps;
+static uint32_t s_last_delivered_sequence;
+static bool s_last_delivered_sequence_valid;
 
 static void camera_driver_format_to_str(uint32_t format, char out[5])
 {
@@ -253,8 +256,9 @@ static void camera_driver_log_sensor_format(void)
 		return;
 	}
 
-	APP_LOG_DETAIL(TAG,
-		       "camera sensor format: name=%s size=%ux%u fps=%u pixfmt=%u xclk=%d mipi_clk=%llu lanes=%u line_sync=%d",
+	s_sensor_fps = sensor_format.fps;
+	ESP_LOGI(TAG,
+		 "camera sensor format: name=%s size=%ux%u fps=%u pixfmt=%u xclk=%d mipi_clk=%llu lanes=%u line_sync=%d",
 		 sensor_format.name != NULL ? sensor_format.name : "unknown",
 		 (unsigned)sensor_format.width,
 		 (unsigned)sensor_format.height,
@@ -274,6 +278,11 @@ static uint64_t camera_driver_buffer_timestamp_us(const struct v4l2_buffer *buf)
 	return ((uint64_t)buf->timestamp.tv_sec * 1000000ULL) + (uint64_t)buf->timestamp.tv_usec;
 }
 
+static bool camera_driver_sequence_is_newer(uint32_t candidate, uint32_t reference)
+{
+	return (int32_t)(candidate - reference) > 0;
+}
+
 static bool camera_driver_buffer_is_usable(const struct v4l2_buffer *buf)
 {
 	return buf != NULL &&
@@ -288,7 +297,7 @@ static void camera_driver_requeue_buffer(const struct v4l2_buffer *buf, const ch
 	}
 	if (ioctl(s_fd, VIDIOC_QBUF, (void *)buf) != 0) {
 		ESP_LOGW(TAG, "requeue camera %s buffer failed index=%u errno=%d",
-			 reason != NULL ? reason : "stale",
+			 reason != NULL ? reason : "invalid",
 			 (unsigned)buf->index,
 			 errno);
 	}
@@ -301,7 +310,10 @@ static void camera_driver_config_frame_rate(void)
 	};
 
 	if (ioctl(s_fd, VIDIOC_G_PARM, &parm) != 0) {
-		APP_LOG_DETAIL(TAG, "camera frame interval query unsupported errno=%d", errno);
+		ESP_LOGI(TAG,
+			 "camera cadence: sensor=%ufps target=%ufps pacing=application",
+			 (unsigned)s_sensor_fps,
+			 (unsigned)s_target_fps);
 		return;
 	}
 
@@ -323,8 +335,9 @@ static void camera_driver_config_frame_rate(void)
 	memset(&parm, 0, sizeof(parm));
 	parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	if (ioctl(s_fd, VIDIOC_G_PARM, &parm) == 0) {
-		APP_LOG_DETAIL(TAG,
-			       "camera frame interval active: numerator=%u denominator=%u capability=0x%08" PRIx32,
+		ESP_LOGI(TAG,
+			 "camera frame interval: requested=1/%u active=%u/%u capability=0x%08" PRIx32,
+			 (unsigned)s_target_fps,
 			 (unsigned)parm.parm.capture.timeperframe.numerator,
 			 (unsigned)parm.parm.capture.timeperframe.denominator,
 			 parm.parm.capture.capability);
@@ -422,6 +435,9 @@ static void camera_driver_cleanup(void)
 		s_fd = -1;
 	}
 	s_frame_outstanding = false;
+	s_sensor_fps = 0U;
+	s_last_delivered_sequence = 0U;
+	s_last_delivered_sequence_valid = false;
 	memset(&s_active_frame, 0, sizeof(s_active_frame));
 	memset(&s_active_format, 0, sizeof(s_active_format));
 	s_camera_initialized = false;
@@ -614,6 +630,7 @@ esp_err_t camera_driver_capture(camera_driver_frame_t *frame)
 
 	const int64_t deadline_us = esp_timer_get_time() + ((int64_t)CAMERA_DRIVER_FRAME_TIMEOUT_MS * 1000);
 	esp_err_t ret = ESP_ERR_TIMEOUT;
+	uint32_t stale_frames_dropped = 0U;
 	struct v4l2_buffer buf = {
 		.type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
 		.memory = V4L2_MEMORY_MMAP,
@@ -633,8 +650,29 @@ esp_err_t camera_driver_capture(camera_driver_frame_t *frame)
 		vTaskDelay(pdMS_TO_TICKS(CAMERA_DRIVER_FRAME_BUSY_WAIT_MS));
 	}
 
+	/*
+	 * esp_video keeps completed capture buffers in newest-first order. The
+	 * camera runs faster than the application cadence, so older completed
+	 * buffers can remain behind the last delivered frame. If no fresh capture
+	 * has completed by the next deadline, DQBUF would otherwise return one of
+	 * those older buffers and make the visible image jump backward in time.
+	 * Requeue only non-monotonic completions and wait for a genuinely newer
+	 * frame; this also returns stranded buffers to the sensor pipeline.
+	 */
 	while (esp_timer_get_time() < deadline_us) {
 		if (ioctl(s_fd, VIDIOC_DQBUF, &buf) == 0) {
+			if (!camera_driver_buffer_is_usable(&buf)) {
+				camera_driver_requeue_buffer(&buf, "invalid");
+				ret = ESP_FAIL;
+				break;
+			}
+			if (s_last_delivered_sequence_valid &&
+			    !camera_driver_sequence_is_newer(buf.sequence,
+							     s_last_delivered_sequence)) {
+				camera_driver_requeue_buffer(&buf, "stale");
+				stale_frames_dropped++;
+				continue;
+			}
 			ret = ESP_OK;
 			break;
 		}
@@ -650,22 +688,18 @@ esp_err_t camera_driver_capture(camera_driver_frame_t *frame)
 		xSemaphoreGive(s_lock);
 		return ret;
 	}
-	if (!camera_driver_buffer_is_usable(&buf)) {
-		camera_driver_requeue_buffer(&buf, "invalid");
-		xSemaphoreGive(s_lock);
-		return ESP_FAIL;
-	}
-
 	memset(frame, 0, sizeof(*frame));
 	s_active_frame.buffer = buf;
 	s_frame_outstanding = true;
+	s_last_delivered_sequence = buf.sequence;
+	s_last_delivered_sequence_valid = true;
 
 	frame->data = (const uint8_t *)s_buffers[buf.index];
 	frame->data_len = buf.bytesused != 0 ? buf.bytesused : buf.length;
 	frame->width = (uint16_t)s_active_format.fmt.pix.width;
 	frame->height = (uint16_t)s_active_format.fmt.pix.height;
 	frame->sequence = buf.sequence;
-	frame->stale_frames_dropped = 0;
+	frame->stale_frames_dropped = stale_frames_dropped;
 	frame->sensor_timestamp_us = camera_driver_buffer_timestamp_us(&buf);
 	switch (s_active_format.fmt.pix.pixelformat) {
 	case V4L2_PIX_FMT_YUV420:
@@ -689,7 +723,7 @@ esp_err_t camera_driver_capture(camera_driver_frame_t *frame)
 			 (unsigned)frame->data_len,
 			 (unsigned)buf.index,
 			 (unsigned)buf.sequence,
-			 0U,
+			 (unsigned)stale_frames_dropped,
 			 (unsigned long long)frame->sensor_timestamp_us);
 	}
 

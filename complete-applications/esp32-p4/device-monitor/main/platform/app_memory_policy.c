@@ -9,6 +9,19 @@
 static portMUX_TYPE s_memory_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t s_psram_alloc_failures;
 
+_Static_assert(APP_MEMORY_INTERNAL_FREE_CRITICAL_BYTES <
+                   APP_MEMORY_INTERNAL_FREE_WARNING_BYTES,
+               "internal free waterlines must be ordered");
+_Static_assert(APP_MEMORY_INTERNAL_LARGEST_CRITICAL_BYTES <
+                   APP_MEMORY_INTERNAL_LARGEST_WARNING_BYTES,
+               "internal largest-block waterlines must be ordered");
+_Static_assert(APP_MEMORY_PSRAM_FREE_CRITICAL_BYTES <
+                   APP_MEMORY_PSRAM_FREE_WARNING_BYTES,
+               "PSRAM free waterlines must be ordered");
+_Static_assert(APP_MEMORY_PSRAM_LARGEST_CRITICAL_BYTES <
+                   APP_MEMORY_PSRAM_LARGEST_WARNING_BYTES,
+               "PSRAM largest-block waterlines must be ordered");
+
 static void app_memory_note_psram_failure(void)
 {
     taskENTER_CRITICAL(&s_memory_lock);
@@ -104,4 +117,41 @@ void app_memory_get_snapshot(app_memory_snapshot_t *snapshot)
     taskENTER_CRITICAL(&s_memory_lock);
     snapshot->psram_alloc_failures = s_psram_alloc_failures;
     taskEXIT_CRITICAL(&s_memory_lock);
+}
+
+app_memory_health_t app_memory_classify(const app_memory_snapshot_t *snapshot)
+{
+    if (snapshot == NULL) {
+        return APP_MEMORY_HEALTH_CRITICAL;
+    }
+
+    if (snapshot->internal_free < APP_MEMORY_INTERNAL_FREE_CRITICAL_BYTES ||
+        snapshot->internal_largest < APP_MEMORY_INTERNAL_LARGEST_CRITICAL_BYTES ||
+        snapshot->psram_free < APP_MEMORY_PSRAM_FREE_CRITICAL_BYTES ||
+        snapshot->psram_largest < APP_MEMORY_PSRAM_LARGEST_CRITICAL_BYTES) {
+        return APP_MEMORY_HEALTH_CRITICAL;
+    }
+
+    if (snapshot->internal_free < APP_MEMORY_INTERNAL_FREE_WARNING_BYTES ||
+        snapshot->internal_largest < APP_MEMORY_INTERNAL_LARGEST_WARNING_BYTES ||
+        snapshot->psram_free < APP_MEMORY_PSRAM_FREE_WARNING_BYTES ||
+        snapshot->psram_largest < APP_MEMORY_PSRAM_LARGEST_WARNING_BYTES) {
+        return APP_MEMORY_HEALTH_WARNING;
+    }
+
+    return APP_MEMORY_HEALTH_NORMAL;
+}
+
+const char *app_memory_health_name(app_memory_health_t health)
+{
+    switch (health) {
+    case APP_MEMORY_HEALTH_NORMAL:
+        return "normal";
+    case APP_MEMORY_HEALTH_WARNING:
+        return "warning";
+    case APP_MEMORY_HEALTH_CRITICAL:
+        return "critical";
+    default:
+        return "unknown";
+    }
 }

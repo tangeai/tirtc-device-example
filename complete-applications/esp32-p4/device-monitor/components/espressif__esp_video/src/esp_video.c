@@ -467,6 +467,7 @@ struct esp_video *esp_video_open(const char *name)
                 struct esp_video_stream *stream = &video->stream[i];
 
                 stream->buffer = NULL;
+                stream->next_sequence = 0;
                 SLIST_INIT(&stream->queued_list);
                 SLIST_INIT(&stream->done_list);
             }
@@ -618,6 +619,7 @@ esp_err_t esp_video_stop_capture(struct esp_video *video, uint32_t type)
 
                 SLIST_INIT(&stream->queued_list);
                 SLIST_INIT(&stream->done_list);
+                stream->next_sequence = 0;
 
                 esp_video_buffer_reset(stream->buffer);
             }
@@ -938,6 +940,7 @@ esp_err_t IRAM_ATTR esp_video_done_element(struct esp_video *video, uint32_t typ
     }
 
     ELEMENT_SET_ALLOCATED(element);
+    element->sequence = stream->next_sequence++;
     SLIST_INSERT_HEAD(&stream->done_list, element, node);
     portEXIT_CRITICAL_SAFE(&video->stream_lock);
 

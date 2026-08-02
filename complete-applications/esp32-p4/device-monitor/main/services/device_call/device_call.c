@@ -44,6 +44,7 @@ static void *device_call_calloc_control(size_t count, size_t size)
 /* Keep the business wait slightly longer than the TiRTC connect watchdog. */
 #define DEVICE_CALL_CONNECT_TIMEOUT_MS     40000U
 #define DEVICE_CALL_POLL_INTERVAL_MS       20U
+#define DEVICE_CALL_TIMER_POLL_INTERVAL_MS 100U
 #define DEVICE_CALL_ONLINE_READY_TIMEOUT_MS 30000U
 
 typedef enum {
@@ -299,6 +300,7 @@ static void device_call_show_pending_or_idle_locked(const char *idle_message)
     s_call.last_error = ESP_OK;
     if (s_call.pending_incoming) {
         s_call.state = DEVICE_CALL_STATE_INCOMING;
+        s_call.role = DEVICE_CALL_ROLE_CALLEE;
         strlcpy(s_call.room_id, s_call.pending_room_id, sizeof(s_call.room_id));
         strlcpy(s_call.peer_device_id, s_call.pending_caller_id, sizeof(s_call.peer_device_id));
         strlcpy(s_call.call_type, s_call.pending_call_type, sizeof(s_call.call_type));
@@ -1391,32 +1393,89 @@ static void device_call_ring_timer_task(void *arg)
 {
     device_call_request_ctx_t *ctx = (device_call_request_ctx_t *)arg;
     char room_id[96] = {0};
+    device_call_action_t timeout_action = DEVICE_CALL_ACTION_CANCEL;
+    const char *timeout_reason = "timeout";
+    device_call_state_t phase = DEVICE_CALL_STATE_OUTGOING;
+    uint32_t phase_elapsed_ms = 0U;
     bool expired = false;
 
     if (ctx == NULL) {
         vTaskDeleteWithCaps(NULL);
         return;
     }
-    vTaskDelay(pdMS_TO_TICKS(DEVICE_CALL_RING_TIMEOUT_MS));
 
-    device_call_lock();
-    if (s_call.generation == ctx->generation &&
-        s_call.state == DEVICE_CALL_STATE_OUTGOING) {
-        strlcpy(room_id, s_call.room_id, sizeof(room_id));
-        device_call_show_pending_or_idle_locked("call timed out");
-        device_call_next_generation_locked();
-        expired = true;
+    while (true) {
+        bool phase_changed = false;
+        bool finished = false;
+        uint32_t timeout_ms = phase == DEVICE_CALL_STATE_CONNECTING ?
+                                  DEVICE_CALL_CONNECT_TIMEOUT_MS :
+                                  DEVICE_CALL_RING_TIMEOUT_MS;
+
+        device_call_lock();
+        if (s_call.generation != ctx->generation ||
+            s_call.role != DEVICE_CALL_ROLE_CALLER ||
+            (s_call.state != DEVICE_CALL_STATE_OUTGOING &&
+             s_call.state != DEVICE_CALL_STATE_CONNECTING)) {
+            finished = true;
+        } else {
+            if (s_call.state == DEVICE_CALL_STATE_CONNECTING &&
+                phase != DEVICE_CALL_STATE_CONNECTING) {
+                phase = DEVICE_CALL_STATE_CONNECTING;
+                phase_elapsed_ms = 0U;
+                timeout_ms = DEVICE_CALL_CONNECT_TIMEOUT_MS;
+                strlcpy(room_id, s_call.room_id, sizeof(room_id));
+                phase_changed = true;
+            }
+            if (phase_elapsed_ms >= timeout_ms) {
+                strlcpy(room_id, s_call.room_id, sizeof(room_id));
+                if (phase == DEVICE_CALL_STATE_CONNECTING) {
+                    timeout_action = DEVICE_CALL_ACTION_HANGUP;
+                    timeout_reason = "p2p_error";
+                    device_call_show_pending_or_idle_locked("peer connection timed out");
+                } else {
+                    device_call_show_pending_or_idle_locked("call timed out");
+                }
+                device_call_next_generation_locked();
+                expired = true;
+                finished = true;
+            }
+        }
+        device_call_unlock();
+
+        if (phase_changed) {
+            ESP_LOGI(CALL_FLOW_TAG,
+                     "stage=p2p_wait_begin gen=%lu role=caller room=%s timeout_ms=%u",
+                     (unsigned long)ctx->generation,
+                     room_id[0] != '\0' ? room_id : "-",
+                     (unsigned)DEVICE_CALL_CONNECT_TIMEOUT_MS);
+        }
+        if (finished) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(DEVICE_CALL_TIMER_POLL_INTERVAL_MS));
+        phase_elapsed_ms += DEVICE_CALL_TIMER_POLL_INTERVAL_MS;
     }
-    device_call_unlock();
 
     if (expired) {
-        ESP_LOGW(CALL_FLOW_TAG,
-                 "stage=ring_timeout gen=%lu room=%s timeout_ms=%u",
-                 (unsigned long)ctx->generation,
-                 room_id,
-                 (unsigned)DEVICE_CALL_RING_TIMEOUT_MS);
-        ESP_LOGI(TAG, "outgoing call timed out: room=%s", room_id);
-        (void)device_call_post_room_action(DEVICE_CALL_ACTION_CANCEL, room_id, "timeout");
+        if (phase == DEVICE_CALL_STATE_CONNECTING) {
+            ESP_LOGW(CALL_FLOW_TAG,
+                     "stage=p2p_wait_timeout gen=%lu role=caller room=%s timeout_ms=%u",
+                     (unsigned long)ctx->generation,
+                     room_id,
+                     (unsigned)DEVICE_CALL_CONNECT_TIMEOUT_MS);
+        } else {
+            ESP_LOGW(CALL_FLOW_TAG,
+                     "stage=ring_timeout gen=%lu room=%s timeout_ms=%u",
+                     (unsigned long)ctx->generation,
+                     room_id,
+                     (unsigned)DEVICE_CALL_RING_TIMEOUT_MS);
+        }
+        ESP_LOGI(TAG,
+                 "%s timed out: room=%s",
+                 phase == DEVICE_CALL_STATE_CONNECTING ? "caller P2P connection" :
+                                                         "outgoing call",
+                 room_id);
+        (void)device_call_post_room_action(timeout_action, room_id, timeout_reason);
         device_call_reset_caller_media_gate();
         (void)rtc_transport_disconnect();
         device_call_notify_session_ended();
@@ -2057,6 +2116,7 @@ static void device_call_handle_incoming(const cJSON *payload, uint32_t message_g
 
     if (s_call.state == DEVICE_CALL_STATE_IDLE || s_call.state == DEVICE_CALL_STATE_ERROR) {
         s_call.state = DEVICE_CALL_STATE_INCOMING;
+        s_call.role = DEVICE_CALL_ROLE_CALLEE;
         strlcpy(s_call.room_id, room_id, sizeof(s_call.room_id));
         strlcpy(s_call.peer_device_id, caller_id, sizeof(s_call.peer_device_id));
         strlcpy(s_call.call_type, s_call.pending_call_type, sizeof(s_call.call_type));
@@ -2067,7 +2127,7 @@ static void device_call_handle_incoming(const cJSON *payload, uint32_t message_g
     generation = s_call.generation;
     device_call_unlock();
     ESP_LOGI(CALL_FLOW_TAG,
-             "stage=incoming_received gen=%lu state=%s room=%s peer=%s type=%s",
+             "stage=incoming_received gen=%lu role=callee state=%s room=%s peer=%s type=%s",
              (unsigned long)generation,
              device_call_state_name(state),
              room_id,
@@ -2080,6 +2140,9 @@ static void device_call_handle_room_cancel(const cJSON *payload, uint32_t messag
 {
     const char *room_id = device_call_json_string(payload, "room_id");
     const char *reason = device_call_json_string(payload, "reason");
+    device_call_role_t role = DEVICE_CALL_ROLE_NONE;
+    device_call_state_t state = DEVICE_CALL_STATE_IDLE;
+    bool pending_cleared = false;
     bool close_transport = false;
 
     if (room_id[0] == '\0') {
@@ -2091,7 +2154,10 @@ static void device_call_handle_room_cancel(const cJSON *payload, uint32_t messag
         device_call_unlock();
         return;
     }
+    role = s_call.role;
+    state = s_call.state;
     if (s_call.pending_incoming && strcmp(s_call.pending_room_id, room_id) == 0) {
+        pending_cleared = true;
         s_call.pending_incoming = false;
         s_call.pending_room_id[0] = '\0';
         s_call.pending_caller_id[0] = '\0';
@@ -2114,9 +2180,12 @@ static void device_call_handle_room_cancel(const cJSON *payload, uint32_t messag
         device_call_notify_session_ended();
     }
     ESP_LOGI(CALL_FLOW_TAG,
-             "stage=room_cancel_rx room=%s reason=%s close_transport=%d",
+             "stage=room_cancel_rx role=%s state=%s room=%s reason=%s pending_cleared=%d close_transport=%d",
+             device_call_role_name(role),
+             device_call_state_name(state),
              room_id,
              reason[0] != '\0' ? reason : "-",
+             pending_cleared ? 1 : 0,
              close_transport ? 1 : 0);
     ESP_LOGI(TAG,
              "room canceled: room=%s reason=%s",
@@ -2710,6 +2779,7 @@ esp_err_t device_call_start(void)
     bool enabled = false;
     bool register_listener = false;
     bool register_observer = false;
+    bool mqtt_connected = false;
     uint32_t start_generation = 0;
 
     device_call_lock();
@@ -2766,31 +2836,48 @@ esp_err_t device_call_start(void)
     s_call.ingress_enabled = true;
     device_call_unlock();
 
-    esp_err_t room_ret = device_call_reconcile_room_async();
-    if (room_ret != ESP_OK) {
-        ESP_LOGW(TAG, "call room recovery not scheduled: %s", esp_err_to_name(room_ret));
-    }
+    mqtt_connected = thing_mqtt_client_is_connected();
+    esp_err_t room_ret = ESP_ERR_INVALID_STATE;
+    esp_err_t contacts_ret = ESP_ERR_INVALID_STATE;
+    if (mqtt_connected) {
+        room_ret = device_call_reconcile_room_async();
+        if (room_ret != ESP_OK) {
+            ESP_LOGW(TAG, "call room recovery not scheduled: %s", esp_err_to_name(room_ret));
+        }
 
-    esp_err_t contacts_ret = device_call_refresh_contacts_async();
-    if (contacts_ret != ESP_OK) {
-        ESP_LOGW(TAG, "initial device contact refresh not scheduled: %s", esp_err_to_name(contacts_ret));
+        contacts_ret = device_call_refresh_contacts_async();
+        if (contacts_ret != ESP_OK) {
+            ESP_LOGW(TAG, "initial device contact refresh not scheduled: %s", esp_err_to_name(contacts_ret));
+        }
+    } else {
+        ESP_LOGI(TAG, "device call recovery deferred until formal MQTT is online");
     }
 
     ESP_LOGI(CALL_FLOW_TAG,
              "stage=service_ready mqtt=%d listener=1 observer=1 room_recovery=%s contacts_refresh=%s",
-             thing_mqtt_client_is_connected() ? 1 : 0,
-             esp_err_to_name(room_ret),
-             esp_err_to_name(contacts_ret));
+             mqtt_connected ? 1 : 0,
+             mqtt_connected ? esp_err_to_name(room_ret) : "deferred",
+             mqtt_connected ? esp_err_to_name(contacts_ret) : "deferred");
     ESP_LOGI(TAG, "device call service started");
     return ESP_OK;
 }
 
 void device_call_reset_identity_state(void)
 {
+    device_call_role_t role = DEVICE_CALL_ROLE_NONE;
+    device_call_state_t state = DEVICE_CALL_STATE_IDLE;
+    char room_id[96] = {0};
+    bool pending_incoming = false;
     bool notify_session_ended = false;
 
     device_call_lock();
     if (s_call.initialized) {
+        role = s_call.role;
+        state = s_call.state;
+        pending_incoming = s_call.pending_incoming;
+        strlcpy(room_id,
+                s_call.pending_incoming ? s_call.pending_room_id : s_call.room_id,
+                sizeof(room_id));
         notify_session_ended = s_call.request_running ||
                                s_call.accept_running ||
                                s_call.switch_disconnect_in_progress ||
@@ -2821,7 +2908,11 @@ void device_call_reset_identity_state(void)
         device_call_notify_session_ended();
     }
     ESP_LOGI(CALL_FLOW_TAG,
-             "stage=identity_reset notify_session_ended=%d",
+             "stage=identity_reset role=%s state=%s room=%s pending=%d notify_session_ended=%d",
+             device_call_role_name(role),
+             device_call_state_name(state),
+             room_id[0] != '\0' ? room_id : "-",
+             pending_incoming ? 1 : 0,
              notify_session_ended ? 1 : 0);
 }
 
@@ -3021,7 +3112,7 @@ esp_err_t device_call_accept_pending(void)
     device_call_unlock();
 
     ESP_LOGI(CALL_FLOW_TAG,
-             "stage=accept_queued gen=%lu room=%s peer=%s switch=%d",
+             "stage=accept_queued gen=%lu role=callee room=%s peer=%s switch=%d",
              (unsigned long)generation,
              ctx->room_id,
              ctx->caller_id,

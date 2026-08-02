@@ -5,16 +5,27 @@
 #include <stdint.h>
 
 #include "esp_err.h"
-
-#define CALL_VIDEO_DECODE_MAX_WIDTH   480U
-#define CALL_VIDEO_DECODE_MAX_HEIGHT  320U
-#define CALL_VIDEO_RENDER_WIDTH       480U
-#define CALL_VIDEO_RENDER_HEIGHT      320U
+#include "call_video_renderer_config.h"
 
 typedef enum {
     CALL_VIDEO_CODEC_H264 = 0,
     CALL_VIDEO_CODEC_MJPEG,
 } call_video_codec_t;
+
+typedef struct {
+    uint32_t frame_index;
+    uint32_t pts;
+    uint32_t payload_bytes;
+    uint32_t submit_us;
+    uint32_t input_wait_us;
+    uint32_t decode_us;
+    uint32_t decode_copy_us;
+    uint32_t decoded_wait_us;
+    uint32_t convert_us;
+    uint32_t output_wait_us;
+    bool key_frame;
+    bool decoder_bootstrap;
+} call_video_frame_trace_t;
 
 typedef struct {
     bool running;
@@ -29,6 +40,8 @@ typedef struct {
     uint32_t decoded_frames;
     uint32_t converted_frames;
     uint32_t presented_frames;
+    uint32_t stale_received_frames;
+    uint32_t stale_presented_frames;
     uint32_t dropped_frames;
     uint32_t conversion_dropped_frames;
     uint32_t decode_failures;
@@ -66,11 +79,12 @@ esp_err_t call_video_renderer_submit_mjpeg(const uint8_t *data,
                                            size_t data_len,
                                            uint32_t pts);
 
-/* Claims the newest converted RGB565 viewport and releases any older queued
+/* Claims the newest converted RGB565 viewport and releases older queued
  * viewports. The returned PSRAM pointer stays pinned until the next successful
- * claim or release, so the converter never overwrites a frame in flight. */
+ * claim or release, so conversion never overwrites a frame in flight. */
 esp_err_t call_video_renderer_present_next_rgb565(const uint16_t **pixels,
                                                    size_t *pixel_count,
-                                                   uint32_t *sequence);
+                                                   uint32_t *sequence,
+                                                   call_video_frame_trace_t *trace);
 void call_video_renderer_release_presented_rgb565(void);
 void call_video_renderer_get_stats(call_video_renderer_stats_t *stats);

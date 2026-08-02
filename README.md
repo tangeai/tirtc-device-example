@@ -21,7 +21,7 @@
 
 只想把固件跑起来，不需要先准备 ESP-IDF：
 
-1. 打开 [GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases)，选择目标版本。
+1. 打开 [GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases)，选择包含目标项目的版本。
 2. 下载项目对应的 `*-full-*.bin`、`SHA256SUMS.txt` 和 `release-manifest.json`。
 3. 先核对 SHA-256，再用 [Espressif ESP Tool](https://espressif.github.io/esptool-js/) 将完整镜像写入 `0x0`。
 4. 回到项目 README，按“首次启动”配置网络、设备身份并观察成功日志。
@@ -34,7 +34,7 @@
 ```bash
 git clone https://github.com/tangeai/tirtc-device-example.git
 cd tirtc-device-example
-git checkout tirtc-device-examples-v2026.07.31
+git checkout tirtc-device-examples-v2026.08.02
 ```
 
 然后进入下表中的项目目录。每个项目 README 都给出依赖、配置、构建、烧录、成功现象和排障入口。
@@ -60,13 +60,13 @@ git checkout tirtc-device-examples-v2026.07.31
 | 平台 | 应用 | 版本 | TiRTC SDK | 来源版本 | Release 交付 |
 | --- | --- | --- | --- | --- | --- |
 | ESP32-S3 | [Device Monitor](complete-applications/esp32-s3/device-monitor/README.md) | `1.8.0` | `2.2.0` | Tag `v1.8.0` / commit `8211e3b` | 源码、完整镜像与 OTA app |
-| ESP32-P4 | [Device App](complete-applications/esp32-p4/device-monitor/README.md) | `1.3.0` | `2.3.0` | Tag `esp32-p4-device-app-v1.3.0` / commit `dacf8e6` | 源码 |
+| ESP32-P4 | [Device App](complete-applications/esp32-p4/device-monitor/README.md) | `1.3.1` | `2.3.0` 定制兼容快照 | Tag `esp32-p4-device-app-v1.3.1` / commit `7391464` | 源码 |
 | G32S10X | [Device Monitor](complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | Tag `v0.1.1` / commit `5630152` | 源码、主固件与两个 YAFFS 镜像 |
 
-本次更新由 `tirtc-device-examples-v2026.07.31` 锁定，范围为 ESP32-S3 日志示例 `0.3.0`、
-ESP32-S3 Device Monitor `1.8.0` 和 ESP32-P4 Device App `1.3.0`。未列入本次范围的项目保持
-上一公开版本。固件资产来自最终公开候选的正式干净构建，文件用途、大小、Flash 地址和
-SHA-256 见当次 `release-manifest.json` 与[版本与证据清单](docs/VERSIONS_CN.md)。
+最新更新由 `tirtc-device-examples-v2026.08.02` 锁定，只更新 ESP32-P4 Device App `1.3.1`。
+其他项目保持上一公开版本；S3 固件继续从 `2026.07.31` Release 下载，不重复上传。
+每次发布的源码范围、构建证据和附件 SHA-256 见当次 `release-manifest.json` 与
+[版本与证据清单](docs/VERSIONS_CN.md)。
 
 ## 选择路径
 
@@ -87,7 +87,7 @@ AI 对讲和设备互呼，并输出稳定、脱敏的状态日志；它不是�
 不进入 Git 历史。ESP32 固件使用
 [Espressif ESP Tool](https://espressif.github.io/esptool-js/) 按 Release 清单烧录。
 
-ESP32-P4 Device App `1.3.0` 按源码范围交付，不提供预编译 BIN。
+ESP32-P4 Device App `1.3.1` 按源码范围交付，不提供预编译 BIN。
 
 ## 构建入口
 

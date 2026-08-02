@@ -8,11 +8,12 @@
 | ESP-IDF | 5.5.4 |
 | Toolchain | riscv32-esp-elf-gcc-14.2.0_20260121 |
 | Nano branch | origin/tgmp |
-| Nano commit | aaad3da251bac90e0642b51b3279a1f40ca9fa9a |
+| Nano baseline | aaad3da251bac90e0642b51b3279a1f40ca9fa9a |
+| Nano compatibility patch | HTTP DNS disable backport from fde4f1c58d2dc28f3d3d04e25dd49bc3a399fea6 |
 | tgwebrtc commit | e39114731ad488c88573d16f0855a1326d97c989 |
 | TGTRP interface | tag v1.5.10 |
 | Transport | KCP / noSCTP / noDTLS |
-| Build date | 2026-07-24 |
+| Build date | 2026-08-01 |
 
 ## Build Contract
 
@@ -23,6 +24,9 @@
 - `sizeof(StaticSemaphore_t)=84`
 - `CONFIG_LWIP_MAX_SOCKETS=10`
 - `libwebrtc_nosctp.a` is already bundled into `libTiRTC.a`
+- The custom HTTP DNS cache is disabled. `/v1/connect` uses the platform DNS
+  resolver, avoiding a recursive lock when a cached entry expires.
+- Public 2.3.0 headers and the TGMP callback contract are unchanged.
 
 The upstream SDK validation project used `CONFIG_ESP_HOST_WIFI_ENABLED=y`.
 This Waveshare ESP32-P4 board uses an ESP32-C6 over ESP-Hosted SDIO instead, so

@@ -13,17 +13,6 @@ config APP_AUDIO_AEC_ENABLE
         calls, WeChat VoIP, and AI Chat, and is disabled outside those media
         sessions. Each application keeps its existing audio ownership model.
 
-config APP_AUDIO_AEC_REF_DELAY_MS
-    int "Software AEC reference fallback delay (ms)"
-    depends on APP_AUDIO_AEC_ENABLE
-    range 40 160
-    default 80
-    help
-        ES8311 boards first use the codec-synchronous DAC reference channel,
-        which needs no guessed delay. This value is used only if that hardware
-        reference cannot be detected. Adjust the fallback from synchronized
-        full-duplex recordings; an incorrect value weakens cancellation.
-
 endmenu
 
 menu "AI Chat"
@@ -65,6 +54,9 @@ endmenu
 
 menu "RTC video uplink"
 
+# Product media values are owned by media/media_tuning.h. Keep this menu for
+# build-time feature composition only.
+
 config APP_RTC_H264_DIRECT_HW_ENCODER
     bool "Use direct ESP_H264 hardware encoder for RTC video"
     default y
@@ -87,83 +79,6 @@ config APP_RTC_H264_RESOURCE_FALLBACK_ENABLE
         or change the saved RTC video policy. A normally prewarmed encoder
         still uses the requested size.
 
-config APP_RTC_H264_BITRATE
-    int "RTC H264 target bitrate"
-    range 500000 12000000
-    default 4000000
-    help
-        Target bitrate used by the ESP32-P4 hardware H264 encoder for the
-        RTC camera uplink. The normal profile is tuned for sustained 1280x960 at 20fps
-        with bounded send latency; raise this only after logs prove the
-        transport keeps draining without backpressure.
-
-config APP_RTC_H264_FPS
-    int "RTC H264 target FPS"
-    range 5 30
-    default 20
-    help
-        Normal RTC camera uplink frame rate. Keep this separate from the
-        camera sensor mode: the OV5647 uses its 1280x960 binning mode, while
-        the current TiRTC application sends the native YUV420 frame at 20fps with bounded send
-        latency. Weak-network adaptation remains disabled unless explicitly
-        enabled below.
-
-config APP_DEVICE_CALL_VIDEO_WIDTH
-    int "Device-call H264 width"
-    range 320 1280
-    default 480
-    help
-        Video profile used only for bidirectional device calls. The default
-        matches the 480x320 landscape display and asks the ISP for the same
-        native YUV420 output, avoiding an application-side resize. IPC viewing
-        keeps the normal RTC profile above.
-
-config APP_DEVICE_CALL_VIDEO_HEIGHT
-    int "Device-call H264 height"
-    range 240 960
-    default 320
-
-config APP_DEVICE_CALL_VIDEO_FPS
-    int "Device-call H264 FPS"
-    range 5 30
-    default 15
-    help
-        The full-duplex call path defaults to a stable 15fps. This is the
-        minimum acceptance target under simultaneous encode, software decode,
-        audio, UI and Wi-Fi load; higher profiles can be selected only after
-        runtime statistics prove enough headroom.
-
-config APP_DEVICE_CALL_VIDEO_BITRATE
-    int "Device-call H264 target bitrate"
-    range 300000 6000000
-    default 800000
-    help
-        Normal starting target for the 480x320 bidirectional call profile.
-        800 kbps preserves motion detail while leaving enough range for
-        transport adaptation. TiRTC feedback may reduce this target
-        immediately under congestion, while recovery is deliberately stepped
-        after a stable hold. The previous RTC setting is restored when the call
-        ends.
-
-config APP_DEVICE_CALL_VIDEO_MIN_QP
-    int "Device-call H264 minimum QP"
-    range 10 51
-    default 22
-    help
-        Quality floor used only for the 480x320 bidirectional call profile.
-        This is intentionally lower than the high-resolution IPC floor so a
-        call can use its bitrate budget without changing IPC behavior.
-
-config APP_DEVICE_CALL_VIDEO_MAX_QP
-    int "Device-call H264 maximum QP"
-    range 10 51
-    default 40
-    help
-        Quality ceiling used only for the bidirectional call profile. QP 40
-        limits coarse motion blocks on the 320-pixel display while still
-        leaving enough rate-control range for the weak-network levels. Keep it
-        greater than or equal to APP_DEVICE_CALL_VIDEO_MIN_QP.
-
 config APP_CALL_VIDEO_DIRECT_LCD
     bool "Use latest-frame direct LCD DMA after call controls auto-hide"
     depends on SOC_PSRAM_DMA_CAPABLE && SPIRAM
@@ -174,72 +89,6 @@ config APP_CALL_VIDEO_DIRECT_LCD
         PSRAM DMA transaction. Tapping the video restores the controls over the
         retained current frame. This avoids multi-strip temporal tearing during
         motion without sacrificing hangup and volume controls.
-
-config APP_RTC_H264_GOP
-    int "RTC H264 GOP"
-    range 1 120
-    default 30
-    help
-        GOP used by the ESP32-P4 hardware H264 encoder. Keep this separate
-        from FPS: startup and peer recovery still request explicit key frames,
-        while a 30-frame GOP gives the 15fps call profile a two-second natural
-        recovery point without returning to a visible 0.5s key-frame cadence.
-
-config APP_RTC_H264_MIN_QP
-    int "RTC H264 minimum QP"
-    range 10 51
-    default 34
-    help
-        Lower bound for encoder QP. Keep this high enough to prevent the
-        ESP32-P4 H264 encoder from emitting very large startup delta frames
-        that can overflow the proxy/browser path. This is not weak-network
-        adaptation; the target bitrate remains configured separately.
-
-config APP_RTC_H264_MAX_QP
-    int "RTC H264 maximum QP"
-    range 10 51
-    default 45
-
-config APP_RTC_H264_OUTPUT_BUFFER_BYTES
-    int "RTC H264 output buffer bytes"
-    range 524288 4194304
-    default 1048576
-    help
-        MMAP output buffer size for one encoded H264 frame. Keep enough room
-        for 1280x960 key frames and high-motion bursts. This buffer does not
-        control adaptive downshift; it only protects the encoder output path.
-
-config APP_RTC_H264_MAX_DELTA_PAYLOAD_BYTES
-    int "RTC H264 maximum delta frame payload bytes"
-    range 65536 1048576
-    default 262144
-    help
-        Hard guard for abnormal non-key frame payloads. Normal operation must
-        not drop H264 P frames after encoding, because that breaks the
-        reference chain and can make the browser/proxy show a short recovery
-        hiccup. Keep the steady-state guard high enough for normal 1280x960 motion
-        detail, while the startup guard below remains tighter during decoder
-        warmup. GOP should remain short so recovery follows quickly.
-
-config APP_RTC_H264_STARTUP_GUARD_MS
-    int "RTC H264 startup transport guard window in milliseconds"
-    range 0 10000
-    default 2500
-    help
-        Startup-only window that uses a tighter delta-frame burst limit while
-        the browser/proxy decoder and data channels are still warming up. This
-        is not weak-network adaptation; after the window expires the normal
-        max-delta policy above applies.
-
-config APP_RTC_H264_STARTUP_MAX_DELTA_PAYLOAD_BYTES
-    int "RTC H264 startup maximum delta frame payload bytes"
-    range 65536 1048576
-    default 131072
-    help
-        Delta-frame payload limit used only during the startup guard window.
-        The default is lower than the steady-state guard to limit startup
-        bursts. If a delta frame is rejected, the pipeline requests a fresh
-        IDR and waits for it before resuming the H264 chain.
 
 config APP_RTC_VIDEO_AUTO_ADAPT_ENABLE
     bool "Enable legacy local RTC video weak-network adaptation"
@@ -291,58 +140,6 @@ config APP_DEVICE_ONLINE_PAUSE_DURING_RTC
         Enable this only for isolated media stress tests where losing realtime
         business notifications during the call is acceptable.
 
-config APP_DMA_ESCROW_BYTES
-    int "Application DMA escrow bytes"
-    range 0 131072
-    default 98304
-    help
-        Contiguous internal DMA-capable memory held at early boot before
-        network, UI and business tasks start. The 96 KiB default covers the
-        ESP32-P4 H264 reference allocation required by the normal 1280-wide
-        profile. H264 and downlink decoder bootstrap can borrow this block;
-        PSRAM payload pools must never fall back into it.
-
-config APP_CAMERA_FRAME_TRACE_INITIAL_COUNT
-    int "Camera frame trace initial frame count"
-    range 0 64
-    default 0
-    help
-        Number of per-frame camera pipeline trace lines printed after a video
-        session starts. Keep this at zero for performance tuning. The compact
-        MEDIA health line remains available for routine FPS/bitrate diagnosis;
-        enable the detailed periodic diagnostics only for focused profiling.
-
-config APP_CAMERA_FRAME_TRACE_INTERVAL_MS
-    int "Camera slow/large frame trace interval in milliseconds"
-    range 200 60000
-    default 10000
-    help
-        Minimum interval for slow or large frame trace logs. This prevents
-        diagnostic logging from disturbing the 1280x960 H264 hot path while still
-        keeping enough evidence when the encoder or transport stalls.
-
-config APP_RTC_H264_KEY_FRAME_REQUEST_MIN_INTERVAL_MS
-    int "Minimum interval between local H264 key-frame requests"
-    range 0 5000
-    default 2000
-    help
-        Coalesce repeated peer-side IDR requests against the most recently
-        accepted request.
-        The normal 40-frame GOP at 20fps already emits an IDR every two
-        seconds. Reconfiguring the hardware encoder more often can reset GOP
-        progress and stall the bidirectional media path. Stream start still
-        explicitly requests the first key frame.
-
-config APP_RTC_TRANSPORT_BACKPRESSURE_HOLD_MS
-    int "RTC transport backpressure hold in milliseconds"
-    range 40 1000
-    default 80
-    help
-        One-frame camera pacing window after the TiRTC send buffer crosses the
-        transport guard waterline. Sustained congestion is handled separately
-        by the hysteretic video governor. This guard does not change the active
-        video profile; it only leaves room for heartbeat/control traffic.
-
 config APP_TIRTC_QUERY_SEND_BUFFER_USED
     bool "Query TiRTC SDK send-buffer usage"
     default y
@@ -355,6 +152,14 @@ config APP_TIRTC_QUERY_SEND_BUFFER_USED
 endmenu
 
 menu "Debug utilities"
+
+config APP_MEMORY_WATERLINE_LOG
+    bool "Enable memory waterline transition logs"
+    default y
+    help
+        Record one memory baseline at startup, then log only pressure-level
+        transitions, recovery, or a new PSRAM allocation failure. This is the
+        normal maintenance signal and does not emit a periodic healthy line.
 
 config APP_VERBOSE_RUNTIME_LOGS
     bool "Enable verbose runtime flow logs"

@@ -22,8 +22,9 @@ static const char *TAG = "media_sink";
 #define MEDIA_SINK_AUDIO_QUEUE_LEN 32
 #define MEDIA_SINK_AUDIO_TASK_STACK (5 * 1024)
 /* Speaker playout is deadline-driven: one late 20ms packet is audible and
- * cannot be recovered by a deeper queue. Keep it ahead of video decode. */
-#define MEDIA_SINK_AUDIO_TASK_PRIORITY 17
+ * cannot be recovered by a deeper queue. Keep it ahead of the decode caller;
+ * the TinyH264 helper shares this priority so neither can starve the other. */
+#define MEDIA_SINK_AUDIO_TASK_PRIORITY APP_TASK_PRIORITY_AUDIO_PLAYBACK
 #define MEDIA_SINK_AUDIO_TASK_CORE APP_TASK_CORE_AUDIO
 #define MEDIA_SINK_AUDIO_PLAY_CHUNK_MS 20
 #define MEDIA_SINK_AUDIO_PCM_BUFFER_MS 1600

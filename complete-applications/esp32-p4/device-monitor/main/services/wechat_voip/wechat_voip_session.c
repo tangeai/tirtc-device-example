@@ -130,7 +130,7 @@ typedef struct
     voip_state_t state;
     tirtc_conn_t hconn;
     bool answer_pending;
-    TaskHandle_t answer_task;
+    TaskHandle_t answer_worker;
     bool work_busy;
     voip_work_type_t work_type;
     uint32_t work_queue_len;
@@ -156,6 +156,7 @@ static uint32_t s_session_generation;
 static bool s_answer_pending;
 static char s_answer_source[32];
 static uint32_t s_answer_delay_ms;
+static uint32_t s_answer_request_seq;
 static portMUX_TYPE s_work_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_work_busy;
 static voip_work_type_t s_work_type;
@@ -163,6 +164,7 @@ static int64_t s_last_status_warn_us;
 
 static void voip_work_task(void *arg);
 static esp_err_t ensure_work_worker(void);
+static esp_err_t start_answer_worker(void);
 static esp_err_t enqueue_work(const voip_work_item_t *item);
 static esp_err_t send_reject_info(const voip_reject_info_t *info, tirtc_voip_hangup_reason_t reason);
 static esp_err_t reject_info_later(const voip_reject_info_t *info, tirtc_voip_hangup_reason_t reason);
@@ -214,6 +216,7 @@ static void ensure_init(void)
     }
 
     (void)ensure_work_worker();
+    (void)start_answer_worker();
 }
 
 static void lock_session(void)
@@ -1283,98 +1286,129 @@ static esp_err_t answer_current_call(const char *source)
     return ESP_FAIL;
 }
 
-/* 每次入会创建一次接听任务,任务结束即删除,避免跨轮通话残留任务状态。 */
+/* 常驻接听 worker 的大栈只在 PSRAM 分配一次。每轮请求用序号隔离，
+ * 避免频繁创建任务造成碎片，也避免旧请求清理新一轮状态。 */
 static void answer_task(void *arg)
 {
     (void)arg;
-    ensure_init();
-
-    char source[sizeof(s_answer_source)];
-    uint32_t delay_ms = 0;
-    lock_session();
-    copy_str(source, sizeof(source), s_answer_source[0] ? s_answer_source : "界面接听");
-    delay_ms = s_answer_delay_ms;
-    unlock_session();
-
-    /* 主呼收到入会参数后立即 WHIP，成功后直接开媒体；被叫仍由
-     * 0x2000 确认接通，两种角色都由 0x2001 收口。 */
-    if (delay_ms > 0)
-    {
-        WX_VOIP_TRACEI(TAG, "接听任务等待房间稳定: source=%s delay=%ums", source, (unsigned)delay_ms);
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
-    }
-
-    esp_err_t ret = ESP_ERR_INVALID_STATE;
-    bool cancelled = false;
-    uint32_t attempts = 0;
     while (true)
     {
+        (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        char source[sizeof(s_answer_source)] = {0};
+        uint32_t delay_ms = 0;
+        uint32_t request_seq = 0;
+
         lock_session();
-        bool still_pending = s_answer_pending && s_session.state == VOIP_STATE_RINGING;
+        bool has_request = s_answer_pending && s_session.state == VOIP_STATE_RINGING;
+        if (has_request)
+        {
+            copy_str(source,
+                     sizeof(source),
+                     s_answer_source[0] ? s_answer_source : "界面接听");
+            delay_ms = s_answer_delay_ms;
+            request_seq = s_answer_request_seq;
+        }
+        unlock_session();
+
+        if (!has_request)
+        {
+            continue;
+        }
+
+        /* 主呼收到入会参数后立即 WHIP，成功后直接开媒体；被叫仍由
+         * 0x2000 确认接通，两种角色都由 0x2001 收口。 */
+        if (delay_ms > 0)
+        {
+            WX_VOIP_TRACEI(TAG,
+                           "接听任务等待房间稳定: source=%s delay=%ums",
+                           source,
+                           (unsigned)delay_ms);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        }
+
+        lock_session();
+        bool still_pending = s_answer_pending &&
+                             s_session.state == VOIP_STATE_RINGING &&
+                             s_answer_request_seq == request_seq;
         unlock_session();
         if (!still_pending)
         {
-            cancelled = true;
-            break;
+            WX_VOIP_TRACEI(TAG, "接听任务取消: source=%s seq=%u", source, (unsigned)request_seq);
+            continue;
         }
 
-        attempts++;
-        WX_VOIP_TRACEI(TAG, "接听任务开始: source=%s attempt=%u", source, (unsigned)attempts);
-        ret = answer_current_call(source);
-        if (ret != ESP_ERR_INVALID_STATE && ret != ESP_ERR_NO_MEM)
+        WX_VOIP_TRACEI(TAG,
+                       "接听任务开始: source=%s seq=%u",
+                       source,
+                       (unsigned)request_seq);
+        esp_err_t ret = answer_current_call(source);
+
+        bool retry_pending = false;
+        bool transient_wait = ret == ESP_ERR_INVALID_STATE || ret == ESP_ERR_NO_MEM;
+        lock_session();
+        if (s_answer_request_seq == request_seq)
         {
-            break;
+            if (transient_wait &&
+                s_answer_pending &&
+                s_session.state == VOIP_STATE_RINGING)
+            {
+                retry_pending = true;
+            }
+            else
+            {
+                s_answer_pending = false;
+                s_answer_source[0] = '\0';
+                s_answer_delay_ms = 0;
+            }
         }
+        unlock_session();
 
-        if (attempts == 1U)
+        if (ret == ESP_ERR_INVALID_STATE)
         {
-            ESP_LOGW(TAG,
-                     "%s,保留来电并等待重试",
-                     ret == ESP_ERR_NO_MEM ? "当前内存不足" : "当前 RTC 尚未就绪");
+            ESP_LOGW(TAG, "当前暂不能接听,等待来电或 RTC 就绪");
         }
-        vTaskDelay(pdMS_TO_TICKS(VOIP_ANSWER_RETRY_DELAY_MS));
-    }
+        else if (ret == ESP_ERR_NO_MEM)
+        {
+            ESP_LOGW(TAG, "当前内存不足,保留来电状态,请稍后再次接听");
+        }
+        if (retry_pending)
+        {
+            vTaskDelay(pdMS_TO_TICKS(VOIP_ANSWER_RETRY_DELAY_MS));
+            xTaskNotifyGive(xTaskGetCurrentTaskHandle());
+        }
 
-    lock_session();
-    s_answer_pending = false;
-    s_answer_source[0] = '\0';
-    s_answer_delay_ms = 0;
-    s_answer_worker_task = NULL;
-    unlock_session();
-
-    if (!cancelled && ret == ESP_ERR_INVALID_STATE)
-    {
-        ESP_LOGW(TAG, "当前暂不能接听,等待来电或 RTC 就绪");
+        WX_VOIP_TRACEI(TAG,
+                       "接听任务结束: seq=%u ret=%s stack_hwm=%u",
+                       (unsigned)request_seq,
+                       esp_err_to_name(ret),
+                       (unsigned)uxTaskGetStackHighWaterMark(NULL));
     }
-    else if (!cancelled && ret == ESP_ERR_NO_MEM)
-    {
-        ESP_LOGW(TAG, "当前内存不足,保留来电状态,请稍后再次接听");
-    }
-
-    WX_VOIP_TRACEI(TAG,
-                   "接听任务结束: ret=%s stack_hwm=%u",
-                   esp_err_to_name(ret),
-                   (unsigned)uxTaskGetStackHighWaterMark(NULL));
-    vTaskDeleteWithCaps(NULL);
 }
 
 static esp_err_t start_answer_worker(void)
 {
+    if (!lock_session_wait("创建接听 worker", 1000))
+    {
+        return ESP_ERR_TIMEOUT;
+    }
     if (s_answer_worker_task != NULL)
     {
-        return ESP_ERR_INVALID_STATE;
+        unlock_session();
+        return ESP_OK;
     }
 
+    TaskHandle_t worker = NULL;
     BaseType_t ret = xTaskCreateWithCaps(answer_task,
-                                         "wx_voip_answer",
-                                         VOIP_ANSWER_TASK_STACK,
-                                         NULL,
-                                         VOIP_ANSWER_TASK_PRIORITY,
-                                         &s_answer_worker_task,
-                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                                        "wx_voip_answer",
+                                        VOIP_ANSWER_TASK_STACK,
+                                        NULL,
+                                        VOIP_ANSWER_TASK_PRIORITY,
+                                        &worker,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ret != pdPASS)
     {
-        s_answer_worker_task = NULL;
+        unlock_session();
         ESP_LOGE(TAG,
                  "创建接听任务失败: stack=%u internal_free=%u internal_largest=%u psram_free=%u psram_largest=%u",
                  (unsigned)VOIP_ANSWER_TASK_STACK,
@@ -1385,6 +1419,12 @@ static esp_err_t start_answer_worker(void)
         return ESP_ERR_NO_MEM;
     }
 
+    s_answer_worker_task = worker;
+    unlock_session();
+    ESP_LOGI(TAG,
+             "微信接听 worker 已就绪: task=%p stack=%u caps=PSRAM",
+             worker,
+             (unsigned)VOIP_ANSWER_TASK_STACK);
     return ESP_OK;
 }
 
@@ -1397,11 +1437,18 @@ static esp_err_t start_answer_task(const char *source, uint32_t delay_ms)
     bool ringing = (s_session.state == VOIP_STATE_RINGING);
     bool pending = s_answer_pending;
     voip_state_t state = s_session.state;
+    uint32_t request_seq = s_answer_request_seq;
     if (ringing && !pending)
     {
         s_answer_pending = true;
         copy_str(s_answer_source, sizeof(s_answer_source), source ? source : "界面接听");
         s_answer_delay_ms = delay_ms;
+        s_answer_request_seq++;
+        if (s_answer_request_seq == 0U)
+        {
+            s_answer_request_seq = 1U;
+        }
+        request_seq = s_answer_request_seq;
     }
     unlock_session();
     if (!ringing)
@@ -1431,15 +1478,37 @@ static esp_err_t start_answer_task(const char *source, uint32_t delay_ms)
     {
         if (lock_session_wait("回滚接听任务状态", 1000))
         {
-            s_answer_pending = false;
-            s_answer_source[0] = '\0';
-            s_answer_delay_ms = 0;
+            if (s_answer_request_seq == request_seq)
+            {
+                s_answer_pending = false;
+                s_answer_source[0] = '\0';
+                s_answer_delay_ms = 0;
+            }
             unlock_session();
         }
         return worker_ret;
     }
 
-    ESP_LOGD(TAG, "接听任务已创建");
+    lock_session();
+    TaskHandle_t worker = s_answer_worker_task;
+    unlock_session();
+    if (worker == NULL)
+    {
+        if (lock_session_wait("回滚接听任务状态", 1000))
+        {
+            if (s_answer_request_seq == request_seq)
+            {
+                s_answer_pending = false;
+                s_answer_source[0] = '\0';
+                s_answer_delay_ms = 0;
+            }
+            unlock_session();
+        }
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xTaskNotifyGive(worker);
+    ESP_LOGD(TAG, "接听 worker 已唤醒: seq=%u", (unsigned)request_seq);
     return ESP_OK;
 }
 
@@ -1752,7 +1821,7 @@ static void collect_status(voip_status_t *status)
     status->state = s_session.state;
     status->hconn = s_session.hconn;
     status->answer_pending = s_answer_pending;
-    status->answer_task = s_answer_worker_task;
+    status->answer_worker = s_answer_worker_task;
     status->deadline_left_ms = s_session.deadline_us > 0 ? (s_session.deadline_us - now_us) / 1000 : 0;
     status->last_close_ago_ms = s_last_close_us > 0 ? (now_us - s_last_close_us) / 1000 : -1;
     unlock_session();
@@ -1773,11 +1842,12 @@ static void collect_status(voip_status_t *status)
 
 static bool status_ready_for_next_call(const voip_status_t *status)
 {
+    /* answer_worker is permanent infrastructure. Only answer_pending belongs
+     * to a call generation and participates in the release barrier. */
     return status != NULL &&
            status->state == VOIP_STATE_IDLE &&
            status->hconn == NULL &&
            !status->answer_pending &&
-           status->answer_task == NULL &&
            !status->work_busy &&
            status->work_queue_len == 0 &&
            !status->media_running &&
@@ -1800,7 +1870,6 @@ static bool status_available_for_ringing(const voip_status_t *status)
            status->state == VOIP_STATE_IDLE &&
            status->hconn == NULL &&
            !status->answer_pending &&
-           status->answer_task == NULL &&
            !status->work_busy &&
            status->work_queue_len == 0 &&
            !status->media_running &&
@@ -1819,7 +1888,6 @@ static bool status_resources_released(const voip_status_t *status)
            status->state == VOIP_STATE_IDLE &&
            status->hconn == NULL &&
            !status->answer_pending &&
-           status->answer_task == NULL &&
            !status->work_busy &&
            status->work_queue_len == 0 &&
            !status->media_running &&
@@ -1836,7 +1904,6 @@ static bool status_local_resources_released(const voip_status_t *status)
            status->state == VOIP_STATE_IDLE &&
            status->hconn == NULL &&
            !status->answer_pending &&
-           status->answer_task == NULL &&
            !status->work_busy &&
            status->work_queue_len == 0 &&
            !status->media_running;
@@ -1852,14 +1919,14 @@ static void log_status(const char *reason, const voip_status_t *status, bool war
     if (warning)
     {
         ESP_LOGW(TAG,
-                 "通话资源%s: %s state=%s hconn=%p answer_task=%p answer_pending=%d "
+                 "通话资源%s: %s state=%s hconn=%p answer_worker=%p answer_pending=%d "
                  "work_busy=%d work=%s workq=%u media=%d media_tx=%llu drop=%lu fail=%lu "
                  "rtc=%u/%d/%d deadline=%lldms last_close=%lldms",
                  status_ready_for_next_call(status) ? "已就绪" : "未就绪",
                  reason ? reason : "状态检查",
                  state_name(status->state),
                  status->hconn,
-                 status->answer_task,
+                 status->answer_worker,
                  status->answer_pending ? 1 : 0,
                  status->work_busy ? 1 : 0,
                  work_type_name(status->work_type),
@@ -1878,14 +1945,14 @@ static void log_status(const char *reason, const voip_status_t *status, bool war
 
     WX_VOIP_TRACEI(
         TAG,
-        "通话资源%s: %s state=%s hconn=%p answer_task=%p answer_pending=%d "
+        "通话资源%s: %s state=%s hconn=%p answer_worker=%p answer_pending=%d "
         "work_busy=%d work=%s workq=%u media=%d media_tx=%llu drop=%lu fail=%lu "
         "rtc=%u/%d/%d deadline=%lldms last_close=%lldms",
         status_ready_for_next_call(status) ? "已就绪" : "未就绪",
         reason ? reason : "状态检查",
         state_name(status->state),
         status->hconn,
-        status->answer_task,
+        status->answer_worker,
         status->answer_pending ? 1 : 0,
         status->work_busy ? 1 : 0,
         work_type_name(status->work_type),

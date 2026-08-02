@@ -9,113 +9,62 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
+#include "media_tuning.h"
+
 static const char *TAG = "media_governor";
 
-#define MEDIA_GOVERNOR_CAPTURE_WIDTH 1280U
-#define MEDIA_GOVERNOR_CAPTURE_HEIGHT 960U
-#define MEDIA_GOVERNOR_FULL_WIDTH 1280U
-#define MEDIA_GOVERNOR_FULL_HEIGHT 960U
-
-#ifndef CONFIG_APP_RTC_H264_FPS
-#define CONFIG_APP_RTC_H264_FPS 20U
-#endif
-
-#define MEDIA_GOVERNOR_FULL_FPS CONFIG_APP_RTC_H264_FPS
-
-#ifndef CONFIG_APP_RTC_H264_OUTPUT_BUFFER_BYTES
-#define CONFIG_APP_RTC_H264_OUTPUT_BUFFER_BYTES (1024U * 1024U)
-#endif
-
-#ifndef CONFIG_APP_RTC_H264_BITRATE
-#define CONFIG_APP_RTC_H264_BITRATE 4000000U
-#endif
-
-#ifndef CONFIG_APP_RTC_H264_MAX_DELTA_PAYLOAD_BYTES
-#define CONFIG_APP_RTC_H264_MAX_DELTA_PAYLOAD_BYTES (128U * 1024U)
-#endif
-
-#ifndef CONFIG_APP_DEVICE_CALL_VIDEO_WIDTH
-#define CONFIG_APP_DEVICE_CALL_VIDEO_WIDTH 480U
-#endif
-
-#ifndef CONFIG_APP_DEVICE_CALL_VIDEO_HEIGHT
-#define CONFIG_APP_DEVICE_CALL_VIDEO_HEIGHT 320U
-#endif
-
-#ifndef CONFIG_APP_DEVICE_CALL_VIDEO_FPS
-#define CONFIG_APP_DEVICE_CALL_VIDEO_FPS 20U
-#endif
-
-#ifndef CONFIG_APP_DEVICE_CALL_VIDEO_BITRATE
-#define CONFIG_APP_DEVICE_CALL_VIDEO_BITRATE 800000U
-#endif
-
-#ifndef CONFIG_APP_RTC_H264_MIN_QP
-#define CONFIG_APP_RTC_H264_MIN_QP 34U
-#endif
-
-#ifndef CONFIG_APP_RTC_H264_MAX_QP
-#define CONFIG_APP_RTC_H264_MAX_QP 45U
-#endif
-
-#ifndef CONFIG_APP_DEVICE_CALL_VIDEO_MIN_QP
-#define CONFIG_APP_DEVICE_CALL_VIDEO_MIN_QP 22U
-#endif
-
-#ifndef CONFIG_APP_DEVICE_CALL_VIDEO_MAX_QP
-#define CONFIG_APP_DEVICE_CALL_VIDEO_MAX_QP 40U
-#endif
+#define MEDIA_GOVERNOR_CAPTURE_WIDTH APP_MEDIA_CAMERA_CAPTURE_WIDTH
+#define MEDIA_GOVERNOR_CAPTURE_HEIGHT APP_MEDIA_CAMERA_CAPTURE_HEIGHT
+#define MEDIA_GOVERNOR_FULL_WIDTH APP_MEDIA_RTC_VIDEO_WIDTH
+#define MEDIA_GOVERNOR_FULL_HEIGHT APP_MEDIA_RTC_VIDEO_HEIGHT
 
 #ifndef CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE
 #define CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE 0
 #endif
 
-#ifndef CONFIG_APP_RTC_TRANSPORT_BACKPRESSURE_HOLD_MS
-#define CONFIG_APP_RTC_TRANSPORT_BACKPRESSURE_HOLD_MS 80
-#endif
-
-#define MEDIA_GOVERNOR_BACKPRESSURE_HOLD_MS CONFIG_APP_RTC_TRANSPORT_BACKPRESSURE_HOLD_MS
+#define MEDIA_GOVERNOR_FULL_FPS APP_MEDIA_RTC_H264_FPS
+#define MEDIA_GOVERNOR_BACKPRESSURE_HOLD_MS APP_MEDIA_TRANSPORT_BACKPRESSURE_HOLD_MS
 #define MEDIA_GOVERNOR_BACKPRESSURE_LOG_INTERVAL_MS 5000U
-#define MEDIA_GOVERNOR_AUTO_DEGRADE_SAMPLES 2U
-#define MEDIA_GOVERNOR_AUTO_RECOVER_SAMPLES 6U
-#define MEDIA_GOVERNOR_AUTO_COOLDOWN_MS 10000U
-#define MEDIA_GOVERNOR_AUTO_PRESSURE_BUFFER_PCT 8U
-#define MEDIA_GOVERNOR_AUTO_SEVERE_BUFFER_PCT 25U
-#define MEDIA_GOVERNOR_AUTO_HEALTHY_BUFFER_PCT 2U
-#define MEDIA_GOVERNOR_AUTO_PRESSURE_QUEUE_DEPTH 2U
-#define MEDIA_GOVERNOR_AUTO_SEVERE_QUEUE_DEPTH 4U
+#define MEDIA_GOVERNOR_AUTO_DEGRADE_SAMPLES APP_MEDIA_AUTO_DEGRADE_SAMPLES
+#define MEDIA_GOVERNOR_AUTO_RECOVER_SAMPLES APP_MEDIA_AUTO_RECOVER_SAMPLES
+#define MEDIA_GOVERNOR_AUTO_COOLDOWN_MS APP_MEDIA_AUTO_COOLDOWN_MS
+#define MEDIA_GOVERNOR_AUTO_PRESSURE_BUFFER_PCT APP_MEDIA_AUTO_PRESSURE_BUFFER_PCT
+#define MEDIA_GOVERNOR_AUTO_SEVERE_BUFFER_PCT APP_MEDIA_AUTO_SEVERE_BUFFER_PCT
+#define MEDIA_GOVERNOR_AUTO_HEALTHY_BUFFER_PCT APP_MEDIA_AUTO_HEALTHY_BUFFER_PCT
+#define MEDIA_GOVERNOR_AUTO_PRESSURE_QUEUE_DEPTH APP_MEDIA_AUTO_PRESSURE_QUEUE_DEPTH
+#define MEDIA_GOVERNOR_AUTO_SEVERE_QUEUE_DEPTH APP_MEDIA_AUTO_SEVERE_QUEUE_DEPTH
 #define MEDIA_GOVERNOR_VIDEO_MIN_BITRATE_BPS (200U * 1000U)
 #define MEDIA_GOVERNOR_TRANSPORT_COMPACT_MAX_PIXELS (640U * 480U)
 /* 480x320 calls can remain decodable at 200 kbps. Keeping this floor at one
  * quarter of the 800 kbps normal target gives TGMP room to preserve
  * continuity on cellular uplinks before any resolution/fps policy is enabled. */
-#define MEDIA_GOVERNOR_TRANSPORT_COMPACT_MIN_BITRATE_BPS (200U * 1000U)
-#define MEDIA_GOVERNOR_TRANSPORT_LARGE_MIN_BITRATE_BPS (750U * 1000U)
-#define MEDIA_GOVERNOR_TRANSPORT_MIN_RATIO_DIVISOR 4U
-#define MEDIA_GOVERNOR_TRANSPORT_MIN_STEP_BPS (16U * 1000U)
-#define MEDIA_GOVERNOR_TRANSPORT_MIN_STEP_PERCENT 10U
+#define MEDIA_GOVERNOR_TRANSPORT_COMPACT_MIN_BITRATE_BPS APP_MEDIA_TGMP_COMPACT_MIN_BITRATE_BPS
+#define MEDIA_GOVERNOR_TRANSPORT_LARGE_MIN_BITRATE_BPS APP_MEDIA_TGMP_LARGE_MIN_BITRATE_BPS
+#define MEDIA_GOVERNOR_TRANSPORT_MIN_RATIO_DIVISOR APP_MEDIA_TGMP_MIN_RATIO_DIVISOR
+#define MEDIA_GOVERNOR_TRANSPORT_MIN_STEP_BPS APP_MEDIA_TGMP_MIN_STEP_BPS
+#define MEDIA_GOVERNOR_TRANSPORT_MIN_STEP_PERCENT APP_MEDIA_TGMP_MIN_STEP_PERCENT
 /*
  * TGMP owns the target bitrate once feedback is available. Preserve urgent
  * downshifts, but rate-limit ordinary encoder reconfiguration and make quality
  * recovery deliberately slower than congestion protection.
  */
-#define MEDIA_GOVERNOR_TRANSPORT_PROTECTION_INTERVAL_MS 1000U
-#define MEDIA_GOVERNOR_TRANSPORT_EMERGENCY_DROP_PERCENT 25U
-#define MEDIA_GOVERNOR_TRANSPORT_RECOVERY_HOLD_MS 5000U
-#define MEDIA_GOVERNOR_TRANSPORT_RECOVERY_INTERVAL_MS 3000U
-#define MEDIA_GOVERNOR_TRANSPORT_RECOVERY_STEP_PERCENT 15U
-#define MEDIA_GOVERNOR_TRANSPORT_RECOVERY_MIN_STEP_BPS (64U * 1000U)
+#define MEDIA_GOVERNOR_TRANSPORT_PROTECTION_INTERVAL_MS APP_MEDIA_TGMP_PROTECTION_INTERVAL_MS
+#define MEDIA_GOVERNOR_TRANSPORT_EMERGENCY_DROP_PERCENT APP_MEDIA_TGMP_EMERGENCY_DROP_PERCENT
+#define MEDIA_GOVERNOR_TRANSPORT_RECOVERY_HOLD_MS APP_MEDIA_TGMP_RECOVERY_HOLD_MS
+#define MEDIA_GOVERNOR_TRANSPORT_RECOVERY_INTERVAL_MS APP_MEDIA_TGMP_RECOVERY_INTERVAL_MS
+#define MEDIA_GOVERNOR_TRANSPORT_RECOVERY_STEP_PERCENT APP_MEDIA_TGMP_RECOVERY_STEP_PERCENT
+#define MEDIA_GOVERNOR_TRANSPORT_RECOVERY_MIN_STEP_BPS APP_MEDIA_TGMP_RECOVERY_MIN_STEP_BPS
 
 #define MEDIA_GOVERNOR_FULL_VIDEO_CONFIG_INIT \
     { \
         .width = MEDIA_GOVERNOR_FULL_WIDTH, \
         .height = MEDIA_GOVERNOR_FULL_HEIGHT, \
         .fps = MEDIA_GOVERNOR_FULL_FPS, \
-        .bitrate_bps = CONFIG_APP_RTC_H264_BITRATE, \
+        .bitrate_bps = APP_MEDIA_RTC_H264_BITRATE_BPS, \
         .weak_network_mode = MEDIA_GOVERNOR_WEAK_NETWORK_OFF, \
         .weak_network_level = 0, \
-        .h264_min_qp = CONFIG_APP_RTC_H264_MIN_QP, \
-        .h264_max_qp = CONFIG_APP_RTC_H264_MAX_QP, \
+        .h264_min_qp = APP_MEDIA_RTC_H264_MIN_QP, \
+        .h264_max_qp = APP_MEDIA_RTC_H264_MAX_QP, \
     }
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -144,8 +93,8 @@ static const media_governor_camera_policy_t s_policy_idle = {
     .rtc_width = 480,
     .rtc_height = 360,
     .h264_bitrate_bps = 800U * 1000U,
-    .h264_min_qp = CONFIG_APP_RTC_H264_MIN_QP,
-    .h264_max_qp = CONFIG_APP_RTC_H264_MAX_QP,
+    .h264_min_qp = APP_MEDIA_RTC_H264_MIN_QP,
+    .h264_max_qp = APP_MEDIA_RTC_H264_MAX_QP,
     .h264_output_buffer_bytes = 512U * 1024U,
     .h264_max_delta_payload_bytes = 96U * 1024U,
     .dma_free_min_bytes = 24U * 1024U,
@@ -194,14 +143,14 @@ static media_governor_camera_policy_t media_governor_make_rtc_av_policy(const me
         safe_config.fps = MEDIA_GOVERNOR_FULL_FPS;
     }
     if (safe_config.bitrate_bps == 0U) {
-        safe_config.bitrate_bps = CONFIG_APP_RTC_H264_BITRATE;
+        safe_config.bitrate_bps = APP_MEDIA_RTC_H264_BITRATE_BPS;
     }
     if (safe_config.h264_min_qp < 10U || safe_config.h264_min_qp > 51U) {
-        safe_config.h264_min_qp = CONFIG_APP_RTC_H264_MIN_QP;
+        safe_config.h264_min_qp = APP_MEDIA_RTC_H264_MIN_QP;
     }
     if (safe_config.h264_max_qp < safe_config.h264_min_qp ||
         safe_config.h264_max_qp > 51U) {
-        safe_config.h264_max_qp = CONFIG_APP_RTC_H264_MAX_QP;
+        safe_config.h264_max_qp = APP_MEDIA_RTC_H264_MAX_QP;
         if (safe_config.h264_max_qp < safe_config.h264_min_qp) {
             safe_config.h264_max_qp = safe_config.h264_min_qp;
         }
@@ -218,8 +167,8 @@ static media_governor_camera_policy_t media_governor_make_rtc_av_policy(const me
         .h264_bitrate_bps = safe_config.bitrate_bps,
         .h264_min_qp = safe_config.h264_min_qp,
         .h264_max_qp = safe_config.h264_max_qp,
-        .h264_output_buffer_bytes = CONFIG_APP_RTC_H264_OUTPUT_BUFFER_BYTES,
-        .h264_max_delta_payload_bytes = CONFIG_APP_RTC_H264_MAX_DELTA_PAYLOAD_BYTES,
+        .h264_output_buffer_bytes = APP_MEDIA_H264_OUTPUT_BUFFER_BYTES,
+        .h264_max_delta_payload_bytes = APP_MEDIA_H264_MAX_DELTA_PAYLOAD_BYTES,
         .dma_free_min_bytes = 8U * 1024U,
         .dma_largest_min_bytes = 4U * 1024U,
     };
@@ -357,11 +306,11 @@ static media_governor_video_config_t media_governor_normalize_video_config(const
         normalized.weak_network_level = 3U;
     }
     if (normalized.h264_min_qp < 10U || normalized.h264_min_qp > 51U) {
-        normalized.h264_min_qp = CONFIG_APP_RTC_H264_MIN_QP;
+        normalized.h264_min_qp = APP_MEDIA_RTC_H264_MIN_QP;
     }
     if (normalized.h264_max_qp < normalized.h264_min_qp ||
         normalized.h264_max_qp > 51U) {
-        normalized.h264_max_qp = CONFIG_APP_RTC_H264_MAX_QP;
+        normalized.h264_max_qp = APP_MEDIA_RTC_H264_MAX_QP;
         if (normalized.h264_max_qp < normalized.h264_min_qp) {
             normalized.h264_max_qp = normalized.h264_min_qp;
         }
@@ -431,16 +380,16 @@ void media_governor_build_device_call_video_config(media_governor_video_config_t
     }
 
     *config = (media_governor_video_config_t) {
-        .width = CONFIG_APP_DEVICE_CALL_VIDEO_WIDTH,
-        .height = CONFIG_APP_DEVICE_CALL_VIDEO_HEIGHT,
-        .fps = CONFIG_APP_DEVICE_CALL_VIDEO_FPS,
-        .bitrate_bps = CONFIG_APP_DEVICE_CALL_VIDEO_BITRATE,
+        .width = APP_MEDIA_CALL_VIDEO_WIDTH,
+        .height = APP_MEDIA_CALL_VIDEO_HEIGHT,
+        .fps = APP_MEDIA_CALL_VIDEO_FPS,
+        .bitrate_bps = APP_MEDIA_CALL_VIDEO_BITRATE_BPS,
         .weak_network_mode = CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE ?
                                  MEDIA_GOVERNOR_WEAK_NETWORK_RESOLUTION_PRIORITY :
                                  MEDIA_GOVERNOR_WEAK_NETWORK_OFF,
         .weak_network_level = 0U,
-        .h264_min_qp = CONFIG_APP_DEVICE_CALL_VIDEO_MIN_QP,
-        .h264_max_qp = CONFIG_APP_DEVICE_CALL_VIDEO_MAX_QP,
+        .h264_min_qp = APP_MEDIA_CALL_VIDEO_MIN_QP,
+        .h264_max_qp = APP_MEDIA_CALL_VIDEO_MAX_QP,
     };
 }
 

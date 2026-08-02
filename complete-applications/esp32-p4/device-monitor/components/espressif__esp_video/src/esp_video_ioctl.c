@@ -195,6 +195,7 @@ static esp_err_t esp_video_ioctl_dqbuf(struct esp_video *video, struct v4l2_buff
 
     vbuf->flags     = 0;
     vbuf->index     = element->index;
+    vbuf->sequence  = element->sequence;
     vbuf->bytesused = element->valid_size;
     if (!vbuf->bytesused) {
         vbuf->flags |= V4L2_BUF_FLAG_ERROR;

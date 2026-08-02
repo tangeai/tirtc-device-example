@@ -26,6 +26,7 @@
 #include "app_config.h"
 #include "app_internal.h"
 #include "app_log_policy.h"
+#include "app_memory_policy.h"
 #include "app_rtc_config.h"
 #include "app_ui.h"
 #include "app_task_affinity.h"
@@ -98,6 +99,7 @@ static void *app_calloc_psram(size_t count, size_t size)
 #define APP_LIFECYCLE_TASK_PRIORITY   4
 #define APP_LIFECYCLE_QUEUE_LENGTH    4
 #define APP_MEDIA_HEALTH_INTERVAL_MS  5000U
+#define APP_MEMORY_WATERLINE_INTERVAL_MS 10000U
 #define APP_RTC_VIDEO_ADAPT_INTERVAL_MS 1000U
 #define APP_RUNTIME_SNAPSHOT_INTERVAL_MS 10000U
 #define APP_RUNTIME_MONITOR_TASK_STACK_SIZE 4096
@@ -161,9 +163,15 @@ static QueueHandle_t s_app_control_queue;
 static TaskHandle_t s_app_control_task;
 static QueueHandle_t s_app_lifecycle_queue;
 static TaskHandle_t s_app_lifecycle_task;
-#if CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG || CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS || \
+#if CONFIG_APP_MEMORY_WATERLINE_LOG || CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG || \
+	CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS || \
 	CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE || CONFIG_APP_RTC_SDK_VIDEO_ADAPT_ENABLE
 static TaskHandle_t s_app_runtime_monitor_task;
+#endif
+#if CONFIG_APP_MEMORY_WATERLINE_LOG
+static bool s_memory_health_valid;
+static app_memory_health_t s_memory_health;
+static uint32_t s_memory_psram_alloc_failures;
 #endif
 static app_id_t s_active_app = APP_ID_HOME;
 static uint32_t s_active_resources;
@@ -246,6 +254,76 @@ static void app_log_heap_snapshot(const char *stage)
 	(void)stage;
 #endif
 }
+
+#if CONFIG_APP_MEMORY_WATERLINE_LOG
+static void app_monitor_memory_health(bool force_log)
+{
+	app_memory_snapshot_t memory = {0};
+	app_memory_health_t health;
+	bool health_changed;
+	bool allocation_failed;
+	const char *event;
+
+	app_memory_get_snapshot(&memory);
+	health = app_memory_classify(&memory);
+	health_changed = s_memory_health_valid && health != s_memory_health;
+	allocation_failed = s_memory_health_valid &&
+		memory.psram_alloc_failures != s_memory_psram_alloc_failures;
+
+	if (!force_log && s_memory_health_valid && !health_changed && !allocation_failed) {
+		return;
+	}
+
+	if (!s_memory_health_valid) {
+		event = "baseline";
+	} else if (health_changed && health == APP_MEMORY_HEALTH_NORMAL) {
+		event = "recovered";
+	} else if (health_changed) {
+		event = "pressure";
+	} else {
+		event = "allocation-failure";
+	}
+
+	if (health == APP_MEMORY_HEALTH_CRITICAL) {
+		ESP_LOGE(TAG,
+			 "memory waterline: event=%s level=%s internal=%uK largest=%uK min=%uK psram=%uK largest=%uK failures=%u",
+			 event,
+			 app_memory_health_name(health),
+			 (unsigned)(memory.internal_free / 1024U),
+			 (unsigned)(memory.internal_largest / 1024U),
+			 (unsigned)(memory.internal_min_free / 1024U),
+			 (unsigned)(memory.psram_free / 1024U),
+			 (unsigned)(memory.psram_largest / 1024U),
+			 (unsigned)memory.psram_alloc_failures);
+	} else if (health == APP_MEMORY_HEALTH_WARNING || allocation_failed) {
+		ESP_LOGW(TAG,
+			 "memory waterline: event=%s level=%s internal=%uK largest=%uK min=%uK psram=%uK largest=%uK failures=%u",
+			 event,
+			 app_memory_health_name(health),
+			 (unsigned)(memory.internal_free / 1024U),
+			 (unsigned)(memory.internal_largest / 1024U),
+			 (unsigned)(memory.internal_min_free / 1024U),
+			 (unsigned)(memory.psram_free / 1024U),
+			 (unsigned)(memory.psram_largest / 1024U),
+			 (unsigned)memory.psram_alloc_failures);
+	} else {
+		ESP_LOGI(TAG,
+			 "memory waterline: event=%s level=%s internal=%uK largest=%uK min=%uK psram=%uK largest=%uK failures=%u",
+			 event,
+			 app_memory_health_name(health),
+			 (unsigned)(memory.internal_free / 1024U),
+			 (unsigned)(memory.internal_largest / 1024U),
+			 (unsigned)(memory.internal_min_free / 1024U),
+			 (unsigned)(memory.psram_free / 1024U),
+			 (unsigned)(memory.psram_largest / 1024U),
+			 (unsigned)memory.psram_alloc_failures);
+	}
+
+	s_memory_health = health;
+	s_memory_psram_alloc_failures = memory.psram_alloc_failures;
+	s_memory_health_valid = true;
+}
+#endif
 
 #if CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG || CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE
 typedef struct {
@@ -3048,10 +3126,11 @@ esp_err_t app_acquire_call_session_resources(bool video)
 	 */
 	app_set_rtc_media_prepared(true);
 
-	if (video && !s_call_resources.video_renderer_started) {
+	if (video) {
 		/* The decoder owns unavoidable internal RAM. Start it while the normal
-		 * H264 encoder reservation still protects its large contiguous block;
-		 * large frame pools were already reserved in PSRAM at boot. */
+		 * H264 encoder reservation still protects its large contiguous block.
+		 * Calling start for every generation is also the health gate for a warm
+		 * renderer: a quarantined decoder must fail before signalling begins. */
 		ret = call_video_renderer_start_for_codec(CALL_VIDEO_CODEC_H264);
 		if (ret != ESP_OK) {
 			ESP_LOGE(TAG, "start H264 call downlink failed: %s", esp_err_to_name(ret));
@@ -3516,12 +3595,16 @@ esp_err_t app_init(void)
 #endif
 
 	app_log_heap_snapshot("system ready");
+#if CONFIG_APP_MEMORY_WATERLINE_LOG
+	app_monitor_memory_health(true);
+#endif
 	app_log_performance_profile();
 	ESP_LOGI(TAG, "system ready: ESP32-P4 TiRTC dashboard");
 	return ESP_OK;
 }
 
-#if CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG || CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS || \
+#if CONFIG_APP_MEMORY_WATERLINE_LOG || CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG || \
+	CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS || \
 	CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE || CONFIG_APP_RTC_SDK_VIDEO_ADAPT_ENABLE
 static void app_step_rtc_video_transport_adaptation(void)
 {
@@ -3553,11 +3636,14 @@ static void app_runtime_monitor_loop(void)
 #if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
 	TickType_t last_runtime_snapshot_tick = last_wake_tick;
 #endif
+#if CONFIG_APP_MEMORY_WATERLINE_LOG
+	TickType_t last_memory_waterline_tick = last_wake_tick;
+#endif
 
 	while (true) {
 		vTaskDelayUntil(&last_wake_tick, monitor_interval_ticks);
-#if CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG || CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE || \
-	CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
+#if CONFIG_APP_MEMORY_WATERLINE_LOG || CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG || \
+	CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE || CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
 		const TickType_t now = xTaskGetTickCount();
 #endif
 
@@ -3582,6 +3668,13 @@ static void app_runtime_monitor_loop(void)
 			app_log_runtime_snapshot();
 		}
 #endif
+#if CONFIG_APP_MEMORY_WATERLINE_LOG
+		if (now - last_memory_waterline_tick >=
+		    pdMS_TO_TICKS(APP_MEMORY_WATERLINE_INTERVAL_MS)) {
+			last_memory_waterline_tick = now;
+			app_monitor_memory_health(false);
+		}
+#endif
 	}
 }
 
@@ -3594,9 +3687,10 @@ static void app_runtime_monitor_task(void *arg)
 
 void app_run(void)
 {
-#if !CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG && !CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS && \
+#if !CONFIG_APP_MEMORY_WATERLINE_LOG && !CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG && \
+	!CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS && \
 	!CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE && !CONFIG_APP_RTC_SDK_VIDEO_ADAPT_ENABLE
-	ESP_LOGI(TAG, "periodic media diagnostics disabled; main task can exit");
+	APP_LOG_DETAIL(TAG, "runtime monitor disabled; main task can exit");
 	return;
 #else
 	if (s_app_runtime_monitor_task != NULL) {
@@ -3611,7 +3705,7 @@ void app_run(void)
 						  &s_app_runtime_monitor_task,
 						  APP_TASK_STACK_CAPS_BACKGROUND);
 	if (task_ret != pdPASS) {
-		ESP_LOGE(TAG, "media monitor task start failed; keeping main task alive");
+		ESP_LOGE(TAG, "runtime monitor task start failed; keeping main task alive");
 		app_runtime_monitor_loop();
 	}
 

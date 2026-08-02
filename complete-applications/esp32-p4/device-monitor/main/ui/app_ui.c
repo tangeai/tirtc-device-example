@@ -10,7 +10,10 @@
 #include "freertos/task.h"
 
 #include "app.h"
+#include "app_memory_policy.h"
 #include "app_task_affinity.h"
+
+#define APP_UI_MEMORY_SNAPSHOT_PERIOD_MS 1000U
 
 static const char *TAG = "app_ui";
 static portMUX_TYPE s_contact_scan_stop_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -20,6 +23,45 @@ static bool s_tirtc_config_scan_stop_task_running;
 static portMUX_TYPE s_wechat_contact_scan_stop_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_wechat_contact_scan_stop_task_running;
 static app_snapshot_t *s_display_snapshot;
+static app_memory_snapshot_t s_display_memory_snapshot;
+static TickType_t s_display_memory_snapshot_tick;
+static bool s_display_memory_snapshot_valid;
+
+static display_memory_health_t app_ui_memory_health(app_memory_health_t health)
+{
+    switch (health) {
+    case APP_MEMORY_HEALTH_WARNING:
+        return DISPLAY_MEMORY_HEALTH_WARNING;
+    case APP_MEMORY_HEALTH_CRITICAL:
+        return DISPLAY_MEMORY_HEALTH_CRITICAL;
+    case APP_MEMORY_HEALTH_NORMAL:
+    default:
+        return DISPLAY_MEMORY_HEALTH_NORMAL;
+    }
+}
+
+static void app_ui_fill_memory_status(display_status_t *status)
+{
+    TickType_t now;
+
+    if (status == NULL) {
+        return;
+    }
+
+    now = xTaskGetTickCount();
+    if (!s_display_memory_snapshot_valid ||
+        now - s_display_memory_snapshot_tick >=
+            pdMS_TO_TICKS(APP_UI_MEMORY_SNAPSHOT_PERIOD_MS)) {
+        app_memory_get_snapshot(&s_display_memory_snapshot);
+        s_display_memory_snapshot_tick = now;
+        s_display_memory_snapshot_valid = true;
+    }
+
+    status->memory_internal_free = s_display_memory_snapshot.internal_free;
+    status->memory_internal_largest = s_display_memory_snapshot.internal_largest;
+    status->memory_health =
+        app_ui_memory_health(app_memory_classify(&s_display_memory_snapshot));
+}
 
 static BaseType_t app_ui_create_background_task(TaskFunction_t task_func,
                                                 const char *name,
@@ -761,6 +803,7 @@ void app_ui_fill_display_status(display_status_t *status, void *ctx)
     strlcpy(status->device_uuid, snapshot->device.uuid, sizeof(status->device_uuid));
     status->cpu_usage_percent = snapshot->device.cpu_usage_percent;
     status->device_door_open = snapshot->device.door_open;
+    app_ui_fill_memory_status(status);
 
     status->rtc_connected = snapshot->rtc.connected;
     status->rtc_call_active = snapshot->rtc.call_active;

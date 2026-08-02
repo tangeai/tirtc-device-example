@@ -8,13 +8,13 @@ P4+C6 前置检查、构建、烧录、首次联网和基础功能确认。项�
 
 | 项目 | 本版本要求 |
 | --- | --- |
-| 应用 | TiRTC ESP32-P4 完整设备应用 `1.3.0` |
+| 应用 | TiRTC ESP32-P4 完整设备应用 `1.3.1` |
 | 目标板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |
 | 主芯片 | ESP32-P4 |
 | 网络芯片 | ESP32-C6，运行 ESP-Hosted slave |
 | P4 与 C6 链路 | 4-bit、40 MHz SDIO |
 | ESP-IDF | `5.5.4` |
-| TiRTC SDK | `2.3.0` ESP32-P4 test package |
+| TiRTC SDK | `2.3.0` ESP32-P4 定制兼容快照 |
 | Flash | `16MB` |
 | 网络 | 2.4 GHz Wi-Fi，可访问 TiRTC/ThingConnect 服务 |
 | 交付形式 | 源码；本版本没有可直接下载的 P4 APP BIN |
@@ -44,7 +44,7 @@ P4 负责 UI、摄像头、音频、编解码和 TiRTC 应用；C6 只负责 Wi-
 ```powershell
 git clone https://github.com/tangeai/tirtc-device-example.git
 cd tirtc-device-example
-git checkout tirtc-device-examples-v2026.07.31
+git checkout tirtc-device-examples-v2026.08.02
 cd complete-applications/esp32-p4/device-monitor
 ```
 
@@ -56,7 +56,8 @@ Select-String -Path CMakeLists.txt -Pattern 'PROJECT_VER'
 Select-String -Path components/tirtc_sdk/include/tiRTC.h -Pattern 'TIRTC_VERSION_'
 ```
 
-预期应用版本为 `1.3.0`，TiRTC SDK 为 `2.3.0`。更完整的 commit 和哈希见
+预期应用版本为 `1.3.1`，TiRTC SDK API 版本为 `2.3.0`。本项目使用包含 HTTP DNS disable
+回移的 ESP32-P4 定制兼容快照，不能只看版本号替换静态库。完整 commit 和哈希见
 [VERSION.md](../VERSION.md)。
 
 ## 4. 安装并进入 ESP-IDF 5.5.4
@@ -180,7 +181,7 @@ Windows 端口示例为 `COM7`，Linux 示例为 `/dev/ttyACM0`；请使用电�
 复位后先看固件身份：
 
 ```text
-firmware version: 1.3.0 project=tirtc_esp32p4_device_app ...
+firmware version: 1.3.1 project=tirtc_esp32p4_device_app ...
 system ready: ESP32-P4 TiRTC dashboard
 ```
 
@@ -236,15 +237,78 @@ binding verification code ready: mqtt subscribed
 
 验证视频时按当前工程参数判断，不要混用方向：
 
-- IPC 的 P4 上行是 `1280x960@20fps`、`4Mbps` H264。
-- 设备呼叫和微信 VoIP 的 P4 上行是 `480x320@15fps`、`800kbps` 起始 H264。
+- IPC 的 P4 上行是 `1280x960@20fps`、`4Mbps` H264，GOP 为 `40` 帧 / `2s`。
+- 设备呼叫和微信 VoIP 的 P4 上行是 `480x320@15fps`、`800kbps` 起始 H264，
+  GOP 为 `30` 帧 / `2s`。
 - 微信服务端到 P4 的下行请求是 `640x480` MJPEG，P4 硬解后居中 `cover` 到 `480x320`。
 - 本工程没有配置或证明微信手机端为 720p；手机采集档位由微信和服务端决定。
 
 一次看到首帧还不够。继续观察帧率、码率、音频连续性、队列压力，再连续进入/退出场景，
 确认摄像头、音频、显示和连接都能被下一次会话重新获取。
 
-## 10. 常见问题
+## 10. 用 1.3.1 的日志定位第一处异常
+
+1.3.1 把关键日志按媒体阶段拆开。出现黑屏或卡顿时，先找最早停止推进的一段，不要直接
+重启、降分辨率或关闭功能。
+
+### 10.1 摄像头和上行节拍
+
+首帧日志包含 `seq` 和 `drain`；周期统计包含 `seq_delta`、`avg_gap_us`、capture、encode、
+callback 耗时以及 internal/DMA/PSRAM 水位。
+
+- `seq` 持续递增：V4L2 正在交付新帧。
+- `drain` 增加：driver 排出了已经完成但过旧的帧，避免把积压帧当实时画面发送。
+- `seq_delta` 大于 1：传感器或 driver 在两次应用取帧之间完成了多帧；要结合目标 fps 和
+  `drain` 判断，不能只凭它认定丢帧。
+- `avg_gap_us` 明显偏离目标：继续对照 capture、encode 和 callback 耗时，找到节拍先被谁拖慢。
+
+应用节拍使用向上取整的帧间隔并保持原相位：15fps 约为 `67ms`，20fps 为 `50ms`。单次超时
+只跳过已经错过的周期，不会从当前时刻重新起算并不断漂移。
+
+### 10.2 TiRTC 上行和远端下行
+
+`video tx liveness` 会给出 `enq/deq/api/ok` 四个年龄：
+
+- `capture`：摄像头是否仍在产生帧。
+- `queue`：帧是否进入并离开发送队列。
+- `api`：是否已经调用 SDK 发送接口。
+- `sdk`：SDK 是否仍返回成功，以及发送 buffer 水位。
+
+`VRX stall stage=transport` 表示订阅后远端包没有继续到达；
+`VRX stall stage=renderer` 表示 SDK callback 已经收到包，但 renderer 提交没有继续推进。
+前者优先查订阅、对端和网络，后者再查 codec、输入池和 renderer。
+
+### 10.3 H264 下行 decoder
+
+`video stall stage=input` 表示输入帧间隔先拉长；`stage=decode` 表示 TinyH264 处理单个 access
+unit 先变慢。周期统计会分别显示 receive、queued、decoded、converted、presented fps，
+以及 input/display 队列、阶段耗时和 PTS 回退计数。
+
+TinyH264 helper 运行在 CPU1，优先级高于同步等待它的 caller。同步保护会等待 helper 消费
+前一阶段，再送达原阶段值；看到 `TinyH264 sync guard` 说明保护路径发生过等待，不等于业务
+已经失效。
+
+若出现 `H264 decoder stalled ... quarantined`，说明一次 decode 已阻塞至少 2 秒。系统会停止
+继续向该 decoder 投喂，并记录 caller、helper、音频 capture/playback 的任务状态。只有原调用
+最终返回后，才能安全销毁 decoder 并从新 IDR 重建；永久不返回时的回收仍需长稳验证，不能
+仅凭后续 UI 可操作就认定 decoder 已恢复。
+
+### 10.4 内存水位
+
+`memory waterline` 分为 `normal`、`warning`、`critical`。它同时检查 internal free、internal
+largest block、PSRAM free 和 PSRAM largest block，并记录历史 minimum 与 PSRAM 分配失败次数。
+健康状态不会周期刷屏，只在水位变化、恢复或新分配失败时记录。
+
+一次进入通话时下降不等于泄漏。连续退出并重新进入场景，观察水位能否回到稳定区间；如果
+free 恢复但 largest block 持续下降，优先检查碎片化和大块资源生命周期。
+
+### 10.5 微信 worker
+
+微信拒绝、断开等 SDK 耗时操作进入固定 work worker 串行执行；接听 worker 使用 PSRAM 大栈
+常驻，并用请求序号隔离已取消或已被新请求替代的任务。遇到接听问题时依次看请求序号、
+worker 是否唤醒、会话 generation 是否仍有效，再看 SDK 返回值。
+
+## 11. 常见问题
 
 | 现象 | 先检查 | 下一步 |
 | --- | --- | --- |
@@ -260,10 +324,12 @@ binding verification code ready: mqtt subscribed
 | 微信视频黑屏 | 先分清上行还是下行 | 上行查 `480x320` H264；下行查 `640x480` MJPEG 请求、首包和 JPEG 解码 |
 | 微信画面比例不对 | 服务端实际下发尺寸和方向 | 记录实际 MJPEG 尺寸；不要按“720p”假设修改 P4 缩放 |
 | 通话有明显回声 | AEC 是否 active、reference 是否有效 | 有同步录音证据后再调整 `APP_AUDIO_AEC_REF_DELAY_MS` |
-| 视频卡顿且日志很多 | 周期诊断/逐帧日志是否开启 | 正常通话关闭详细日志，只保留 compact health 和关键状态 |
+| 视频周期卡一下 | GOP、`avg_gap_us`、`video tx liveness` | 先确认 IPC 是 40 帧、通话是 30 帧 GOP，再定位采集、队列、SDK 哪一段先停 |
+| 下行停住但 UI 还能操作 | `VRX stall` 与 `video stall` 的 stage | 区分 transport、renderer、input、decode，不要用 UI 存活代替 decoder 存活 |
+| 出现 TinyH264 sync guard | 等待时间和后续 decoded/presented fps | 这是同步保护证据；继续确认链路是否恢复，不要把该日志本身当成错误或成功 |
 | 切换场景后内存下降 | 队列、PSRAM slot、连接 owner 是否归零 | 连续进入/退出并记录 internal/PSRAM largest block 与 task HWM |
 
-## 11. 开发时从哪里改
+## 12. 开发时从哪里改
 
 | 目标 | 主要目录 |
 | --- | --- |
@@ -279,12 +345,19 @@ binding verification code ready: mqtt subscribed
 显示丢帧也不应关闭会话。完整所有权规则见
 [P4_MEDIA_ARCHITECTURE.md](P4_MEDIA_ARCHITECTURE.md)。
 
-## 12. 这份发布已经证明到哪里
+媒体数值优先改 `main/media/media_tuning.h` 和
+`main/services/call_video_renderer_config.h`。Kconfig 用于构建组成与硬件开关，生成的
+`sdkconfig` 不应成为运行时媒体策略的唯一事实源。
 
-公开源码固定到来源 Tag 和 commit，应用/SDK 版本及静态库哈希已有记录。P4 APP 本版本按
-源码发布，没有上传预编译 BIN；发布整理过程也没有把目标板烧录、联网、微信端画面、AI
-行为或长时间运行写成已通过。
+## 13. 这份发布已经证明到哪里
 
-你本地的 `idf.py build` 能证明当前环境完成编译和链接。烧录成功、C6/SDIO 可用、平台在线、
+公开源码固定到来源 Tag 和 commit，应用/SDK 版本及静态库哈希已有记录。公开候选已在
+ESP-IDF `5.5.4` 完成一次干净构建：应用镜像 `6,924,512` bytes，SHA-256
+`EBD5FE3B930BA000FDBE7094F287AD66CBB745D56F8D167ED4890895A691DFA5`，编译错误为 0，最小
+app 分区剩余 `0x95720` bytes（8%）。构建产物只作本地验证，不上传、不进入 Git。P4 APP
+仍按源码发布，没有预编译 BIN。
+
+干净构建证明候选能在记录的环境中完成编译和链接。烧录成功、C6/SDIO 可用、平台在线、
 音视频首帧和长稳结果仍要按上面的步骤在目标板上分别确认。这样记录问题时，大家能立刻知道
-证据停在哪一层，不必从头猜。
+证据停在哪一层，不必从头猜。TinyH264 同步保护、decoder 隔离和返回后的重建都需要重点做
+连续呼叫、故障注入和长稳验证。
