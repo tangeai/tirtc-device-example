@@ -3,185 +3,70 @@
 ## 下载入口
 
 正式源码和固件统一在
-[GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases) 按版本发布。
-Git `main` 保存源码、文档、必要脚本和 SDK 静态库；构建生成的固件、维护包和其他二进制
-附件不进入 Git 历史。
+[GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases) 发布。
+每个项目使用独立的 SemVer Tag；只更新某个项目时，只创建该项目的新 Tag 和 Release。
+固件、文件系统镜像和维护附件不进入 Git 历史。
 
-## 2026-08-02.1 Release
+| 项目 | 版本 | 项目 Release |
+| --- | --- | --- |
+| ESP32-S3 最小 TiRTC 集成示例 | `1.2.0` | [`esp32-s3-minimal-integration-v1.2.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-minimal-integration-v1.2.0) |
+| ESP32-P4 最小 TiRTC 集成示例 | `1.1.1` | [`esp32-p4-minimal-integration-v1.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-minimal-integration-v1.1.1) |
+| G32S10X 最小 TiRTC 集成示例 | `0.8.3` | [`g32s10x-minimal-integration-v0.8.3`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-minimal-integration-v0.8.3) |
+| ESP32-S3 日志示例 | `0.3.0` | [`esp32-s3-logging-v0.3.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-logging-v0.3.0) |
+| ESP32-S3 Device Monitor | `1.8.0` | [`esp32-s3-device-monitor-v1.8.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.8.0) |
+| ESP32-P4 Device Monitor | `1.3.1` | [`esp32-p4-device-monitor-v1.3.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.1) |
+| G32S10X Device Monitor | `0.1.1` | [`g32s10x-device-monitor-v0.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-device-monitor-v0.1.1) |
 
-统一 Tag：
-
-```text
-tirtc-device-examples-v2026.08.02.1
-```
-
-本次为 ESP32-P4 Device App `1.3.1` 补充完整烧录镜像。Release 上传：
+每个 Release 只包含该项目的固件，以及两份核验资料：
 
 | 文件 | 用途 |
 | --- | --- |
-| `esp32p4-tirtc-device-monitor-full-v1.3.1.bin` | P4 `16MB` 完整镜像，ESP Tool 从 `0x0` 烧录 |
-| `release-manifest.json` | 统一 Tag、P4 来源 Tag/commit、逐文件 SHA-256、SDK 与构建证据 |
-| `SHA256SUMS.txt` | 校验完整镜像和 manifest 下载完整性 |
+| 项目固件 | 烧录或 OTA 使用的实际构建产物 |
+| `SHA256SUMS.txt` | 核对下载文件是否完整 |
+| `release-manifest.json` | 记录项目 Tag/commit、开发来源、SDK、构建证据、附件大小和 SHA-256 |
 
-完整镜像大小为 `16,777,216` bytes，SHA-256 为
-`3F55403C60CE371D81239CD5EC028FBFD1A27CAC0B693EB925CB1C60F3CFE1C5`。使用
-[Espressif ESP Tool](https://espressif.github.io/esptool-js/) 选择 P4 串口，烧录地址填 `0x0`，
-Flash Size 选择 `16MB`，Flash Mode/频率使用 `DIO/80MHz`。
+## 当前固件清单
 
-镜像包含 bootloader `0x2000`、partition table `0x8000`、空 otadata `0xd000`、APP
-`0x10000` 和 storage `0xe80000`。NVS 区域填充为 `FF`，因此完整烧录会清除设备原有 NVS、
-Wi-Fi 和绑定信息；重启后需要重新配网和绑定。需要改代码的开发者仍可检出统一 Tag，进入
-[`complete-applications/esp32-p4/device-monitor`](../complete-applications/esp32-p4/device-monitor/README.md)
-按项目说明自行构建和分片烧录。
+| 项目 | 文件 | 大小 | SHA-256 | 用途 |
+| --- | --- | ---: | --- | --- |
+| S3 最小示例 | `esp32s3-tirtc-minimal-full-v1.2.0.bin` | `16,777,216` | `083d59a05268da48bfb434c13e578a8920d095b8fe13831d9a9744064a955f8a` | ESP Tool，地址 `0x0` |
+| P4 最小示例 | `esp32p4-tirtc-minimal-full-v1.1.1.bin` | `16,777,216` | `1409cc0d72d470b54363909fd608468b4f1e7c84d7e0d622f46f376fa27dbc3d` | ESP Tool，地址 `0x0` |
+| G32S10X 最小示例 | `g32s10x-tirtc-minimal-rtos-with-spl-v0.8.3.bin` | `6,695,236` | `ef79659daf2f176eb6642c01af8fdb901e5a5499c861da9f9e5f322f0dde180f` | 君正 Cloner 主固件区，按项目 policy 烧录 |
+| S3 日志示例 | `esp32s3-tirtc-logging-full-v0.3.0.bin` | `16,777,216` | `0b85d399633d30a66089bef75da94645d23cb8c7be93216bc025486e74a5d4a5` | ESP Tool，地址 `0x0` |
+| S3 Device Monitor | `esp32s3-tirtc-device-monitor-full-v1.8.0.bin` | `16,777,216` | `ed0fb1c2fd96e6b7619a3855d562b8f98d89b1dd618fa9a1b9d0c539920768c5` | ESP Tool，地址 `0x0` |
+| S3 Device Monitor | `esp32s3-tirtc-device-monitor-ota-v1.8.0.bin` | `7,449,184` | `164cf034766d8fca0c4708f0e9d0ae6d74508abd661e3c09e47c5a0e96fe2c23` | OTA app，不写入 `0x0` |
+| P4 Device Monitor | `esp32p4-tirtc-device-monitor-full-v1.3.1.bin` | `16,777,216` | `3f55403c60ce371d81239cd5ec028fbfd1a27cac0b693eb925cb1c60f3cfe1c5` | ESP Tool，地址 `0x0` |
+| G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-rtos-with-spl-v0.1.1.bin` | `6,965,860` | `34f926d4fd6173a9433d3652503d66a6cb0df2e961dbd3e79dc846cfe3bbe29a` | 君正 Cloner 主固件区，按项目 policy 烧录 |
+| G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-fs-v0.1.1.yaffs2` | `12,808,192` | `5a8f1fbcbd6f70291e63ae00480ea545f388c6b2eaebd72c93ccb828a6ea60f2` | 君正 Cloner 文件系统区，按项目 policy 烧录 |
+| G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-data-v0.1.1.yaffs2` | `4,096` | `8f6039987ea3d8a96a686f9b3f5f26e22028c918492b6890b336bde2dac90876` | 君正 Cloner 数据区，按项目 policy 烧录 |
 
-BIN 只存放在 GitHub Release，不进入 Git 历史。S3 日志示例 `0.3.0` 和 S3 Device Monitor
-`1.8.0` 的固件继续从 `2026-07-31` Release 下载，本次不重复上传。
+## ESP32-S3/P4 完整镜像烧录
 
-## 2026-08-02 Release（已由补丁 Release 替代）
+准备一根支持数据传输的 USB 线，并使用支持 Web Serial 的 Chrome 或 Edge。
 
-统一 Tag `tirtc-device-examples-v2026.08.02` 保持不动。该次 Release 最初只提供 P4 `1.3.1`
-源码、`release-manifest.json` 和 `SHA256SUMS.txt`，没有 P4 BIN。需要完整镜像的开发者应使用
-上面的 `tirtc-device-examples-v2026.08.02.1` Release。
+1. 从目标项目 Release 下载文件名包含 `-full-` 的完整镜像和 `SHA256SUMS.txt`。
+2. 先计算固件 SHA-256，确认与清单完全一致。
+3. 断开其他串口终端，打开 [Espressif ESP Tool](https://espressif.github.io/esptool-js/)。
+4. 点击 `Connect`，在浏览器弹窗中选择开发板串口。
+5. 点击 `Add File`，加入完整镜像，`Flash Address` 填写 `0x0`。
+6. 首次使用、跨项目切换或设备状态不确定时，先执行 `Erase Flash`。
+7. 点击 `Program`。网页明确显示完成后，按开发板 `RESET`。
 
-## 2026-07-31 Release
+`16 MB` 完整镜像会覆盖整片 Flash，也会清除 NVS 中原有的 Wi-Fi、绑定和本地设置。
+名称含 `ota` 的文件只是应用 OTA 镜像，不能作为完整镜像写入 `0x0`。
 
-统一 Tag：
-
-```text
-tirtc-device-examples-v2026.07.31
-```
-
-本次只更新三个项目：
-
-| 项目 | 版本 | 发布交付 |
-| --- | --- | --- |
-| ESP32-S3 日志示例 | `0.3.0` | 源码与 `0x0` 完整镜像 |
-| ESP32-S3 Device Monitor | `1.8.0` | 源码、`0x0` 完整镜像与 OTA app |
-| ESP32-P4 Device App | `1.3.0` | 源码 |
-
-Release 资产名称：
-
-| 项目 | 文件 | 烧录用途 |
-| --- | --- | --- |
-| ESP32-S3 日志示例 | `esp32s3-tirtc-logging-full-v0.3.0.bin` | ESP Tool，地址 `0x0` |
-| ESP32-S3 Device Monitor | `esp32s3-tirtc-device-monitor-full-v1.8.0.bin` | ESP Tool，地址 `0x0` |
-| ESP32-S3 Device Monitor | `esp32s3-tirtc-device-monitor-ota-v1.8.0.bin` | OTA app，不写入 `0x0` |
-| 全局校验 | `SHA256SUMS.txt` | 下载完整性校验 |
-| 全局来源 | `release-manifest.json` | Tag、源码、构建与附件一致性 |
-
-本次两个 `*-full-*.bin` 都是 `16 MB` 整片镜像。它们从 `0x0` 写满目标 Flash，也会重置
-NVS 中原有的 Wi-Fi、绑定和本地设置；烧录后请按项目 README 重新完成首次配置。单独的
-`*-ota-*.bin` 只用于应用 OTA 流程，不能当作 `0x0` 完整镜像使用。
-
-ESP32-P4 Device App `1.3.0` 按源码范围交付，不创建占位 BIN。其他项目维持上一 Release
-版本及附件，不在本次重复构建或上传。
-
-## ESP32-S3 AT ThingConnect Demo 0.2.0
-
-独立 Release：
-[`esp32-s3-at-thingconnect-v0.2.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-at-thingconnect-v0.2.0)
-
-| 文件 | 用途 | 烧录地址 |
-| --- | --- | --- |
-| `esp32s3-tirtc-at-thingconnect-full-v0.2.0.bin` | ESP32-S3 完整镜像，包含 bootloader、分区表、OTA data、app 和预录媒体 storage | `0x0` |
-| `release-manifest.json` | 发布 commit、源码、SDK、构建、验证范围和资产哈希 | 不烧录 |
-| `SHA256SUMS.txt` | 下载完整性校验 | 不烧录 |
-
-本例不声明 OTA 升级合同，因此不发布单独 OTA app。设备侧配置和业务交互使用串口 AT；
-开发者平台账号登录及 6 位绑定码确认仍在平台 H5 完成。功能和体验步骤见项目
-[README](../logging-examples/esp32-s3/README.md) 与
-[使用说明](../logging-examples/esp32-s3/docs/USER_GUIDE_CN.md)。
-
-完整镜像的各分片地址来自该发布 commit 正式构建生成的 `flasher_args.json`，不能从本页或
-旧版本手工推导。源码静态核验、正式构建、目标板烧录、平台绑定、AI、设备呼叫和真实媒体
-分别记录证据；下载到完整镜像不等于这些运行时能力已经在任意目标板上自动通过。
-
-## 2026-07-30 Unified Release
-
-2026-07-30 Release 包含六个项目：
-
-| 项目 | 版本 | 发布交付 |
-| --- | --- | --- |
-| ESP32-S3 最小 TiRTC 集成示例 | `1.2.0` | 源码与 `0x0` 完整镜像 |
-| ESP32-P4 最小 TiRTC 集成示例 | `1.1.1` | 源码与 `0x0` 完整镜像 |
-| G32S10X 最小 TiRTC 集成示例 | `0.8.3` | 源码与 `rtos-with-spl.bin` |
-| ESP32-S3 Device Monitor | `1.7.6` | 源码、`0x0` 完整镜像与 OTA app |
-| ESP32-P4 Device App | `1.2.3` | 源码随统一 Tag 交付 |
-| G32S10X Device Monitor | `0.1.1` | 源码、主固件与两个 YAFFS 镜像 |
-
-ESP32-P4 Device App `1.2.3` 本次按源码范围发布。其余项目的正式固件由统一公开 commit
-完成干净构建，附件名称、大小、用途、Flash 地址和 SHA-256 以 Release 页面、
-`SHA256SUMS.txt` 和 `release-manifest.json` 为准。
-
-## 2026-07-30 资产
-
-| 项目 | Release 文件 | 烧录用途 |
-| --- | --- | --- |
-| ESP32-S3 最小示例 | `esp32s3-tirtc-minimal-full-v1.2.0.bin` | ESP Tool，地址 `0x0` |
-| ESP32-P4 最小示例 | `esp32p4-tirtc-minimal-full-v1.1.1.bin` | ESP Tool，地址 `0x0` |
-| G32S10X 最小示例 | `g32s10x-tirtc-minimal-rtos-with-spl-v0.8.3.bin` | 君正 Cloner 主固件 policy |
-| ESP32-S3 Device Monitor | `esp32s3-tirtc-device-monitor-full-v1.7.6.bin` | ESP Tool，地址 `0x0` |
-| ESP32-S3 Device Monitor | `esp32s3-tirtc-device-monitor-ota-v1.7.6.bin` | OTA app |
-| G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-rtos-with-spl-v0.1.1.bin` | 君正 Cloner 主固件 policy |
-| G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-fs-v0.1.1.yaffs2` | 君正 Cloner 文件系统 policy |
-| G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-data-v0.1.1.yaffs2` | 君正 Cloner 数据 policy |
-
-## Release 资产规则
-
-每次 Release 只上传本次版本实际生成并完成校验的资产：
-
-| 内容 | 用途 |
-| --- | --- |
-| 项目固件 | 按项目和目标板提供烧录或集成验证所需的实际构建产物 |
-| `SHA256SUMS.txt` | 校验附件下载完整性 |
-| `release-manifest.json` | 记录统一 Tag/commit、项目来源、版本、文件用途、大小和 SHA-256 |
-
-项目没有生成固件资产时，manifest 记录源码交付形态，不创建占位 BIN，也不沿用其他版本产物。
-
-## 标签约定
-
-2026-07-30 的六个项目使用统一公开 Tag：
-
-```text
-tirtc-device-examples-v2026.07.30
-```
-
-各项目的本地 Tag 和 commit 作为源码来源凭据，记录在
-[版本与证据清单](VERSIONS_CN.md) 和 release manifest 中，不替代统一公开 Tag。
-
-## ESP32-S3/P4 烧录
-
-准备一根支持数据传输的 USB 线，并使用支持 Web Serial 的 Chrome 或 Edge。Safari 不能使用该工具。
-
-1. 断开其他串口终端，打开 [Espressif ESP Tool](https://espressif.github.io/esptool-js/)。
-2. 点击 `Connect`，在浏览器弹窗中选择开发板串口。
-3. 在 `Program` 区域添加从同一 Release 下载的目标板固件。
-4. 完整镜像填写 Flash 地址 `0x0`；OTA app 不通过这个地址直接烧录。
-5. 保持 Release 说明指定的 Flash mode、frequency 和 size；不确定时不要照搬其他板卡参数。
-6. 本次 `16 MB` 完整镜像本身会覆盖整片 Flash；使用源码构建的分片、跨项目切换或状态不确定时，
-   再先执行 `Erase Flash`。
-7. 点击 `Program`。写入完成后复位开发板，再打开串口观察项目 README 中列出的成功现象。
-
-浏览器看不到串口时，先确认 USB 线支持数据、串口没有被其他程序占用、驱动已安装，并尝试按住
-板卡 `BOOT` 后复位进入下载模式。不同板卡的按键组合可能不同，以项目 README 和板卡资料为准。
-
-固件类型和烧录地址必须以当次 Release 的实际资产说明为准，不能从旧版本文件名推断。
+浏览器看不到串口时，先确认 USB 线支持数据传输、串口没有被其他程序占用、驱动已经安装。
+必要时按住板卡 `BOOT` 后复位进入下载模式；不同板卡的按键组合以项目 README 和板卡资料为准。
 
 ## G32S10X 烧录
 
-G32S10X 使用君正 Cloner。请从同一 Release 获取对应项目资产，并按项目 README、Cloner
-配置和 release manifest 选择固件及烧录布局。君正供应商 SDK、工具链和 Cloner 需要由
-开发者按授权渠道单独获取。
+G32S10X 使用君正 Cloner。请从同一个项目 Release 下载完整的项目资产，并按项目 README、
+目标板 Cloner 配置和 `release-manifest.json` 选择对应 policy。主固件、文件系统和 data 镜像
+必须来自同一个 Release，不能跨版本混用。君正供应商 SDK、工具链和 Cloner 需要从授权渠道获取。
 
 ## 下载后校验
 
-1. 从同一 Release 下载目标项目资产、`SHA256SUMS.txt` 和 `release-manifest.json`。
-2. 核对项目、版本、目标板和用途。
-3. 计算附件 SHA-256，并与清单逐字比对。
-4. 核对 manifest 中的统一 Tag/commit、项目来源 Tag/commit 和附件记录。
-5. 烧录后核对设备可读取的应用版本、TiRTC SDK 版本和目标板信息。
-
-PowerShell：
+Windows PowerShell：
 
 ```powershell
 Get-FileHash .\downloaded-firmware.bin -Algorithm SHA256
@@ -193,5 +78,13 @@ Linux/macOS：
 sha256sum ./downloaded-firmware.bin
 ```
 
-静态校验可以证明发布源码、版本记录、Release notes、附件和 manifest 相互一致。若要证明
-固件由指定源码构建，还需要可复现构建，或在固件中嵌入 commit/版本元数据并完成比对。
+核对顺序：
+
+1. 文件名、项目、版本和目标板一致。
+2. 固件 SHA-256 与同一 Release 的 `SHA256SUMS.txt` 一致。
+3. `release-manifest.json` 中的项目 Tag/commit、来源版本、SDK 和附件记录一致。
+4. 烧录后再核对设备显示或日志中的应用版本、TiRTC SDK 版本和目标板信息。
+
+静态校验可以证明源码身份、版本记录、Release notes、附件和 manifest 相互一致。证明固件确实
+由指定源码构建，还需要可复现构建，或者在固件中嵌入 commit/版本元数据并完成比对。构建、
+烧录、联网、真实媒体和长时间运行仍是相互独立的证据层。

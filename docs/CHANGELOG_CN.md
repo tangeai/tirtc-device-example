@@ -1,9 +1,23 @@
 # 版本变更记录
 
+## 2026.08.10：Release 按项目独立版本化
+
+- 七个项目改为“平台 + 项目 + 版本号”的独立 Tag；一个项目更新时，只发布该项目的新版本。
+- 当前公开 Tag 统一为：
+  `esp32-s3-minimal-integration-v1.2.0`、
+  `esp32-p4-minimal-integration-v1.1.1`、
+  `g32s10x-minimal-integration-v0.8.3`、
+  `esp32-s3-logging-v0.3.0`、
+  `esp32-s3-device-monitor-v1.8.0`、
+  `esp32-p4-device-monitor-v1.3.1` 和
+  `g32s10x-device-monitor-v0.1.1`。
+- 原日期型批次和旧分类 Release 已下线；公开文档、源码归档、manifest 与下载入口统一指向项目 Tag。
+- 固件资产保持原正式构建字节不变。本次只迁移发布身份并重建单项目 manifest 和校验清单，没有重新编译。
+
 ## 2026.08.02.1：ESP32-P4 Device App 1.3.1 完整镜像补充
 
 - 新增 `esp32p4-tirtc-device-monitor-full-v1.3.1.bin`，供开发者从 `0x0` 直接烧录体验。
-- 完整镜像只进入 GitHub Release，不进入 Git 历史；原 `2026.08.02` Tag 保持不动。
+- 完整镜像只进入 GitHub Release，不进入 Git 历史；该次补充后来并入当前 P4 项目 Release。
 - P4 源码、SDK 和正式构建输入未变化；补丁更新只收口公开文档、manifest 和发布资产。
 - 完整烧录会清除 NVS、Wi-Fi 和绑定信息，烧录后需要重新配置。
 
@@ -30,8 +44,8 @@
 ### 发布
 
 - 来源 Tag：`esp32-p4-device-app-v1.3.1`，commit `7391464`。
-- 统一 Tag：`tirtc-device-examples-v2026.08.02`。
-- 首次 Release 按源码范围交付；后续由 `tirtc-device-examples-v2026.08.02.1` 补充完整镜像。
+- 公开项目 Tag：`esp32-p4-device-monitor-v1.3.1`。
+- 源码和完整镜像现在由同一个项目 Release 提供。
 - 最终公开快照完成静态门禁和干净构建。运行时通话、重复切换与长稳验证单独记录，
   不用构建结果代替真机证据。
 
@@ -71,7 +85,9 @@
 
 ### 发布
 
-- 本次统一 Tag 为 `tirtc-device-examples-v2026.07.31`。
+- 当次涉及日志示例 `0.3.0`、S3 Device Monitor `1.8.0` 和 P4 Device App `1.3.0`；
+  当前公开项目 Tag 分别为 `esp32-s3-logging-v0.3.0`、`esp32-s3-device-monitor-v1.8.0`
+  和 `esp32-p4-device-monitor-v1.3.1`。
 - ESP32-S3 日志示例和 S3 Device Monitor 的正式构建资产只通过 GitHub Releases 分发。
 - ESP32-P4 Device App 不生成占位固件；其他平台和最小示例保持上一公开版本。
 
@@ -90,7 +106,8 @@
 ### 发布
 
 - 正式版本为 `0.2.0`，TiRTC SDK 为 `2.2.1`，ESP-IDF 为 `5.5.4`。
-- 使用独立公开 Tag `esp32-s3-at-thingconnect-v0.2.0`，不移动既有统一日期 Tag。
+- 该版本当时以 AT ThingConnect 示例身份发布；当前维护版本已归入日志示例，公开 Tag 为
+  `esp32-s3-logging-v0.3.0`。
 - 正式 `0x0` 完整镜像、manifest 和 SHA-256 只通过 GitHub Release 分发。
 - 工程不包含微信 VoIP、OTA、SoftAP 网页配网、UI 或板级音视频外设驱动。
 

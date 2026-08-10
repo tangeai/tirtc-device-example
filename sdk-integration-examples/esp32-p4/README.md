@@ -17,6 +17,7 @@
 - SDK commit：`3a33bf4ae51b3ab9eb246648adb274d0fae32ebf`
 - ESP-IDF：`5.5.4`
 - 工具链：`riscv32-esp-elf-gcc-14.2.0_20260121`
+- 公开 Release：[`esp32-p4-minimal-integration-v1.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-minimal-integration-v1.1.1)
 - `libTiRTC.a` SHA256：
   `a8eadc99e97e9d6fcc7d871963d3456484ed3625469804a7ff6718218b117d65`
 
@@ -56,14 +57,18 @@ tirtc_esp32p4_wifi_link_demo
 
 ## 快速接入
 
-1. 修改 Wi-Fi 参数：`main/app_config.h`
+真实 Wi-Fi、设备密钥和 token 签发密钥不要写进准备提交或分享的 Git 工作树。最稳的做法是
+先把本项目目录复制到仓库外、不受 Git 管理的私有构建目录，再在该副本中完成下面的配置与
+构建；下列值都是占位示例。构建目录和固件会包含本地配置，也不要对外分享。
+
+1. 在私有构建副本中修改 Wi-Fi 参数：`main/app_config.h`
 
 ```c
 #define APP_WIFI_SSID "your_wifi_ssid"
 #define APP_WIFI_PASSWORD "your_wifi_password"
 ```
 
-2. 修改 TiRTC 参数：`main/tirtc/tirtc_config.h`
+2. 在同一私有构建副本中修改 TiRTC 参数：`main/tirtc/tirtc_config.h`
 
 ```c
 #define TIRTC_DEVICE_ID "your_device_id"
@@ -85,7 +90,8 @@ tirtc_esp32p4_wifi_link_demo
 
 `TIRTC_AUTO_PUSH_LOCAL_MEDIA_ON_CONNECT` 用于控制连接建立后的本机推流行为：默认值 `1` 表示主动连接或远端呼入建立后立即推送本机 H264/PCMA；设为 `0` 时，等待对端订阅后再推送本机 H264/PCMA。
 
-`TIRTC_TOKEN_ACCESS_ID` 和 `TIRTC_TOKEN_SECRET_KEY` 仅用于本地生成主动连接 token。量产固件建议改为由业务服务端完成授权判断和 token 签发，再下发给客户端或设备使用。
+`TIRTC_TOKEN_ACCESS_ID` 和 `TIRTC_TOKEN_SECRET_KEY` 仅用于本地快速验证。量产固件应由业务
+服务端完成授权判断和 token 签发，不把长期 Access ID/Secret 固化到设备固件。
 
 ## 编译环境
 

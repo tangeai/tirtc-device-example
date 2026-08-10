@@ -13,8 +13,8 @@
 
 本示例位于统一设备仓
 [tangeai/tirtc-device-example](https://github.com/tangeai/tirtc-device-example)
-的 `complete-applications/esp32-s3/device-monitor/`。源码 Git 不保存固件二进制；正式固件统一从
-[GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases) 下载。
+的 `complete-applications/esp32-s3/device-monitor/`。源码 Git 不保存固件二进制；正式固件从
+[`esp32-s3-device-monitor-v1.8.0` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.8.0) 下载。
 
 ## 先选一条适合你的路线
 
@@ -56,8 +56,7 @@
 
 ### 步骤 1：下载当前固件
 
-打开 [GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases)，
-进入 ESP32-S3 设备端示例 `1.8.0` 对应的 Release，下载：
+打开 [`esp32-s3-device-monitor-v1.8.0` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.8.0)，下载：
 
 ```text
 esp32s3-tirtc-device-monitor-full-v1.8.0.bin

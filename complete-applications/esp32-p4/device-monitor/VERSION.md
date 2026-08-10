@@ -9,7 +9,7 @@
 | 发布日期 | `2026-08-02` |
 | 来源 Tag | `esp32-p4-device-app-v1.3.1` |
 | 来源 commit | `739146438dd4b65512bb8198731bd2c8a1eb1275` |
-| 统一仓 Tag | `tirtc-device-examples-v2026.08.02.1` |
+| 公开项目 Tag | `esp32-p4-device-monitor-v1.3.1` |
 | 发布范围 | 源码、公开文档和 `0x0` 完整烧录镜像 |
 | 目标芯片 | ESP32-P4 |
 | 目标开发板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |

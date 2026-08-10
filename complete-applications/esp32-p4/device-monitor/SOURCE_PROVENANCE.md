@@ -12,7 +12,7 @@
 | Tag object | `9e08fffb1d6a4b200cf97af299c9e20a1fba1f24` |
 | 来源 commit | `739146438dd4b65512bb8198731bd2c8a1eb1275` |
 | 比较基线 | `esp32-p4-device-app-v1.3.0` / `dacf8e65b25ea4d0282fc9314e46a18607691fb4` |
-| 统一仓 Tag | `tirtc-device-examples-v2026.08.02.1` |
+| 公开项目 Tag | `esp32-p4-device-monitor-v1.3.1` |
 | 公开路径 | `complete-applications/esp32-p4/device-monitor/` |
 | 目标开发板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |
 | ESP-IDF | `5.5.4` |

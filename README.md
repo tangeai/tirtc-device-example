@@ -19,22 +19,26 @@
 
 ## 快速开始
 
-只想把固件跑起来，不需要先准备 ESP-IDF：
+只想把固件跑起来，不需要先准备编译环境：
 
-1. 打开 [GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases)，选择包含目标项目的版本。
-2. 下载项目对应的 `*-full-*.bin`、`SHA256SUMS.txt` 和 `release-manifest.json`。
-3. 先核对 SHA-256，再用 [Espressif ESP Tool](https://espressif.github.io/esptool-js/) 将完整镜像写入 `0x0`。
-4. 回到项目 README，按“首次启动”配置网络、设备身份并观察成功日志。
+- **ESP32-S3/P4**：在目标项目 Release 下载 `*-full-*.bin`、`SHA256SUMS.txt` 和
+  `release-manifest.json`，核对 SHA-256 后，用
+  [Espressif ESP Tool](https://espressif.github.io/esptool-js/) 从 `0x0` 烧录完整镜像。
+- **G32S10X**：在目标项目 Release 下载版本化主固件；完整应用还要同时下载 `fs` 和 `data`
+  镜像。核对 SHA-256 后，按项目 README 与目标板 policy 使用君正 Cloner 烧录。
 
-本次 S3 完整镜像会覆盖整片 Flash，并重置 NVS 中原有的 Wi-Fi、绑定和本地设置。烧录后重新
+烧录完成后回到项目 README，按“首次启动”配置网络、设备身份并观察成功日志。
+
+ESP32 完整镜像会覆盖整片 Flash，并重置 NVS 中原有的 Wi-Fi、绑定和本地设置。烧录后重新
 配置一次即可；需要保留现场数据时，先使用项目自己的备份或 OTA 流程。
 
-需要修改代码，从统一 Tag 开始会更稳：
+需要修改代码时，从目标项目自己的 Release Tag 开始会更稳。Tag 命名统一为
+`<project-id>-v<MAJOR>.<MINOR>.<PATCH>`：
 
 ```bash
 git clone https://github.com/tangeai/tirtc-device-example.git
 cd tirtc-device-example
-git checkout tirtc-device-examples-v2026.08.02.1
+git checkout esp32-s3-device-monitor-v1.8.0
 ```
 
 然后进入下表中的项目目录。每个项目 README 都给出依赖、配置、构建、烧录、成功现象和排障入口。
@@ -43,30 +47,29 @@ git checkout tirtc-device-examples-v2026.08.02.1
 
 ### 最小 TiRTC 集成示例
 
-| 平台 | 示例 | 版本 | TiRTC SDK | 来源版本 | Release 交付 |
+| 平台 | 示例 | 版本 | TiRTC SDK | 来源版本 | 公开 Release |
 | --- | --- | --- | --- | --- | --- |
-| ESP32-S3 | [最小 TiRTC 集成示例](sdk-integration-examples/esp32-s3/README.md) | `1.2.0` | `2.2.1` | Tag `v1.2.0` / commit `44b24a5` | 源码与 `0x0` 完整镜像 |
-| ESP32-P4 | [最小 TiRTC 集成示例](sdk-integration-examples/esp32-p4/README.md) | `1.1.1` | `2.2.1` | Tag `v1.1.1` / commit `0f36ddb` | 源码与 `0x0` 完整镜像 |
-| G32S10X | [最小 TiRTC 集成示例](sdk-integration-examples/g32s10x/README.md) | `0.8.3` | `2.2.1` | Tag `v0.8.3` / commit `b2abc22` | 源码与 `rtos-with-spl.bin` |
+| ESP32-S3 | [最小 TiRTC 集成示例](sdk-integration-examples/esp32-s3/README.md) | `1.2.0` | `2.2.1` | Tag `v1.2.0` / commit `44b24a5` | [`esp32-s3-minimal-integration-v1.2.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-minimal-integration-v1.2.0) |
+| ESP32-P4 | [最小 TiRTC 集成示例](sdk-integration-examples/esp32-p4/README.md) | `1.1.1` | `2.2.1` | Tag `v1.1.1` / commit `0f36ddb` | [`esp32-p4-minimal-integration-v1.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-minimal-integration-v1.1.1) |
+| G32S10X | [最小 TiRTC 集成示例](sdk-integration-examples/g32s10x/README.md) | `0.8.3` | `2.2.1` | Tag `v0.8.3` / commit `b2abc22` | [`g32s10x-minimal-integration-v0.8.3`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-minimal-integration-v0.8.3) |
 
 ### 日志示例
 
-| 平台 | 示例 | 版本 | TiRTC SDK | 来源版本 | Release 交付 |
+| 平台 | 示例 | 版本 | TiRTC SDK | 来源版本 | 公开 Release |
 | --- | --- | --- | --- | --- | --- |
-| ESP32-S3 | [TiRTC 日志示例（AT ThingConnect）](logging-examples/esp32-s3/README.md) | `0.3.0` | `2.2.1` | 独立源码快照 / public commit | 源码与 `0x0` 完整镜像 |
+| ESP32-S3 | [TiRTC 日志示例（AT ThingConnect）](logging-examples/esp32-s3/README.md) | `0.3.0` | `2.2.1` | 独立源码快照 / public commit | [`esp32-s3-logging-v0.3.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-logging-v0.3.0) |
 
 ### 完整应用
 
-| 平台 | 应用 | 版本 | TiRTC SDK | 来源版本 | Release 交付 |
+| 平台 | 应用 | 版本 | TiRTC SDK | 来源版本 | 公开 Release |
 | --- | --- | --- | --- | --- | --- |
-| ESP32-S3 | [Device Monitor](complete-applications/esp32-s3/device-monitor/README.md) | `1.8.0` | `2.2.0` | Tag `v1.8.0` / commit `8211e3b` | 源码、完整镜像与 OTA app |
-| ESP32-P4 | [Device App](complete-applications/esp32-p4/device-monitor/README.md) | `1.3.1` | `2.3.0` 定制兼容快照 | Tag `esp32-p4-device-app-v1.3.1` / commit `7391464` | 源码与 `0x0` 完整镜像 |
-| G32S10X | [Device Monitor](complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | Tag `v0.1.1` / commit `5630152` | 源码、主固件与两个 YAFFS 镜像 |
+| ESP32-S3 | [Device Monitor](complete-applications/esp32-s3/device-monitor/README.md) | `1.8.0` | `2.2.0` | Tag `v1.8.0` / commit `8211e3b` | [`esp32-s3-device-monitor-v1.8.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.8.0) |
+| ESP32-P4 | [Device App](complete-applications/esp32-p4/device-monitor/README.md) | `1.3.1` | `2.3.0` 定制兼容快照 | Tag `esp32-p4-device-app-v1.3.1` / commit `7391464` | [`esp32-p4-device-monitor-v1.3.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.1) |
+| G32S10X | [Device Monitor](complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | Tag `v0.1.1` / commit `5630152` | [`g32s10x-device-monitor-v0.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-device-monitor-v0.1.1) |
 
-最新更新由 `tirtc-device-examples-v2026.08.02.1` 锁定，只更新 ESP32-P4 Device App `1.3.1`
-的交付说明和完整烧录镜像。
-其他项目保持上一公开版本；S3 固件继续从 `2026.07.31` Release 下载，不重复上传。
-每次发布的源码范围、构建证据和附件 SHA-256 见当次 `release-manifest.json` 与
+七个项目独立使用 SemVer Tag。某个项目更新时，只提升并发布该项目版本；共享 SDK 或公共代码
+确实影响多个项目时，各项目分别升版并在同一 commit 创建多个 Tag。每个 Release 的源码范围、
+构建证据和附件 SHA-256 见该 Release 自带的 `release-manifest.json` 与
 [版本与证据清单](docs/VERSIONS_CN.md)。
 
 ## 选择路径

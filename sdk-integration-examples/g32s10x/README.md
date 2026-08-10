@@ -13,6 +13,7 @@ FreeRTOS -> ATBM WiFi -> lwIP/DNS/NTP -> TiRTC -> MJPEG/PCMA sample
 | TiRTC SDK | `2.2.1`，manifest 状态 `candidate` |
 | 君正 SDK | `im_sdk_v0.4.0` |
 | 工具链 | `riscv32-ingenic-g32s10-elf-tools-r1.0.5` |
+| 公开 Release | [`g32s10x-minimal-integration-v0.8.3`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-minimal-integration-v0.8.3) |
 
 ## 功能范围
 
@@ -55,8 +56,9 @@ SDK 版本固定为 `2.2.1`。启动日志会输出 `TiRtcGetVersion()` 和
 
 ## 配置与构建
 
-填写 `include/tirtc_link_config.h` 中的 WiFi、设备 ID 和设备 Secret。准备一份干净展开的
-君正 SDK 和 G32S10X 工具链，然后在本目录执行：
+真实凭据只在仓库外、不受 Git 管理的私有构建副本中填写。把本项目复制到该副本后，修改
+`include/tirtc_link_config.h` 中的 WiFi、设备 ID 和设备 Secret，再准备一份干净展开的
+君正 SDK 和 G32S10X 工具链并执行：
 
 ```bash
 G32_SDK_ROOT=/path/to/im_sdk/opensource/freertos \
@@ -68,11 +70,19 @@ bash scripts/build-in-sdk.sh
 `g32s10x_tirtc_wifi_link_demo_defconfig` 并执行完整构建。它拒绝覆盖已存在的同名应用，
 因此每个发布版本应使用干净 SDK 树。固件输出位于 SDK 根目录的 `rtos-with-spl.bin`。
 
-真实配置只保存在开发者本地，不应提交到 Git。
+真实配置、构建目录和固件只保存在开发者本地，不应提交到 Git 或对外分享。
 替换素材时执行 `bash tools/transcode_sample_media.sh <source-video>`。
 
 当前 G32S10X 固件分区为 `8 MiB`。发布流程会检查固件大小和 SHA-256；素材位于固件只读区，
 不会在启动时整段复制到堆。
+
+## 使用 Release 固件
+
+不改源码时，从
+[`g32s10x-minimal-integration-v0.8.3` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-minimal-integration-v0.8.3)
+下载 `g32s10x-tirtc-minimal-rtos-with-spl-v0.8.3.bin` 和 `SHA256SUMS.txt`。核对哈希后，在君正
+Cloner 中把该文件映射到目标板主固件 policy；分区布局和 policy 以板卡供应方配置为准，不能
+照抄其他板卡地址。通用下载与校验说明见[固件下载与校验](../../docs/RELEASES_CN.md)。
 
 ## 真机验收
 

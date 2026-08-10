@@ -45,7 +45,7 @@ P4 负责 UI、摄像头、音频、编解码和 TiRTC 应用；C6 只负责 Wi-
 ```powershell
 git clone https://github.com/tangeai/tirtc-device-example.git
 cd tirtc-device-example
-git checkout tirtc-device-examples-v2026.08.02.1
+git checkout esp32-p4-device-monitor-v1.3.1
 cd complete-applications/esp32-p4/device-monitor
 ```
 
@@ -153,7 +153,7 @@ idf.py menuconfig
 
 ### 7.1 快速体验：烧录 Release 完整镜像
 
-从 `tirtc-device-examples-v2026.08.02.1` Release 下载：
+从 [`esp32-p4-device-monitor-v1.3.1` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.1) 下载：
 
 ```text
 esp32p4-tirtc-device-monitor-full-v1.3.1.bin

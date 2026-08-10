@@ -1,7 +1,8 @@
 # Configuration
 
-用户只需要修改 `include/tirtc_link_config.h`。本仓库的自动构建会用根目录下未纳入 Git 的
-`config/local_config.h` 替换它，从而避免把 WiFi 密码、设备密钥和一次性 Token 交付出去。
+仓库中的 `include/tirtc_link_config.h` 是无凭据模板。需要真实配置时，先把项目复制到仓库外、
+不受 Git 管理的私有构建目录，再修改副本中的该文件。不要把 WiFi 密码、设备密钥或一次性
+Token 写回准备提交、压缩或分享的源码工作树；私有构建输出也按敏感文件管理。
 
 `include/tirtc_link_defaults.h` 为旧配置文件补齐新增选项，并在编译期检查范围。产品工程可以
 只声明需要覆盖的宏，其余参数继续使用默认值。

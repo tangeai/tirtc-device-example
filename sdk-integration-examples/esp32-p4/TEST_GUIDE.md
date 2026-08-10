@@ -18,9 +18,13 @@
 
 ## 2. 参数配置
 
+先把项目复制到仓库外、不受 Git 管理的私有构建目录，再在该副本中填写以下参数。不要在
+准备提交或分享的工作树中保存真实 Wi-Fi、设备密钥、Access ID 或 Secret；构建输出同样会
+包含这些本地配置，不应对外分发。
+
 ### 2.1 Wi-Fi 配置
 
-修改 `main/app_config.h`：
+在私有构建副本中修改 `main/app_config.h`：
 
 ```c
 #define APP_WIFI_SSID "your_wifi_ssid"
@@ -29,7 +33,7 @@
 
 ### 2.2 TiRTC 配置
 
-修改 `main/tirtc/tirtc_config.h`：
+在私有构建副本中修改 `main/tirtc/tirtc_config.h`：
 
 ```c
 #define TIRTC_DEVICE_ID "your_device_id"

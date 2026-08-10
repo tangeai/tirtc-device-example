@@ -15,15 +15,13 @@
 发布身份。Release manifest 应记录完整 commit，以及每个公开源码文件和
 发布资产的 SHA-256。
 
-## 旧公开基线
+## 公开发布身份
 
-- 旧路径：`sdk-integration-examples/esp32-s3-at-thingconnect`
-- 旧公开 Tag：`esp32-s3-at-thingconnect-v0.2.0`
-- Tag object：`682c4ea60877f9dedb6fb5196988b15a4ad385a7`
-- Tag 指向 commit：`b6d74c0fbc3cc18880bf13f9292dbe11f336f8f0`
+- 公开项目 Tag：`esp32-s3-logging-v0.3.0`
+- Release：<https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-logging-v0.3.0>
 
-旧 Tag 保持不可移动。`0.3.0` 迁移到日志示例分类后使用新的公开提交和 Tag，
-不改写旧版本历史。
+`0.3.0` 已归入日志示例分类。公开 Tag、源码归档、完整镜像、manifest 和校验清单使用同一
+项目版本；开发源快照仍按上节哈希追溯，不为统一格式虚构上游 Git commit。
 
 ## 纳入范围
 

@@ -19,6 +19,7 @@
 - SDK commit：`3a33bf4ae51b3ab9eb246648adb274d0fae32ebf`
 - ESP-IDF：`5.5.4`
 - 工具链：`xtensa-esp32s3-elf-gcc-14.2.0_20260121`
+- 公开 Release：[`esp32-s3-minimal-integration-v1.2.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-minimal-integration-v1.2.0)
 - 传输：KCP / noSCTP
 - SDK 构建：1 kHz、HTTP-only、PSRAM 线程栈管理优化
 - `libTiRTC.a` SHA256：
@@ -144,7 +145,6 @@ main/tirtc/tirtc_app.c            生命周期、回调、连接和订阅控制
 main/tirtc/tirtc_connect.c        缓存优先的主动连接
 main/tirtc/local_media_stream.c   H264/PCMA 测试媒体发送
 main/tirtc/test_assets/           打包进 SPIFFS 的测试媒体
-firmware/                         历史预编译资产，不作为本次源码构建证明
 ```
 
 ## 构建

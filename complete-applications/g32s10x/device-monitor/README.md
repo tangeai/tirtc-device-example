@@ -3,6 +3,9 @@
 本目录提供君正 G32S10X 与 FreeRTOS 上的完整设备应用源码。APP 版本为 `0.1.1`，
 集成 TiRTC SDK `2.2.1`。
 
+源码和烧录资产使用同一个公开项目版本：
+[`g32s10x-device-monitor-v0.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-device-monitor-v0.1.1)。
+
 ## 芯片与应用特性
 
 - G32S10X RISC-V、SFC NAND 与君正 IM SDK `v0.4.0`。
@@ -63,15 +66,21 @@ bash scripts/build_release.sh all
 
 1. 使用 IM SDK 配套、且与目标板存储布局一致的君正 Cloner 和板级配置。
 2. 在 Cloner 中选择目标板的 SFC NAND 配置，不要根据其他板卡资料猜测分区地址。
-3. 从同一次构建的 `building/` 选择 `rtos-with-spl.bin`、`fs.yaffs2` 和
-   `data.yaffs2`，并保持它们与板级 Cloner 配置的三个 policy 一一对应。
-4. 点击 Cloner 的 `Start` 后，让设备进入 USB 烧录模式；Windows 设备列表应出现
+3. 直接体验时，从当前项目 Release 同时下载
+   `g32s10x-tirtc-device-monitor-rtos-with-spl-v0.1.1.bin`、
+   `g32s10x-tirtc-device-monitor-fs-v0.1.1.yaffs2` 和
+   `g32s10x-tirtc-device-monitor-data-v0.1.1.yaffs2`；本地开发时则使用同一次构建的
+   `building/rtos-with-spl.bin`、`building/fs.yaffs2` 和 `building/data.yaffs2`。
+4. 按顺序把主固件、文件系统和 data 镜像映射到板级 Cloner 配置的三个对应 policy；三项
+   必须来自同一个 Release 或同一次构建，不能跨版本混用。
+5. 点击 Cloner 的 `Start` 后，让设备进入 USB 烧录模式；Windows 设备列表应出现
    `VID_A108`。
-5. 以本次会话新增的 `policy0/1/2 write ret: ok` 和
+6. 以本次会话新增的 `policy0/1/2 write ret: ok` 和
    `all policy completed` 作为写入完成依据，再复位设备并查看 UART 启动日志。
 
 Cloner 配置属于具体硬件交付资料，本仓不附带通用配置。更换 Flash 型号、分区布局或
-板级引脚后，应先由硬件供应方确认配置，再执行烧录。
+板级引脚后，应先由硬件供应方确认配置，再执行烧录。文件大小与 SHA-256 见
+[固件下载与校验](../../../docs/RELEASES_CN.md)。
 
 ## 目录
 

@@ -10,12 +10,13 @@
 | TiRTC SDK | `2.2.1` |
 | ESP-IDF | `5.5.4` |
 | 目标芯片 | ESP32-S3，16 MB Flash，OPI PSRAM |
+| 公开 Release | [`esp32-s3-logging-v0.3.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-logging-v0.3.0) |
 
 ## 1. 先选一条使用路径
 
 | 你的目标 | 建议入口 |
 | --- | --- |
-| 尽快体验功能 | 从 [Releases](https://github.com/tangeai/tirtc-device-example/releases) 下载完整 BIN，按本文第 3 节烧录 |
+| 尽快体验功能 | 从 [`esp32-s3-logging-v0.3.0` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-logging-v0.3.0) 下载完整 BIN，按本文第 3 节烧录 |
 | 修改代码、AT 指令或板级配置 | 获取源码，按本文第 4 节构建并烧录 |
 | 接入自动化测试或解析完整字段 | 先完成基本体验，再读 [结构化 AT 指令](docs/AT_COMMANDS_CN.md) 和 [验证清单](docs/VALIDATION_CN.md) |
 

@@ -14,8 +14,9 @@
 供应商 SDK 包含非公开交付边界和 Linux 符号链接，应在 Linux/WSL 原生文件系统中解压。
 开发者需要自行确认 SDK 与工具链授权。
 
-执行构建辅助脚本前，先将 `include/tirtc_link_config.h` 中的 Wi-Fi 和 TiRTC 参数改为自己的
-测试配置，并通过环境变量传入 SDK 与工具链位置：
+执行构建辅助脚本前，先把项目复制到仓库外、不受 Git 管理的私有构建目录，再将副本中
+`include/tirtc_link_config.h` 的 Wi-Fi 和 TiRTC 参数改为测试配置。真实凭据和构建输出不要
+写回或分享源码工作树。随后通过环境变量传入 SDK 与工具链位置：
 
 ```bash
 G32_SDK_ROOT="<WSL_SDK_ROOT>/im_sdk/opensource/freertos" \

@@ -25,14 +25,14 @@ H264/JPEG 编解码、触摸屏和音频设备，与 C6 提供的远程 Wi-Fi、
 直接体验：
 
 1. 确认 P4 主芯片和 C6 Wi-Fi 从芯片都能正常上电。
-2. 从 `tirtc-device-examples-v2026.08.02.1` Release 下载
+2. 从 [`esp32-p4-device-monitor-v1.3.1` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.1) 下载
    `esp32p4-tirtc-device-monitor-full-v1.3.1.bin` 并核对 SHA-256。
 3. 在 [Espressif Web Serial 烧录工具](https://espressif.github.io/esptool-js/)中选择 P4 端口，
    从 `0x0` 以 `16MB`、`DIO/80MHz` 烧录。
 4. 重启后重新连接 2.4 GHz Wi-Fi 并完成绑定，再运行“网络测试”和“TiRTC 测试”。
 
-完整镜像会清除现有 NVS、Wi-Fi 和绑定信息。需要开发时，检出统一仓 Tag
-`tirtc-device-examples-v2026.08.02.1`，再按[开发者上手指南](docs/GETTING_STARTED_CN.md)
+完整镜像会清除现有 NVS、Wi-Fi 和绑定信息。需要开发时，检出项目 Tag
+`esp32-p4-device-monitor-v1.3.1`，再按[开发者上手指南](docs/GETTING_STARTED_CN.md)
 完成源码构建和分片烧录。
 
 ## 版本与平台
@@ -188,4 +188,4 @@ UI 只展示状态和分发动作；应用层编排生命周期，服务层实�
 - [ESP32-P4 媒体架构](docs/P4_MEDIA_ARCHITECTURE.md)
 - [应用、SDK 和工具链版本](VERSION.md)
 - [源码来源与公开边界](SOURCE_PROVENANCE.md)
-- [统一仓固件与 Release 说明](../../../docs/RELEASES_CN.md)
+- [固件与 Release 说明](../../../docs/RELEASES_CN.md)
