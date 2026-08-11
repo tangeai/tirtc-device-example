@@ -157,11 +157,18 @@ typedef struct {
     tirtc_conn_t closing_conn;
 } tirtc_session_runtime_snapshot_t;
 
+typedef enum {
+    TIRTC_SESSION_CONN_ACCEPT_REJECTED = 0,
+    TIRTC_SESSION_CONN_ACCEPTED,
+    TIRTC_SESSION_CONN_ACCEPT_STALE_CLOSING,
+} tirtc_session_conn_accept_result_t;
+
 typedef struct {
     TIRTCCONNECTCALLBACK cb;
     void *user_data;
     char *service_desc;
     char *token;
+    uint32_t attempt_id;
 } tirtc_session_whip_request_t;
 
 typedef struct {
@@ -199,6 +206,8 @@ static uint64_t s_active_conn_accepted_at_us;
 static tirtc_session_conn_user_data_t s_active_conn_user_data;
 static bool s_state_error_override;
 static tirtc_conn_t s_closing_conn;
+static uint32_t s_whip_connect_attempt_counter;
+static uint32_t s_whip_connect_active_attempt;
 static bool s_initialized;
 static bool s_sdk_initialized;
 static bool s_sdk_prepare_in_progress;
@@ -364,6 +373,10 @@ static esp_err_t tirtc_session_create_tasks(void);
 static esp_err_t tirtc_session_create_runtime_resources(void);
 static void tirtc_session_configure_runtime_callbacks(void);
 static void tirtc_session_get_runtime_snapshot(tirtc_session_runtime_snapshot_t *snapshot);
+static bool tirtc_session_is_ready_for_new_connection_locked(void);
+static uint32_t tirtc_session_begin_whip_connect_attempt(tirtc_conn_t *active_conn,
+                                                         tirtc_conn_t *closing_conn);
+static void tirtc_session_finish_whip_connect_attempt(uint32_t attempt_id);
 static void tirtc_session_update_pool_stats_unlocked(tirtc_session_stats_t *stats);
 static void tirtc_session_update_queue_stats(tirtc_session_stats_t *stats);
 static void tirtc_session_bind_connection_user_data(tirtc_conn_t conn);
@@ -382,6 +395,9 @@ static bool tirtc_session_check_send_buffer(tirtc_conn_t conn,
                                             const char *media_name,
                                             bool can_drop);
 static int tirtc_session_disconnect_with_sdk_lock(tirtc_conn_t conn);
+static tirtc_session_conn_accept_result_t tirtc_session_accept_connection(
+    tirtc_conn_t conn,
+    bool require_connect_mode);
 static esp_err_t tirtc_session_request_remote_key_frame(tirtc_conn_t conn, uint8_t stream_id, const char *reason);
 static bool tirtc_session_take_remote_key_frame_retry_slot(void);
 static esp_err_t tirtc_session_request_remote_video(tirtc_conn_t conn);
@@ -1285,6 +1301,62 @@ bool tirtc_session_is_connection_usable(tirtc_conn_t conn)
     return usable;
 }
 
+static bool tirtc_session_is_ready_for_new_connection_locked(void)
+{
+    return s_network_connected && s_sdk_initialized && s_sdk_started &&
+           !s_sdk_prepare_in_progress && !s_start_in_progress &&
+           !s_stop_in_progress && s_whip_connect_active_attempt == 0U &&
+           s_active_conn == NULL &&
+           s_closing_conn == NULL;
+}
+
+static uint32_t tirtc_session_begin_whip_connect_attempt(tirtc_conn_t *active_conn,
+                                                         tirtc_conn_t *closing_conn)
+{
+    uint32_t attempt_id = 0U;
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    if (tirtc_session_is_ready_for_new_connection_locked()) {
+        s_whip_connect_attempt_counter++;
+        if (s_whip_connect_attempt_counter == 0U) {
+            s_whip_connect_attempt_counter++;
+        }
+        attempt_id = s_whip_connect_attempt_counter;
+        s_whip_connect_active_attempt = attempt_id;
+    }
+    if (active_conn != NULL) {
+        *active_conn = s_active_conn;
+    }
+    if (closing_conn != NULL) {
+        *closing_conn = s_closing_conn;
+    }
+    taskEXIT_CRITICAL(&s_rtc_lock);
+    return attempt_id;
+}
+
+static void tirtc_session_finish_whip_connect_attempt(uint32_t attempt_id)
+{
+    taskENTER_CRITICAL(&s_rtc_lock);
+    if (attempt_id != 0U && s_whip_connect_active_attempt == attempt_id) {
+        s_whip_connect_active_attempt = 0U;
+    }
+    taskEXIT_CRITICAL(&s_rtc_lock);
+}
+
+bool tirtc_session_is_ready_for_new_connection(void)
+{
+    bool ready = false;
+
+    if (!s_initialized) {
+        return false;
+    }
+
+    taskENTER_CRITICAL(&s_rtc_lock);
+    ready = tirtc_session_is_ready_for_new_connection_locked();
+    taskEXIT_CRITICAL(&s_rtc_lock);
+    return ready;
+}
+
 static bool tirtc_session_is_connection_tracked(tirtc_conn_t conn)
 {
     bool tracked = false;
@@ -2181,23 +2253,15 @@ static void tirtc_session_on_peer_connect_result(int error, tirtc_conn_t hconn, 
         return;
     }
 
-    bool current_runtime = false;
-    taskENTER_CRITICAL(&s_rtc_lock);
-    current_runtime = s_session_mode == TIRTC_SESSION_MODE_CONNECT &&
-                      s_sdk_started &&
-                      !s_start_in_progress &&
-                      !s_stop_in_progress &&
-                      s_active_conn == NULL &&
-                      s_closing_conn == NULL;
-    taskEXIT_CRITICAL(&s_rtc_lock);
-
-    if (!current_runtime) {
-        ESP_LOGW(TAG, "rtc peer connection released after runtime state changed: hconn=%p", hconn);
-        (void)tirtc_session_disconnect_with_sdk_lock(hconn);
-        return;
-    }
-
-    if (!tirtc_session_try_accept_connection(hconn)) {
+    tirtc_session_conn_accept_result_t accept_result =
+        tirtc_session_accept_connection(hconn, true);
+    if (accept_result != TIRTC_SESSION_CONN_ACCEPTED) {
+        if (accept_result == TIRTC_SESSION_CONN_ACCEPT_STALE_CLOSING) {
+            APP_LOG_DETAIL(TAG,
+                           "rtc peer connect result ignored: hconn=%p already closing",
+                           hconn);
+            return;
+        }
         tirtc_session_note_event("peer conn reject");
         ESP_LOGW(TAG, "rtc peer connection rejected: hconn=%p", hconn);
         (void)tirtc_session_disconnect_with_sdk_lock(hconn);
@@ -2233,7 +2297,9 @@ static void tirtc_session_on_whip_connect_result(int error, tirtc_conn_t hconn, 
              hconn);
 
     if (error == 0 && hconn != NULL) {
-        if (tirtc_session_try_accept_connection(hconn)) {
+        tirtc_session_conn_accept_result_t accept_result =
+            tirtc_session_accept_connection(hconn, false);
+        if (accept_result == TIRTC_SESSION_CONN_ACCEPTED) {
             accepted = true;
             bool auto_media = tirtc_session_connection_auto_media_enabled(hconn);
             tirtc_session_bind_connection_user_data(hconn);
@@ -2254,8 +2320,16 @@ static void tirtc_session_on_whip_connect_result(int error, tirtc_conn_t hconn, 
                 tirtc_session_handle_runtime_event(&rtc_event);
             }
         } else {
-            ESP_LOGW(TAG, "WHIP connection rejected by runtime: hconn=%p", hconn);
-            (void)tirtc_session_disconnect_with_sdk_lock(hconn);
+            bool stale_closing =
+                accept_result == TIRTC_SESSION_CONN_ACCEPT_STALE_CLOSING;
+            if (!stale_closing) {
+                ESP_LOGW(TAG, "WHIP connection rejected by runtime: hconn=%p", hconn);
+                (void)tirtc_session_disconnect_with_sdk_lock(hconn);
+            } else {
+                APP_LOG_DETAIL(TAG,
+                               "WHIP result ignored: hconn=%p already closing",
+                               hconn);
+            }
             error = TIRTC_E_BUSY;
             hconn = NULL;
         }
@@ -2268,6 +2342,7 @@ static void tirtc_session_on_whip_connect_result(int error, tirtc_conn_t hconn, 
     if (request != NULL && request->cb != NULL) {
         request->cb(error, hconn, request->user_data);
     }
+    tirtc_session_finish_whip_connect_attempt(request != NULL ? request->attempt_id : 0U);
     tirtc_session_free_whip_request(request);
 }
 
@@ -2284,6 +2359,7 @@ static void tirtc_session_on_external_whip_connect_result(int error, tirtc_conn_
     if (request != NULL && request->cb != NULL) {
         request->cb(error, hconn, request->user_data);
     }
+    tirtc_session_finish_whip_connect_attempt(request != NULL ? request->attempt_id : 0U);
     tirtc_session_free_whip_request(request);
 }
 
@@ -3751,6 +3827,7 @@ bool tirtc_session_mark_sdk_stopped(uint32_t generation)
     s_active_conn_accepted_at_us = 0U;
     s_closing_conn = NULL;
     s_closing_conn_was_sdk_started = false;
+    s_whip_connect_active_attempt = 0U;
     s_sdk_prepare_in_progress = false;
     s_sdk_started = false;
     s_pending_stop_generation = 0U;
@@ -3777,6 +3854,7 @@ void tirtc_session_mark_sdk_network_offline(void)
     s_sdk_started = false;
     s_start_in_progress = false;
     s_stop_in_progress = false;
+    s_whip_connect_active_attempt = 0U;
     s_next_start_allowed_us = 0U;
     s_state_error_override = false;
     s_next_connection_auto_media = TIRTC_SESSION_DEFAULT_AUTO_MEDIA;
@@ -3893,9 +3971,11 @@ void tirtc_session_mark_access_hijacking_detected(void)
     taskEXIT_CRITICAL(&s_rtc_lock);
 }
 
-bool tirtc_session_try_accept_connection(tirtc_conn_t conn)
+static tirtc_session_conn_accept_result_t tirtc_session_accept_connection(
+    tirtc_conn_t conn,
+    bool require_connect_mode)
 {
-    bool accepted = false;
+    tirtc_session_conn_accept_result_t result = TIRTC_SESSION_CONN_ACCEPT_REJECTED;
     bool newly_accepted = false;
     bool auto_media = true;
     bool defer_media = false;
@@ -3911,8 +3991,12 @@ bool tirtc_session_try_accept_connection(tirtc_conn_t conn)
     start_in_progress = s_start_in_progress;
     active_conn = s_active_conn;
     closing_conn = s_closing_conn;
-    if (conn == NULL || s_stop_in_progress || s_closing_conn != NULL || !s_sdk_started || s_start_in_progress) {
-        accepted = false;
+    if (conn != NULL && conn == s_closing_conn) {
+        result = TIRTC_SESSION_CONN_ACCEPT_STALE_CLOSING;
+    } else if (conn == NULL || s_stop_in_progress || s_closing_conn != NULL ||
+               !s_sdk_started || s_start_in_progress ||
+               (require_connect_mode && s_session_mode != TIRTC_SESSION_MODE_CONNECT)) {
+        result = TIRTC_SESSION_CONN_ACCEPT_REJECTED;
     } else if (s_active_conn == NULL) {
         s_active_conn = conn;
         s_active_conn_accepted_at_us = esp_timer_get_time();
@@ -3952,19 +4036,19 @@ bool tirtc_session_try_accept_connection(tirtc_conn_t conn)
         s_next_connection_defer_media = false;
         auto_media = s_active_conn_auto_media;
         defer_media = s_active_conn_defer_media;
-        accepted = true;
+        result = TIRTC_SESSION_CONN_ACCEPTED;
         newly_accepted = true;
     } else if (s_active_conn == conn) {
         auto_media = s_active_conn_auto_media;
         defer_media = s_active_conn_defer_media;
-        accepted = true;
+        result = TIRTC_SESSION_CONN_ACCEPTED;
     }
-    if (accepted) {
+    if (result == TIRTC_SESSION_CONN_ACCEPTED) {
         tirtc_session_sync_stats_locked();
     }
     taskEXIT_CRITICAL(&s_rtc_lock);
 
-    if (!accepted) {
+    if (result == TIRTC_SESSION_CONN_ACCEPT_REJECTED) {
         ESP_LOGW(TAG,
                  "rtc connection rejected: hconn=%p active=%p closing=%p sdk_started=%d start=%d stop=%d",
                  conn,
@@ -3973,6 +4057,10 @@ bool tirtc_session_try_accept_connection(tirtc_conn_t conn)
                  sdk_started,
                  start_in_progress,
                  stop_in_progress);
+    } else if (result == TIRTC_SESSION_CONN_ACCEPT_STALE_CLOSING) {
+        APP_LOG_DETAIL(TAG,
+                       "rtc connection accept ignored: hconn=%p already closing",
+                       conn);
     } else if (newly_accepted) {
         APP_LOG_DETAIL(TAG,
                        "track accepted connection hconn=%p accepted_at_us=%llu auto_media=%d defer_media=%d",
@@ -3982,7 +4070,7 @@ bool tirtc_session_try_accept_connection(tirtc_conn_t conn)
                        defer_media ? 1 : 0);
     }
 
-    return accepted;
+    return result;
 }
 
 void tirtc_session_set_next_connection_auto_media(bool enabled)
@@ -4030,7 +4118,7 @@ esp_err_t tirtc_session_track_external_connection(tirtc_conn_t conn, bool auto_m
     }
 
     tirtc_session_set_next_connection_auto_media(auto_media);
-    if (!tirtc_session_try_accept_connection(conn)) {
+    if (tirtc_session_accept_connection(conn, false) != TIRTC_SESSION_CONN_ACCEPTED) {
         tirtc_session_set_next_connection_auto_media(TIRTC_SESSION_DEFAULT_AUTO_MEDIA);
         return ESP_ERR_INVALID_STATE;
     }
@@ -7007,7 +7095,9 @@ static void tirtc_session_on_event(int event, const void *data, int len)
 
 static void tirtc_session_on_conn_accepted(tirtc_conn_t hconn)
 {
-    bool accepted = tirtc_session_try_accept_connection(hconn);
+    tirtc_session_conn_accept_result_t accept_result =
+        tirtc_session_accept_connection(hconn, false);
+    bool accepted = accept_result == TIRTC_SESSION_CONN_ACCEPTED;
     tirtc_session_mode_t mode = TIRTC_SESSION_MODE_LISTEN;
     tirtc_session_state_t state = TIRTC_SESSION_STATE_STOPPED;
     bool sdk_started = false;
@@ -7033,6 +7123,12 @@ static void tirtc_session_on_conn_accepted(tirtc_conn_t hconn)
                    stop_in_progress ? 1 : 0);
 
     if (!accepted) {
+        if (accept_result == TIRTC_SESSION_CONN_ACCEPT_STALE_CLOSING) {
+            APP_LOG_DETAIL(TAG,
+                           "rtc conn accepted callback ignored: hconn=%p already closing",
+                           hconn);
+            return;
+        }
         ESP_LOGW(TAG, "rtc connection rejected: hconn=%p", hconn);
         (void)tirtc_session_disconnect_with_sdk_lock(hconn);
         return;
@@ -8456,6 +8552,8 @@ int tirtc_session_whip_connect(const char *service_desc,
     size_t token_len = 0;
     int64_t sdk_call_start_us = 0;
     int ret = TIRTC_E_BUSY;
+    tirtc_conn_t active_conn = NULL;
+    tirtc_conn_t closing_conn = NULL;
 
     if (service_desc == NULL || service_desc[0] == '\0' ||
         token == NULL || token[0] == '\0' || cb == NULL) {
@@ -8466,25 +8564,20 @@ int tirtc_session_whip_connect(const char *service_desc,
     if (!s_initialized) {
         return TIRTC_E_BUSY;
     }
-    taskENTER_CRITICAL(&s_rtc_lock);
-    bool sdk_ready = s_network_connected && s_sdk_initialized && s_sdk_started &&
-                      !s_sdk_prepare_in_progress && !s_start_in_progress &&
-                      !s_stop_in_progress && s_active_conn == NULL &&
-                      s_closing_conn == NULL;
-    tirtc_conn_t active_conn = s_active_conn;
-    tirtc_conn_t closing_conn = s_closing_conn;
-    taskEXIT_CRITICAL(&s_rtc_lock);
-    if (!sdk_ready) {
+    request = tirtc_session_alloc_whip_request(service_desc, token, cb, user_data);
+    if (request == NULL) {
+        return TIRTC_E_LACK_OF_RESOURCE;
+    }
+
+    request->attempt_id =
+        tirtc_session_begin_whip_connect_attempt(&active_conn, &closing_conn);
+    if (request->attempt_id == 0U) {
         ESP_LOGW(TAG,
                  "WHIP submit rejected before SDK call: active=%p closing=%p",
                  active_conn,
                  closing_conn);
+        tirtc_session_free_whip_request(request);
         return TIRTC_E_BUSY;
-    }
-
-    request = tirtc_session_alloc_whip_request(service_desc, token, cb, user_data);
-    if (request == NULL) {
-        return TIRTC_E_LACK_OF_RESOURCE;
     }
 
     ESP_LOGI(TAG,
@@ -8492,6 +8585,7 @@ int tirtc_session_whip_connect(const char *service_desc,
              (unsigned)service_desc_len,
              (unsigned)token_len);
     if (!tirtc_session_take_sdk_api_lock(TIRTC_SESSION_SDK_API_LOCK_WAIT_TICKS)) {
+        tirtc_session_finish_whip_connect_attempt(request->attempt_id);
         tirtc_session_free_whip_request(request);
         tirtc_session_set_next_connection_auto_media(TIRTC_SESSION_DEFAULT_AUTO_MEDIA);
         return TIRTC_E_BUSY;
@@ -8509,6 +8603,7 @@ int tirtc_session_whip_connect(const char *service_desc,
              (unsigned)((esp_timer_get_time() - sdk_call_start_us) / 1000LL));
 
     if (ret != 0) {
+        tirtc_session_finish_whip_connect_attempt(request->attempt_id);
         ESP_LOGE(TAG,
                  "WHIP submit rejected: ret=%d %s service_desc_len=%u token_len=%u",
                  ret,
@@ -8531,6 +8626,8 @@ int tirtc_session_whip_connect_external(const char *service_desc,
     size_t token_len = 0;
     int64_t sdk_call_start_us = 0;
     int ret = TIRTC_E_BUSY;
+    tirtc_conn_t active_conn = NULL;
+    tirtc_conn_t closing_conn = NULL;
 
     if (service_desc == NULL || service_desc[0] == '\0' ||
         token == NULL || token[0] == '\0' || cb == NULL) {
@@ -8542,19 +8639,19 @@ int tirtc_session_whip_connect_external(const char *service_desc,
         return TIRTC_E_BUSY;
     }
 
-    taskENTER_CRITICAL(&s_rtc_lock);
-    bool sdk_ready = s_network_connected && s_sdk_initialized && s_sdk_started &&
-                      !s_sdk_prepare_in_progress && !s_start_in_progress &&
-                      !s_stop_in_progress && s_active_conn == NULL &&
-                      s_closing_conn == NULL;
-    tirtc_conn_t active_conn = s_active_conn;
-    tirtc_conn_t closing_conn = s_closing_conn;
-    taskEXIT_CRITICAL(&s_rtc_lock);
-    if (!sdk_ready) {
+    request = tirtc_session_alloc_whip_request(service_desc, token, cb, user_data);
+    if (request == NULL) {
+        return TIRTC_E_LACK_OF_RESOURCE;
+    }
+
+    request->attempt_id =
+        tirtc_session_begin_whip_connect_attempt(&active_conn, &closing_conn);
+    if (request->attempt_id == 0U) {
         ESP_LOGW(TAG,
                  "WHIP external submit rejected before SDK call: active=%p closing=%p",
                  active_conn,
                  closing_conn);
+        tirtc_session_free_whip_request(request);
         return TIRTC_E_BUSY;
     }
 
@@ -8562,12 +8659,9 @@ int tirtc_session_whip_connect_external(const char *service_desc,
              "WHIP external submit begin: service_desc_len=%u token_len=%u",
              (unsigned)service_desc_len,
              (unsigned)token_len);
-    request = tirtc_session_alloc_whip_request(service_desc, token, cb, user_data);
-    if (request == NULL) {
-        return TIRTC_E_LACK_OF_RESOURCE;
-    }
 
     if (!tirtc_session_take_sdk_api_lock(TIRTC_SESSION_SDK_API_LOCK_WAIT_TICKS)) {
+        tirtc_session_finish_whip_connect_attempt(request->attempt_id);
         tirtc_session_free_whip_request(request);
         return TIRTC_E_BUSY;
     }
@@ -8584,6 +8678,7 @@ int tirtc_session_whip_connect_external(const char *service_desc,
              (unsigned)((esp_timer_get_time() - sdk_call_start_us) / 1000LL));
 
     if (ret != 0) {
+        tirtc_session_finish_whip_connect_attempt(request->attempt_id);
         ESP_LOGE(TAG,
                  "WHIP external submit rejected: ret=%d %s service_desc_len=%u token_len=%u",
                  ret,
@@ -8890,9 +8985,31 @@ esp_err_t tirtc_session_disconnect(void)
 
 int tirtc_session_disconnect_connection(tirtc_conn_t conn)
 {
+    bool was_sdk_started = false;
+    bool newly_detached = false;
+
     if (conn == NULL) {
         return TIRTC_E_INVALID_PARAMETER;
     }
+
+    if (tirtc_session_begin_connection_shutdown(conn,
+                                                0,
+                                                &was_sdk_started,
+                                                &newly_detached)) {
+        if (!newly_detached) {
+            APP_LOG_DETAIL(TAG,
+                           "rtc disconnect already pending: hconn=%p",
+                           conn);
+            return 0;
+        }
+        if (!tirtc_session_enqueue_disconnect_request(conn, true, was_sdk_started)) {
+            tirtc_session_complete_connection_shutdown(conn, was_sdk_started);
+            return TIRTC_E_BUSY;
+        }
+        tirtc_session_note_event("disconnect req");
+        return 0;
+    }
+
     if (!tirtc_session_enqueue_disconnect_request(conn, false, false)) {
         return TIRTC_E_BUSY;
     }

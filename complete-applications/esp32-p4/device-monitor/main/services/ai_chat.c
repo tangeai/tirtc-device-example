@@ -607,7 +607,7 @@ static esp_err_t ai_chat_disconnect_conn(tirtc_conn_t conn)
     if (conn == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    return tirtc_session_disconnect();
+    return tirtc_session_disconnect_connection(conn) == 0 ? ESP_OK : ESP_FAIL;
 }
 
 static char *ai_chat_build_notification_json(const char *method)
@@ -1365,7 +1365,7 @@ static void ai_chat_media_capture_cb(const uint8_t *data,
     }
 }
 
-static esp_err_t ai_chat_wait_rtc_ready(void)
+static esp_err_t ai_chat_wait_rtc_ready(uint32_t generation)
 {
     uint32_t waited_ms = 0;
     uint32_t last_log_ms = 0;
@@ -1374,9 +1374,14 @@ static esp_err_t ai_chat_wait_rtc_ready(void)
     ESP_LOGI(TAG, "AI Chat waiting for RTC ready before connect");
     while (waited_ms <= AI_CHAT_RTC_READY_WAIT_MS) {
         tirtc_session_stats_t stats = {0};
+
+        if (!ai_chat_generation_matches(generation)) {
+            return ESP_ERR_INVALID_STATE;
+        }
+
         tirtc_session_get_stats(&stats);
         last_stats = stats;
-        if (stats.sdk_started && !stats.active_connection) {
+        if (tirtc_session_is_ready_for_new_connection()) {
             ESP_LOGI(TAG,
                      "AI Chat RTC ready: waited=%ums state=%d last_event=%s",
                      (unsigned)waited_ms,
@@ -1384,19 +1389,16 @@ static esp_err_t ai_chat_wait_rtc_ready(void)
                      stats.last_event[0] != '\0' ? stats.last_event : "none");
             return ESP_OK;
         }
-        if (stats.active_connection) {
-            ESP_LOGW(TAG, "rtc already has an active connection");
-            return ESP_ERR_INVALID_STATE;
-        }
-
         esp_err_t prepare_ret = ESP_OK;
-        if (system_time_has_valid_time() && stats.sdk_initialized) {
+        bool rtc_start_needed = !stats.sdk_initialized || !stats.sdk_started;
+        if (system_time_has_valid_time() && rtc_start_needed &&
+            stats.state != TIRTC_SESSION_STATE_DISCONNECTING) {
             prepare_ret = tirtc_session_prepare_sdk();
             if (prepare_ret != ESP_OK && prepare_ret != ESP_ERR_INVALID_STATE) {
                 ESP_LOGW(TAG, "AI Chat RTC prepare failed before connect: %s", esp_err_to_name(prepare_ret));
                 return prepare_ret;
             }
-        } else {
+        } else if (!system_time_has_valid_time()) {
             prepare_ret = ESP_ERR_INVALID_STATE;
         }
 
@@ -2236,19 +2238,26 @@ static void ai_chat_start_task(void *ctx)
         goto finish;
     }
     *config = s_ai.config;
-    ai_chat_set_state_locked(AI_CHAT_STATE_TOKEN, "request token");
     xSemaphoreGive(s_lock);
 
     ret = ai_chat_verify_time_ready();
     if (ret == ESP_OK && ai_chat_generation_matches(generation)) {
+        int64_t rtc_wait_start_us = esp_timer_get_time();
+        ret = ai_chat_wait_rtc_ready(generation);
+        rtc_wait_elapsed_ms = (uint32_t)((esp_timer_get_time() - rtc_wait_start_us) / 1000LL);
+    }
+    if (ret == ESP_OK && ai_chat_generation_matches(generation)) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (!ai_chat_generation_matches_locked(generation)) {
+            xSemaphoreGive(s_lock);
+            goto finish;
+        }
+        ai_chat_set_state_locked(AI_CHAT_STATE_TOKEN, "request token");
+        xSemaphoreGive(s_lock);
+
         int64_t token_start_us = esp_timer_get_time();
         ret = ai_chat_token_request_join(config, join_info);
         token_elapsed_ms = (uint32_t)((esp_timer_get_time() - token_start_us) / 1000LL);
-    }
-    if (ret == ESP_OK && ai_chat_generation_matches(generation)) {
-        int64_t rtc_wait_start_us = esp_timer_get_time();
-        ret = ai_chat_wait_rtc_ready();
-        rtc_wait_elapsed_ms = (uint32_t)((esp_timer_get_time() - rtc_wait_start_us) / 1000LL);
     }
     if (ret == ESP_OK && !ai_chat_generation_matches(generation)) {
         goto finish;

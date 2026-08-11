@@ -27,10 +27,14 @@ static void tirtc_session_handle_conn_accepted(const tirtc_session_event_t *even
 {
     bool auto_media = true;
 
-    if (!tirtc_session_try_accept_connection(event->payload.conn.conn)) {
-        tirtc_session_note_event("reject extra conn");
-        ESP_LOGW(TAG, "rtc connection rejected: another connection is active");
-        (void)tirtc_session_disconnect_connection(event->payload.conn.conn);
+    /* Producers accept or reject the handle before queuing this event. If
+     * ownership changed while it waited, the handle is already closing or
+     * closed; another disconnect would double-destroy the SDK connection. */
+    if (!tirtc_session_is_connection_usable(event->payload.conn.conn)) {
+        tirtc_session_note_event("stale conn accept");
+        ESP_LOGI(TAG,
+                 "rtc accepted event ignored after lifecycle changed: hconn=%p",
+                 event->payload.conn.conn);
         return;
     }
 

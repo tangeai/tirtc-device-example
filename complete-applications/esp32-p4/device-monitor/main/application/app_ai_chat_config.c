@@ -3,6 +3,7 @@
 #include "esp_check.h"
 #include "nvs.h"
 
+#include "platform_nvs_async.h"
 #include "platform_storage.h"
 
 static const char *TAG = "app_ai_chat_config";
@@ -53,21 +54,11 @@ uint8_t app_ai_chat_config_get_avatar(void)
 
 esp_err_t app_ai_chat_config_set_avatar(uint8_t avatar)
 {
-    nvs_handle_t nvs_handle = 0;
     uint8_t normalized = app_ai_chat_config_normalize_avatar(avatar);
 
-    ESP_RETURN_ON_ERROR(platform_storage_init(), TAG, "nvs init failed");
-
-    esp_err_t ret = nvs_open(APP_AI_CHAT_NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    ret = nvs_set_u8(nvs_handle, APP_AI_CHAT_NVS_KEY_AVATAR, normalized);
-    if (ret == ESP_OK) {
-        ret = nvs_commit(nvs_handle);
-    }
-    nvs_close(nvs_handle);
+    esp_err_t ret = platform_nvs_async_set_u8_and_wait(APP_AI_CHAT_NVS_NAMESPACE,
+                                                        APP_AI_CHAT_NVS_KEY_AVATAR,
+                                                        normalized);
     if (ret == ESP_OK) {
         s_ai_chat_config.avatar = normalized;
     }

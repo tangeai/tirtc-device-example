@@ -16,8 +16,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "app_task_affinity.h"
-#include "nvs.h"
-#include "platform_storage.h"
+#include "platform_nvs_async.h"
 
 static const char *TAG = "device_binding";
 
@@ -205,32 +204,14 @@ static bool device_binding_pending_store_valid(const device_binding_pending_stor
 
 static esp_err_t device_binding_clear_pending_session(void)
 {
-    nvs_handle_t nvs_handle = 0;
-    esp_err_t ret = platform_storage_init();
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    ret = nvs_open(DEVICE_BINDING_PENDING_NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    ret = nvs_erase_key(nvs_handle, DEVICE_BINDING_PENDING_NVS_KEY);
-    if (ret == ESP_ERR_NVS_NOT_FOUND) {
-        ret = ESP_OK;
-    }
-    if (ret == ESP_OK) {
-        ret = nvs_commit(nvs_handle);
-    }
-    nvs_close(nvs_handle);
-    return ret;
+    return platform_nvs_async_erase_key_and_wait(DEVICE_BINDING_PENDING_NVS_NAMESPACE,
+                                                  DEVICE_BINDING_PENDING_NVS_KEY);
 }
 
 static esp_err_t device_binding_save_pending_session(const device_binding_identity_t *identity,
                                                      const device_binding_http_report_result_t *report,
                                                      uint32_t wait_timeout_ms)
 {
-    nvs_handle_t nvs_handle = 0;
     time_t now = 0;
     device_binding_pending_store_t store = {
         .magic = DEVICE_BINDING_PENDING_MAGIC,
@@ -251,19 +232,10 @@ static esp_err_t device_binding_save_pending_session(const device_binding_identi
     strlcpy(store.temp_client_id, report->temp_client_id, sizeof(store.temp_client_id));
     strlcpy(store.temp_token, report->temp_token, sizeof(store.temp_token));
 
-    esp_err_t ret = platform_storage_init();
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    ret = nvs_open(DEVICE_BINDING_PENDING_NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    ret = nvs_set_blob(nvs_handle, DEVICE_BINDING_PENDING_NVS_KEY, &store, sizeof(store));
-    if (ret == ESP_OK) {
-        ret = nvs_commit(nvs_handle);
-    }
-    nvs_close(nvs_handle);
+    esp_err_t ret = platform_nvs_async_set_blob_and_wait(DEVICE_BINDING_PENDING_NVS_NAMESPACE,
+                                                          DEVICE_BINDING_PENDING_NVS_KEY,
+                                                          &store,
+                                                          sizeof(store));
     if (ret == ESP_OK) {
         ESP_LOGI(TAG,
                  "binding pending session saved: code=%s temp_client=%s expires_in=%us",
@@ -277,19 +249,17 @@ static esp_err_t device_binding_save_pending_session(const device_binding_identi
 static bool device_binding_load_pending_session(const device_binding_identity_t *identity,
                                                 device_binding_http_report_result_t *report)
 {
-    nvs_handle_t nvs_handle = 0;
     device_binding_pending_store_t store = {0};
     size_t store_len = sizeof(store);
     time_t now = 0;
 
-    if (identity == NULL || report == NULL || platform_storage_init() != ESP_OK) {
+    if (identity == NULL || report == NULL) {
         return false;
     }
-    if (nvs_open(DEVICE_BINDING_PENDING_NVS_NAMESPACE, NVS_READONLY, &nvs_handle) != ESP_OK) {
-        return false;
-    }
-    esp_err_t ret = nvs_get_blob(nvs_handle, DEVICE_BINDING_PENDING_NVS_KEY, &store, &store_len);
-    nvs_close(nvs_handle);
+    esp_err_t ret = platform_nvs_async_get_blob(DEVICE_BINDING_PENDING_NVS_NAMESPACE,
+                                                 DEVICE_BINDING_PENDING_NVS_KEY,
+                                                 &store,
+                                                 &store_len);
     if (ret != ESP_OK) {
         return false;
     }
@@ -806,7 +776,13 @@ void device_binding_reset_state(const char *reason)
             reason != NULL ? reason : "binding reset",
             sizeof(s_binding.snapshot.message));
     xSemaphoreGive(s_binding.lock);
-    (void)device_binding_clear_pending_session();
+
+    esp_err_t ret = device_binding_clear_pending_session();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "binding pending session clear failed during reset: %s",
+                 esp_err_to_name(ret));
+    }
 }
 
 void device_binding_get_snapshot(device_binding_snapshot_t *snapshot)

@@ -8,7 +8,7 @@ P4+C6 前置检查、构建、烧录、首次联网和基础功能确认。项�
 
 | 项目 | 本版本要求 |
 | --- | --- |
-| 应用 | TiRTC ESP32-P4 完整设备应用 `1.3.1` |
+| 应用 | TiRTC ESP32-P4 完整设备应用 `1.3.2` |
 | 目标板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |
 | 主芯片 | ESP32-P4 |
 | 网络芯片 | ESP32-C6，运行 ESP-Hosted slave |
@@ -45,7 +45,7 @@ P4 负责 UI、摄像头、音频、编解码和 TiRTC 应用；C6 只负责 Wi-
 ```powershell
 git clone https://github.com/tangeai/tirtc-device-example.git
 cd tirtc-device-example
-git checkout esp32-p4-device-monitor-v1.3.1
+git checkout esp32-p4-device-monitor-v1.3.2
 cd complete-applications/esp32-p4/device-monitor
 ```
 
@@ -57,7 +57,7 @@ Select-String -Path CMakeLists.txt -Pattern 'PROJECT_VER'
 Select-String -Path components/tirtc_sdk/include/tiRTC.h -Pattern 'TIRTC_VERSION_'
 ```
 
-预期应用版本为 `1.3.1`，TiRTC SDK API 版本为 `2.3.0`。本项目使用包含 HTTP DNS disable
+预期应用版本为 `1.3.2`，TiRTC SDK API 版本为 `2.3.0`。本项目使用包含 HTTP DNS disable
 回移的 ESP32-P4 定制兼容快照，不能只看版本号替换静态库。完整 commit 和哈希见
 [VERSION.md](../VERSION.md)。
 
@@ -153,22 +153,22 @@ idf.py menuconfig
 
 ### 7.1 快速体验：烧录 Release 完整镜像
 
-从 [`esp32-p4-device-monitor-v1.3.1` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.1) 下载：
+从 [`esp32-p4-device-monitor-v1.3.2` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.2) 下载：
 
 ```text
-esp32p4-tirtc-device-monitor-full-v1.3.1.bin
+esp32p4-tirtc-device-monitor-full-v1.3.2.bin
 ```
 
 文件大小应为 `16,777,216` bytes，SHA-256 应为：
 
 ```text
-3F55403C60CE371D81239CD5EC028FBFD1A27CAC0B693EB925CB1C60F3CFE1C5
+87bfb67d1ba30d7f79663f63891e29f7f4f4367c80ff0d5cecb1b46f301d40e9
 ```
 
 PowerShell 可执行：
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\esp32p4-tirtc-device-monitor-full-v1.3.1.bin
+Get-FileHash -Algorithm SHA256 .\esp32p4-tirtc-device-monitor-full-v1.3.2.bin
 ```
 
 然后：
@@ -209,7 +209,7 @@ Windows 端口示例为 `COM7`，Linux 示例为 `/dev/ttyACM0`；请使用电�
 复位后先看固件身份：
 
 ```text
-firmware version: 1.3.1 project=tirtc_esp32p4_device_app ...
+firmware version: 1.3.2 project=tirtc_esp32p4_device_app ...
 system ready: ESP32-P4 TiRTC dashboard
 ```
 
@@ -274,12 +274,42 @@ binding verification code ready: mqtt subscribed
 一次看到首帧还不够。继续观察帧率、码率、音频连续性、队列压力，再连续进入/退出场景，
 确认摄像头、音频、显示和连接都能被下一次会话重新获取。
 
-## 10. 用 1.3.1 的日志定位第一处异常
+## 10. 用 1.3.2 的状态和日志定位第一处异常
 
-1.3.1 把关键日志按媒体阶段拆开。出现黑屏或卡顿时，先找最早停止推进的一段，不要直接
-重启、降分辨率或关闭功能。
+1.3.2 在保留媒体分阶段日志的基础上，进一步收紧 NVS 和 RTC 连接生命周期。遇到绑定失败、
+重复连接或媒体停滞时，先找最早停止推进的一层，不要直接擦除 NVS、反复重启、降分辨率或
+关闭功能。
 
-### 10.1 摄像头和上行节拍
+### 10.1 NVS 和绑定重置
+
+运行时 NVS 写入由 `nvs_async` internal-RAM worker 串行执行。关键顺序是：请求复制到控制内存、
+worker 打开 namespace、写入或删除、commit、关闭 handle，再通知等待方。
+
+- `nvs worker ready`：固定 worker 和有界队列已经创建。
+- `nvs op failed`：先按日志中的 namespace、key、operation 和返回码定位第一项失败。
+- RTC 凭证只有在新 blob commit 成功后才成为权威值；旧分散 key 的清理由同一队列按序执行。
+- 服务端要求 token reset 时，回调只投递 `DEVICE_REBIND_REQUIRED`；APP control task 才会启动
+  重绑定。看到 control queue 未就绪或已满，应先处理应用控制层，不要绕过队列直接重绑。
+
+验证时至少连续完成两次“重置绑定 -> 重新获取绑定码 -> 绑定成功 -> 重启仍能读取身份”。
+若失败，分别记录 NVS commit、control event、临时 MQTT、绑定确认和正式在线停在哪一步。
+
+### 10.2 RTC 和 WHIP 连接生命周期
+
+每次 WHIP 提交都有 attempt ID。空闲窗口只允许一个 attempt 占位；SDK 回调完成后释放，
+网络离线或 SDK 停止也会清理。AI Chat 会在申请 Token 前等待 RTC 同时满足：网络在线、SDK
+已启动、没有 prepare/start/stop、没有 active/closing connection、没有进行中的 WHIP attempt。
+
+- `WHIP submit rejected before SDK call`：RTC 尚未真正空闲，先看 active、closing 和当前 attempt。
+- `stale conn accept` 或 `already closing`：过期回调命中了已关闭中的句柄，当前实现会忽略它，
+  不对同一连接做第二次销毁。
+- `rtc disconnect already pending`：同一连接已经进入关闭队列，重复断连按幂等成功处理。
+- AI 启动 generation 已变化时，旧任务应停止，不应继续申请 Token 或提交连接。
+
+连续切换 AI Chat、设备呼叫和微信呼叫时，应看到每一轮连接先完整关闭，下一轮才开始提交。
+如果 SDK 已收到提交却始终没有回调，需要保留时间线；仅看到 UI 返回不能证明 attempt 已释放。
+
+### 10.3 摄像头和上行节拍
 
 首帧日志包含 `seq` 和 `drain`；周期统计包含 `seq_delta`、`avg_gap_us`、capture、encode、
 callback 耗时以及 internal/DMA/PSRAM 水位。
@@ -293,7 +323,7 @@ callback 耗时以及 internal/DMA/PSRAM 水位。
 应用节拍使用向上取整的帧间隔并保持原相位：15fps 约为 `67ms`，20fps 为 `50ms`。单次超时
 只跳过已经错过的周期，不会从当前时刻重新起算并不断漂移。
 
-### 10.2 TiRTC 上行和远端下行
+### 10.4 TiRTC 上行和远端下行
 
 `video tx liveness` 会给出 `enq/deq/api/ok` 四个年龄：
 
@@ -306,7 +336,7 @@ callback 耗时以及 internal/DMA/PSRAM 水位。
 `VRX stall stage=renderer` 表示 SDK callback 已经收到包，但 renderer 提交没有继续推进。
 前者优先查订阅、对端和网络，后者再查 codec、输入池和 renderer。
 
-### 10.3 H264 下行 decoder
+### 10.5 H264 下行 decoder
 
 `video stall stage=input` 表示输入帧间隔先拉长；`stage=decode` 表示 TinyH264 处理单个 access
 unit 先变慢。周期统计会分别显示 receive、queued、decoded、converted、presented fps，
@@ -321,7 +351,7 @@ TinyH264 helper 运行在 CPU1，优先级高于同步等待它的 caller。同�
 最终返回后，才能安全销毁 decoder 并从新 IDR 重建；永久不返回时的回收仍需长稳验证，不能
 仅凭后续 UI 可操作就认定 decoder 已恢复。
 
-### 10.4 内存水位
+### 10.6 内存水位
 
 `memory waterline` 分为 `normal`、`warning`、`critical`。它同时检查 internal free、internal
 largest block、PSRAM free 和 PSRAM largest block，并记录历史 minimum 与 PSRAM 分配失败次数。
@@ -330,7 +360,7 @@ largest block、PSRAM free 和 PSRAM largest block，并记录历史 minimum 与
 一次进入通话时下降不等于泄漏。连续退出并重新进入场景，观察水位能否回到稳定区间；如果
 free 恢复但 largest block 持续下降，优先检查碎片化和大块资源生命周期。
 
-### 10.5 微信 worker
+### 10.7 微信 worker
 
 微信拒绝、断开等 SDK 耗时操作进入固定 work worker 串行执行；接听 worker 使用 PSRAM 大栈
 常驻，并用请求序号隔离已取消或已被新请求替代的任务。遇到接听问题时依次看请求序号、
@@ -348,6 +378,9 @@ worker 是否唤醒、会话 generation 是否仍有效，再看 SDK 返回值�
 | 屏幕亮但 Wi-Fi 列表为空 | C6 slave、SDIO、reset、C6 固件兼容性 | 先恢复 ESP-Hosted；TiRTC 和账号配置此时还没参与 |
 | Wi-Fi 已连但不显示绑定码 | 时间、DNS、服务发现、临时 MQTT | 看 binding/HTTP/MQTT 的首个错误，不要反复擦 Flash |
 | 绑定成功但 TiRTC 测试失败 | 设备身份、Token、服务可达性 | 先用内置 TiRTC 测试定位 token、房间或媒体阶段 |
+| 重置绑定后无法再次绑定 | `nvs op failed`、重绑定 control event、pending session | 先确认凭证 commit 和 APP control queue，不要从服务回调直接重绑 |
+| AI/呼叫快速切换后一直 busy | active/closing connection、WHIP attempt、session generation | 先确认上一连接完成幂等关闭，过期任务没有继续提交 |
+| 同一句柄反复出现关闭日志 | stale-closing 回调和 disconnect pending | 记录第一次 shutdown；重复请求应被忽略或幂等完成，不应再次销毁 SDK 句柄 |
 | IPC 远端黑屏 | 摄像头启动、H264 首帧、订阅状态 | 按 camera -> encoder -> TiRTC -> subscriber 分段看首帧 |
 | 微信视频黑屏 | 先分清上行还是下行 | 上行查 `480x320` H264；下行查 `640x480` MJPEG 请求、首包和 JPEG 解码 |
 | 微信画面比例不对 | 服务端实际下发尺寸和方向 | 记录实际 MJPEG 尺寸；不要按“720p”假设修改 P4 缩放 |
@@ -379,14 +412,13 @@ worker 是否唤醒、会话 generation 是否仍有效，再看 SDK 返回值�
 
 ## 13. 这份发布已经证明到哪里
 
-公开源码固定到来源 Tag 和 commit，应用/SDK 版本及静态库哈希已有记录。公开候选已在
-ESP-IDF `5.5.4` 完成一次干净构建：应用镜像 `6,924,512` bytes，SHA-256
-`EBD5FE3B930BA000FDBE7094F287AD66CBB745D56F8D167ED4890895A691DFA5`，编译错误为 0，最小
-app 分区剩余 `0x95720` bytes（8%）。正式完整镜像只上传 GitHub Release，不进入 Git；大小
-`16,777,216` bytes，SHA-256
-`3F55403C60CE371D81239CD5EC028FBFD1A27CAC0B693EB925CB1C60F3CFE1C5`。
+公开源码固定到来源 Tag 和 commit，应用/SDK 版本及静态库哈希已有记录。ESP-IDF `5.5.4`
+正式构建对应 `project_version=1.3.2`：应用镜像 `6,927,360` bytes，SHA-256
+`2df6d9d626a05f19a4fd1f15eb854c54119a32ccd475090f6713f2629afc90e2`。正式完整镜像只上传 GitHub Release，不进入 Git；大小
+`16,777,216` bytes，SHA-256 `87bfb67d1ba30d7f79663f63891e29f7f4f4367c80ff0d5cecb1b46f301d40e9`。
 
 干净构建证明候选能在记录的环境中完成编译和链接。烧录成功、C6/SDIO 可用、平台在线、
 音视频首帧和长稳结果仍要按上面的步骤在目标板上分别确认。这样记录问题时，大家能立刻知道
-证据停在哪一层，不必从头猜。TinyH264 同步保护、decoder 隔离和返回后的重建都需要重点做
-连续呼叫、故障注入和长稳验证。
+证据停在哪一层，不必从头猜。`1.3.2` 还应重点验证连续重绑定、NVS commit、快速切换业务、
+并发 WHIP 提交、过期回调和重复 disconnect；TinyH264 同步保护、decoder 隔离和返回后的重建
+仍需要连续呼叫、故障注入和长稳验证。

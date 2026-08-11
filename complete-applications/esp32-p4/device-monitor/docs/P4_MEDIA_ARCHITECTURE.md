@@ -3,11 +3,12 @@
 本文档说明摄像头、音频、TiRTC、显示和内存的所有权。目标是让每条媒体链路只有一个生命周期
 所有者，运行时不通过跨层补丁争抢硬件或连接句柄。
 
-本文对应应用版本 `1.3.1` 和 TiRTC SDK `2.3.0` 定制兼容快照。版本来源见
+本文对应应用版本 `1.3.2` 和 TiRTC SDK `2.3.0` 定制兼容快照。版本来源见
 [SOURCE_PROVENANCE.md](../SOURCE_PROVENANCE.md)，项目入口见 [README.md](../README.md)。
 环境、构建、烧录和首次启动见 [GETTING_STARTED_CN.md](GETTING_STARTED_CN.md)。
-下列参数描述当前源码设计和默认配置。公开候选已完成 ESP-IDF `5.5.4` 干净构建；构建通过
-不单独构成烧录、联网、媒体运行或长稳证明。
+下列参数描述当前源码设计和默认配置。`1.3.2` 的 SDK、媒体尺寸、码率、GOP 和缓冲池默认值
+均与 `1.3.1` 相同；本版主要收紧 NVS 与 RTC 连接生命周期。构建通过不单独构成烧录、联网、
+媒体运行或长稳证明。
 
 本文中的上行和下行均以 P4 设备为参照：`P4 设备 -> 服务端` 为上行，
 `服务端 -> P4 设备` 为下行。微信客户端采集端的原始分辨率不由本工程配置。
@@ -68,6 +69,21 @@ PSRAM 分配失败次数。运行水位分为：
 正常状态不周期刷屏；只在 `normal/warning/critical` 转换、恢复或出现新的 PSRAM 分配失败时
 记录 `memory waterline`。free 恢复但 largest block 持续下降时，应优先排查碎片化，而不是
 简单增加重试。
+
+### NVS internal-RAM worker
+
+`main/platform/platform_nvs_async.c` 是运行时持久化的统一入口。调用方把 namespace、key 和
+value 复制到控制内存后，由 internal-RAM task 串行执行 `open -> set/erase -> commit -> close`。
+队列中传递请求指针，不让 PSRAM task stack 直接进入 flash/NVS 操作。
+
+- 设备 UUID、音量、AI 头像、RTC 凭证和绑定 pending session 复用同一 worker。
+- 需要确认落盘后才能继续的操作使用 `*_and_wait()`；worker 完成 commit 后才唤醒调用方。
+- 无需同步等待的 legacy key 清理由同一队列按提交顺序执行。
+- 绑定 token reset 回调不直接读写 NVS或启动绑定，而是向 APP control queue 投递
+  `DEVICE_REBIND_REQUIRED`，由应用层接管后续生命周期。
+
+这条链路解决的是 NVS 执行上下文和顺序所有权。它不等同于已经完成掉电、队列满、flash
+错误或连续重绑定真机验证；这些情况仍需按实际日志检查第一项失败。
 
 ## P4 设备视频上行
 
@@ -162,6 +178,27 @@ PSRAM 分配失败次数。运行水位分为：
 - 音频使用独立队列，视频启动期间只允许有界延后。
 - 无效句柄、远端关闭和 teardown 在协议层与应用层闭环，UI 不直接释放连接。
 
+### RTC/WHIP 连接生命周期
+
+连接状态由 `tirtc_session` 在 critical section 中统一持有。`1.3.2` 把“可以发起新连接”定义为：
+网络在线、SDK 已初始化且已启动、没有 prepare/start/stop、没有 active connection、没有
+closing connection，也没有进行中的 WHIP attempt。
+
+- 每次 WHIP 提交先取得非零 attempt ID，原子占住空闲窗口；并发提交会在调用 SDK 前返回 busy。
+- SDK 同步拒绝、拿不到 SDK API lock 或异步回调完成时释放对应 attempt；网络离线和 SDK 停止
+  会清理当前 attempt。
+- producer 在投递 accepted event 前先认领连接。event 排队期间生命周期已经变化时，consumer
+  只把它记为 stale event，不对同一句柄再次 disconnect。
+- 连接接受结果区分正常拒绝和 `STALE_CLOSING`。已经进入 closing 的句柄命中过期回调时直接
+  忽略，避免 SDK connection double-destroy。
+- `tirtc_session_disconnect_connection(conn)` 先原子脱离 active owner，再投递关闭请求；同一
+  句柄已经在关闭时重复调用保持幂等。
+- AI Chat 在获取 Token 前调用 RTC ready 检查，并在等待期间持续核对 generation。用户退出或
+  新任务替代旧任务后，旧启动流程不能继续提交连接；超时清理使用具体连接句柄。
+
+这些规则保护连接所有权，但不把 SDK 永不回调等外部故障伪装成成功。验证时应保留 attempt、
+active、closing、generation 和 disconnect 时间线，确认每轮会话关闭后下一轮才开始。
+
 本地上行 liveness 按 `enq -> deq -> SDK API -> send OK` 记录年龄、队列、free slot、capture
 状态和 SDK buffer 水位。远端下行把停滞分为：
 
@@ -220,17 +257,21 @@ IPC 等其他档位按当前基准码率和画面规模计算范围。
 
 ## 建议验证
 
-公开候选已经完成 ESP-IDF `5.5.4` 干净构建，应用镜像为 `6,924,512` bytes，SHA-256 为
-`EBD5FE3B930BA000FDBE7094F287AD66CBB745D56F8D167ED4890895A691DFA5`。由该构建生成的
-`16MB` 完整镜像只上传 GitHub Release，不进入 Git；它不改变以下目标板验证要求：
+ESP-IDF `5.5.4` 正式构建对应 `project_version=1.3.2`，应用镜像为
+`6,927,360` bytes，SHA-256 为 `2df6d9d626a05f19a4fd1f15eb854c54119a32ccd475090f6713f2629afc90e2`。由同一构建生成的完整镜像
+为 `16,777,216` bytes，SHA-256 为 `87bfb67d1ba30d7f79663f63891e29f7f4f4367c80ff0d5cecb1b46f301d40e9`，只上传 GitHub
+Release，不进入 Git；它不改变以下目标板验证要求：
 
 1. 检查横屏显示和触摸坐标。
 2. 检查绑定、正式 MQTT 和 TiRTC 上线。
-3. 分别检查 IPC、设备呼叫、微信 VoIP 和 AI Chat。
-4. 对微信 VoIP 分别确认 P4 设备发送的 `480x320` H264 和服务端下发的 MJPEG 均有首帧证据，
+3. 连续完成至少两次重置绑定、重新绑定和重启，核对 NVS commit 与 APP control event 顺序。
+4. 快速切换 AI Chat、设备呼叫和微信呼叫，确认同一时刻只有一个 WHIP attempt，过期回调
+   不会再次销毁 closing connection，重复 disconnect 保持幂等。
+5. 分别检查 IPC、设备呼叫、微信 VoIP 和 AI Chat。
+6. 对微信 VoIP 分别确认 P4 设备发送的 `480x320` H264 和服务端下发的 MJPEG 均有首帧证据，
    并记录服务端实际下发分辨率。
-5. 保持每个主要场景至少 5 分钟，观察 fps、bitrate、queue、DMA largest block、PSRAM pool
+7. 保持每个主要场景至少 5 分钟，观察 fps、bitrate、queue、DMA largest block、PSRAM pool
    和 AEC。
-6. 每个场景连续进入和退出至少 10 次，确认无残留资源和连接句柄。
-7. 对 H264 下行做连续呼叫和故障注入，确认 sync guard 后链路继续推进，并记录 decode 超过
+8. 每个场景连续进入和退出至少 10 次，确认无残留资源和连接句柄。
+9. 对 H264 下行做连续呼叫和故障注入，确认 sync guard 后链路继续推进，并记录 decode 超过
    `2s` 时原调用是否返回、decoder 是否能从新 IDR 重建。

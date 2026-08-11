@@ -46,6 +46,7 @@
 #include "media_sink.h"
 #include "network.h"
 #include "ota.h"
+#include "platform_nvs_async.h"
 #include "rtc_media_bridge.h"
 #include "rtc_transport.h"
 #include "sender_test.h"
@@ -122,6 +123,7 @@ typedef enum {
 	APP_CONTROL_EVENT_RTC_PREPARE_AFTER_IDENTITY,
 	APP_CONTROL_EVENT_RTC_IDENTITY_CONFLICT,
 	APP_CONTROL_EVENT_DEVICE_UNBIND,
+	APP_CONTROL_EVENT_DEVICE_REBIND_REQUIRED,
 	APP_CONTROL_EVENT_DEVICE_ONLINE_READY,
 	APP_CONTROL_EVENT_CALL_SESSION_ENDED,
 	APP_CONTROL_EVENT_RTC_VIDEO_BITRATE_REQUIRED,
@@ -1411,7 +1413,18 @@ static void app_device_online_rebind_required_cb(void *ctx)
 	(void)ctx;
 
 	ESP_LOGI(TAG, "device token reset reported by server");
-	(void)app_start_binding_with_retained_credentials("token-reset");
+	if (s_app_control_queue == NULL) {
+		ESP_LOGW(TAG, "device rebind event dropped: control queue not ready");
+		return;
+	}
+
+	app_control_event_t event = {
+		.type = APP_CONTROL_EVENT_DEVICE_REBIND_REQUIRED,
+	};
+	strlcpy(event.reason, "token-reset", sizeof(event.reason));
+	if (xQueueSendToBack(s_app_control_queue, &event, pdMS_TO_TICKS(200)) != pdTRUE) {
+		ESP_LOGW(TAG, "device rebind event dropped: control queue full");
+	}
 }
 
 static void app_device_online_ready_cb(void *ctx)
@@ -1873,6 +1886,18 @@ static void app_control_task(void *arg)
 			if (ret != ESP_OK) {
 				ESP_LOGW(TAG,
 					 "device unbind flow failed: reason=%s ret=%s",
+					 reason,
+					 esp_err_to_name(ret));
+			}
+			break;
+		}
+		case APP_CONTROL_EVENT_DEVICE_REBIND_REQUIRED:
+		{
+			const char *reason = event.reason[0] != '\0' ? event.reason : "token-reset";
+			esp_err_t ret = app_start_binding_with_retained_credentials(reason);
+			if (ret != ESP_OK) {
+				ESP_LOGW(TAG,
+					 "device rebind flow failed: reason=%s ret=%s",
 					 reason,
 					 esp_err_to_name(ret));
 			}
@@ -3538,6 +3563,7 @@ esp_err_t app_init(void)
 	}
 	app_log_heap_snapshot("media prewarm after");
 	ESP_RETURN_ON_ERROR(app_audio_policy_init(), TAG, "audio policy init failed");
+	ESP_RETURN_ON_ERROR(platform_nvs_async_init(), TAG, "nvs worker init failed");
 	ESP_RETURN_ON_ERROR(device_init(app_on_boot_button_changed, NULL), TAG, "device init failed");
 	app_preload_persistent_state();
 	ESP_RETURN_ON_ERROR(app_start_control_task(), TAG, "app control worker init failed");

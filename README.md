@@ -64,7 +64,7 @@ git checkout esp32-s3-device-monitor-v1.8.0
 | 平台 | 应用 | 版本 | TiRTC SDK | 来源版本 | 公开 Release |
 | --- | --- | --- | --- | --- | --- |
 | ESP32-S3 | [Device Monitor](complete-applications/esp32-s3/device-monitor/README.md) | `1.8.0` | `2.2.0` | Tag `v1.8.0` / commit `8211e3b` | [`esp32-s3-device-monitor-v1.8.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.8.0) |
-| ESP32-P4 | [Device App](complete-applications/esp32-p4/device-monitor/README.md) | `1.3.1` | `2.3.0` 定制兼容快照 | Tag `esp32-p4-device-app-v1.3.1` / commit `7391464` | [`esp32-p4-device-monitor-v1.3.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.1) |
+| ESP32-P4 | [Device App](complete-applications/esp32-p4/device-monitor/README.md) | `1.3.2` | `2.3.0` 定制兼容快照 | Tag `esp32-p4-device-app-v1.3.2` / commit `bc1ae8f` | [`esp32-p4-device-monitor-v1.3.2`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.2) |
 | G32S10X | [Device Monitor](complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | Tag `v0.1.1` / commit `5630152` | [`g32s10x-device-monitor-v0.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-device-monitor-v0.1.1) |
 
 七个项目独立使用 SemVer Tag。某个项目更新时，只提升并发布该项目版本；共享 SDK 或公共代码
@@ -91,8 +91,8 @@ AI 对讲和设备互呼，并输出稳定、脱敏的状态日志；它不是�
 不进入 Git 历史。ESP32 固件使用
 [Espressif ESP Tool](https://espressif.github.io/esptool-js/) 按 Release 清单烧录。
 
-ESP32-P4 Device App `1.3.1` 提供源码和
-`esp32p4-tirtc-device-monitor-full-v1.3.1.bin`。完整镜像只在 GitHub Release 中分发，
+ESP32-P4 Device App `1.3.2` 提供源码和
+`esp32p4-tirtc-device-monitor-full-v1.3.2.bin`。完整镜像只在 GitHub Release 中分发，
 从 `0x0` 烧录；它会清除现有 NVS、Wi-Fi 和绑定信息，具体步骤见
 [固件下载与校验](docs/RELEASES_CN.md)。
 

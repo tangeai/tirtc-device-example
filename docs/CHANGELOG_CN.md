@@ -1,9 +1,22 @@
 # 版本变更记录
 
+## 2026.08.11：ESP32-P4 Device Monitor 1.3.2
+
+- 来源 Tag：`esp32-p4-device-app-v1.3.2`，commit `bc1ae8fbd9b64090503128985129a72e024c0551`。
+- 公开项目 Tag：`esp32-p4-device-monitor-v1.3.2`。
+- 新增 internal-RAM NVS worker，统一串行处理设备身份、音量、AI 头像、RTC 配置和绑定会话的持久化。
+- RTC/WHIP 增加并发提交门控、过期回调识别和幂等断连；绑定重置改由 APP 控制队列接管。
+- TiRTC SDK 保持 `2.3.0` 定制兼容快照，第三方组件版本不随应用补丁版本改写。
+- 正式干净构建的 app 大小为 `6,927,360` 字节，SHA-256 为
+  `2df6d9d626a05f19a4fd1f15eb854c54119a32ccd475090f6713f2629afc90e2`。
+- `0x0` 完整镜像 `esp32p4-tirtc-device-monitor-full-v1.3.2.bin` 大小为
+  `16,777,216` 字节，SHA-256 为 `87bfb67d1ba30d7f79663f63891e29f7f4f4367c80ff0d5cecb1b46f301d40e9`；该资产只通过
+  GitHub Release 分发，不进入 Git 历史。
+
 ## 2026.08.10：Release 按项目独立版本化
 
 - 七个项目改为“平台 + 项目 + 版本号”的独立 Tag；一个项目更新时，只发布该项目的新版本。
-- 当前公开 Tag 统一为：
+- 该次迁移后的公开 Tag 为：
   `esp32-s3-minimal-integration-v1.2.0`、
   `esp32-p4-minimal-integration-v1.1.1`、
   `g32s10x-minimal-integration-v0.8.3`、

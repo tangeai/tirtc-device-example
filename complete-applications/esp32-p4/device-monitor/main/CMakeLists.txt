@@ -46,6 +46,7 @@ idf_component_register(
         "connectivity/network.c"
         "connectivity/wifi.c"
         "platform/app_log_policy.c"
+        "platform/platform_nvs_async.c"
         "platform/platform_storage.c"
         "platform/app_memory_policy.c"
         "platform/system_time.c"

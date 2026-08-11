@@ -223,6 +223,7 @@ esp_err_t tirtc_session_restart(void);
 esp_err_t tirtc_session_stop(void);
 esp_err_t tirtc_session_disconnect(void);
 int tirtc_session_disconnect_connection(tirtc_conn_t conn);
+bool tirtc_session_is_ready_for_new_connection(void);
 esp_err_t tirtc_session_accept_incoming_call(void);
 esp_err_t tirtc_session_reject_incoming_call(void);
 esp_err_t tirtc_session_hangup(void);

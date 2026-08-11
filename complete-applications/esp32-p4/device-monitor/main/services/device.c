@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 #include "esp_freertos_hooks.h"
 #include "nvs.h"
+#include "platform_nvs_async.h"
 #include "platform_storage.h"
 
 static const char *TAG = "device";
@@ -140,20 +141,9 @@ static esp_err_t device_load_saved_uuid(char *uuid, size_t uuid_len)
 
 static esp_err_t device_save_uuid(const char *uuid)
 {
-    nvs_handle_t nvs_handle = 0;
-
-    ESP_RETURN_ON_ERROR(device_nvs_init(), TAG, "device nvs init failed");
-
-    esp_err_t ret = nvs_open(DEVICE_NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    ret = nvs_set_str(nvs_handle, DEVICE_NVS_KEY_UUID, uuid);
-    if (ret == ESP_OK) {
-        ret = nvs_commit(nvs_handle);
-    }
-    nvs_close(nvs_handle);
+    esp_err_t ret = platform_nvs_async_set_str_and_wait(DEVICE_NVS_NAMESPACE,
+                                                         DEVICE_NVS_KEY_UUID,
+                                                         uuid);
 
     if (ret == ESP_OK) {
         ESP_LOGD(TAG, "device uuid saved to nvs");

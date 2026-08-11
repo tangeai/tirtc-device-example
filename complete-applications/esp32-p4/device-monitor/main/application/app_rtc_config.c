@@ -9,6 +9,7 @@
 #include "device_identity.h"
 #include "esp_check.h"
 #include "nvs.h"
+#include "platform_nvs_async.h"
 #include "platform_storage.h"
 #include "thing_service_registry.h"
 
@@ -202,25 +203,11 @@ static esp_err_t app_rtc_load_device_credentials(nvs_handle_t nvs_handle,
 
 static esp_err_t app_rtc_save_string(const char *key, const char *value)
 {
-    nvs_handle_t nvs_handle = 0;
-
     if (key == NULL || value == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_RETURN_ON_ERROR(platform_storage_init(), TAG, "nvs init failed");
-
-    esp_err_t ret = nvs_open(APP_RTC_NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    ret = nvs_set_str(nvs_handle, key, value);
-    if (ret == ESP_OK) {
-        ret = nvs_commit(nvs_handle);
-    }
-    nvs_close(nvs_handle);
-    return ret;
+    return platform_nvs_async_set_str_and_wait(APP_RTC_NVS_NAMESPACE, key, value);
 }
 
 static esp_err_t app_rtc_save_device_credentials(const char *device_id, const char *device_secret)
@@ -229,8 +216,6 @@ static esp_err_t app_rtc_save_device_credentials(const char *device_id, const ch
         .magic = APP_RTC_DEVICE_CREDENTIALS_MAGIC,
         .version = APP_RTC_DEVICE_CREDENTIALS_VERSION,
     };
-    nvs_handle_t nvs_handle = 0;
-
     if (device_id == NULL || device_secret == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -241,32 +226,23 @@ static esp_err_t app_rtc_save_device_credentials(const char *device_id, const ch
     strlcpy(store.device_id, device_id, sizeof(store.device_id));
     strlcpy(store.device_secret, device_secret, sizeof(store.device_secret));
 
-    ESP_RETURN_ON_ERROR(platform_storage_init(), TAG, "nvs init failed");
-
-    esp_err_t ret = nvs_open(APP_RTC_NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "rtc credentials nvs open failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    ret = nvs_set_blob(nvs_handle, APP_RTC_NVS_KEY_DEVICE_CREDENTIALS, &store, sizeof(store));
+    /* Device identity is acknowledged only after the new credential blob is durable. */
+    esp_err_t ret = platform_nvs_async_set_blob_and_wait(APP_RTC_NVS_NAMESPACE,
+                                                          APP_RTC_NVS_KEY_DEVICE_CREDENTIALS,
+                                                          &store,
+                                                          sizeof(store));
     if (ret == ESP_OK) {
-        esp_err_t erase_ret = nvs_erase_key(nvs_handle, APP_RTC_NVS_KEY_DEVICE_ID);
-        if (erase_ret != ESP_OK && erase_ret != ESP_ERR_NVS_NOT_FOUND) {
-            ret = erase_ret;
+        /* The blob is authoritative; legacy keys can be removed in queue order. */
+        esp_err_t erase_id_ret = platform_nvs_async_erase_key(APP_RTC_NVS_NAMESPACE,
+                                                               APP_RTC_NVS_KEY_DEVICE_ID);
+        esp_err_t erase_secret_ret = platform_nvs_async_erase_key(APP_RTC_NVS_NAMESPACE,
+                                                                   APP_RTC_NVS_KEY_DEVICE_SECRET);
+        if (erase_id_ret != ESP_OK || erase_secret_ret != ESP_OK) {
+            ESP_LOGW(TAG,
+                     "rtc legacy credential cleanup queue failed: id=%s secret=%s",
+                     esp_err_to_name(erase_id_ret),
+                     esp_err_to_name(erase_secret_ret));
         }
-    }
-    if (ret == ESP_OK) {
-        esp_err_t erase_ret = nvs_erase_key(nvs_handle, APP_RTC_NVS_KEY_DEVICE_SECRET);
-        if (erase_ret != ESP_OK && erase_ret != ESP_ERR_NVS_NOT_FOUND) {
-            ret = erase_ret;
-        }
-    }
-    if (ret == ESP_OK) {
-        ret = nvs_commit(nvs_handle);
-    }
-    nvs_close(nvs_handle);
-    if (ret == ESP_OK) {
         ESP_LOGD(TAG, "rtc credentials saved: device_id_len=%u", (unsigned)strlen(device_id));
     } else {
         ESP_LOGW(TAG, "rtc credentials save failed: ret=%s", esp_err_to_name(ret));

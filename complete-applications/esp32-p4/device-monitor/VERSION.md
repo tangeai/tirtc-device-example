@@ -5,11 +5,11 @@
 | 项目 | 内容 |
 | --- | --- |
 | 应用工程 | TiRTC ESP32-P4 Device App |
-| 应用版本 | `1.3.1` |
-| 发布日期 | `2026-08-02` |
-| 来源 Tag | `esp32-p4-device-app-v1.3.1` |
-| 来源 commit | `739146438dd4b65512bb8198731bd2c8a1eb1275` |
-| 公开项目 Tag | `esp32-p4-device-monitor-v1.3.1` |
+| 应用版本 | `1.3.2` |
+| 发布日期 | `2026-08-11` |
+| 来源 Tag | `esp32-p4-device-app-v1.3.2` |
+| 来源 commit | `bc1ae8fbd9b64090503128985129a72e024c0551` |
+| 公开项目 Tag | `esp32-p4-device-monitor-v1.3.2` |
 | 发布范围 | 源码、公开文档和 `0x0` 完整烧录镜像 |
 | 目标芯片 | ESP32-P4 |
 | 目标开发板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |
@@ -48,7 +48,20 @@ HTTP DNS disable 回移让 `/v1/connect` 使用平台 DNS resolver，避免 SDK 
 - `on_video_bitrate_required()` 只向应用控制任务投递绝对目标码率，不在 SDK 回调线程中改硬件编码器。
 - 文件级校验见 `components/tirtc_sdk/SHA256SUMS.txt`。
 
-## 1.3.1 版本能力
+## 1.3.2 版本能力
+
+- 新增 internal-RAM NVS worker。运行时持久化请求先复制名称、键和值，再由固定任务串行执行
+  `open -> set/erase -> commit -> close`，避免 PSRAM task stack 直接进入 flash/NVS 操作。
+- 设备 UUID、音量、AI 头像、RTC 凭证和绑定 pending session 统一复用该 worker；要求立即
+  确认持久化的操作会等待 commit 完成。
+- 绑定 token reset 回调只向 APP control queue 投递重绑定事件，绑定流程由应用生命周期层执行。
+- WHIP 连接提交使用 attempt ID 原子占位，防止同一空闲窗口内并发提交多次 SDK connect。
+- 连接接受区分正常拒绝和 stale-closing 回调；已经关闭中的句柄不会被第二次 disconnect。
+- 按连接句柄断开时先原子脱离 active owner，再投递关闭请求；重复断连保持幂等。
+- AI Chat 先等待 RTC 可建立新连接，再获取 Token，并用 generation 阻止过期任务继续连接。
+- TiRTC SDK `2.3.0`、板级配置和默认媒体参数均未改变。
+
+以下 `1.3.1` 能力继续保留：
 
 - IPC H264 上行、设备间双向音视频、微信 H264 上行与 MJPEG 下行。
 - AI Chat 音视频流、联系人状态查询，以及设备联系人和微信联系人的音频/视频呼叫。
@@ -81,17 +94,16 @@ HTTP DNS disable 回移让 `/v1/connect` 使用平台 DNS resolver，避免 SDK 
 源码默认不包含真实 Wi-Fi 密码、设备密钥、access key、token 或个人账号。设备凭证通过
 绑定流程写入 NVS。
 
-公开候选已在 ESP-IDF `5.5.4` 完成一次干净构建：`project_version=1.3.1`，应用镜像
-`6,924,512` bytes，SHA-256
-`EBD5FE3B930BA000FDBE7094F287AD66CBB745D56F8D167ED4890895A691DFA5`，编译错误为 0；构建
-目录和分片产物不进入 Git。构建日志中的 Windows CMake object-path length warning 没有转化
-为编译错误，最小 app 分区剩余 `0x95720` bytes（8%）。
+`1.3.2` 公开候选在 ESP-IDF `5.5.4` 的正式构建记录为：`project_version=1.3.2`，应用镜像
+`6,927,360` bytes，SHA-256 `2df6d9d626a05f19a4fd1f15eb854c54119a32ccd475090f6713f2629afc90e2`。构建目录、ELF、MAP 和分片
+产物不进入 Git。
 
-Release 资产 `esp32p4-tirtc-device-monitor-full-v1.3.1.bin` 为 `16,777,216` bytes，SHA-256
-`3F55403C60CE371D81239CD5EC028FBFD1A27CAC0B693EB925CB1C60F3CFE1C5`。它从 `0x0` 以
-`16MB`、`DIO/80MHz` 烧录，只在 GitHub Release 分发。镜像中的 NVS 区为 `FF`，完整烧录会
-清除已有 Wi-Fi 和绑定信息。
+Release 资产 `esp32p4-tirtc-device-monitor-full-v1.3.2.bin` 为 `16,777,216` bytes，
+SHA-256 `87bfb67d1ba30d7f79663f63891e29f7f4f4367c80ff0d5cecb1b46f301d40e9`。它从 `0x0` 以 `16MB`、`DIO/80MHz` 烧录，只在 GitHub
+Release 分发。完整烧录会清除已有 NVS、Wi-Fi 和绑定信息。
 
-这些证据不等同于烧录、ESP-Hosted/SDIO、联网或音视频运行证明。TinyH264 同步保护和阻塞
-诊断已经进入源码，但永久阻塞时的安全回收仍需要目标板长时间运行验证。详细来源与字节保持
-边界见 [SOURCE_PROVENANCE.md](SOURCE_PROVENANCE.md)。
+静态校验和构建记录不能代替烧录、ESP-Hosted/SDIO、联网、重复绑定或音视频运行证明。
+本版新增 NVS 串行化和 RTC 并发门控后，尤其需要在目标板检查连续重绑定、快速进入/退出
+AI Chat 与呼叫、重复 disconnect、网络中断恢复和长稳。TinyH264 永久阻塞时的安全回收也仍需
+目标板长时间运行验证。详细来源与字节保持边界见
+[SOURCE_PROVENANCE.md](SOURCE_PROVENANCE.md)。

@@ -145,7 +145,6 @@ void tirtc_session_retry_remote_media_request(bool retry_video, bool retry_audio
 void tirtc_session_run_media_bootstrap(void);
 void tirtc_session_apply_local_media_policy(void);
 void tirtc_session_mark_access_hijacking_detected(void);
-bool tirtc_session_try_accept_connection(tirtc_conn_t conn);
 bool tirtc_session_connection_auto_media_enabled(tirtc_conn_t conn);
 bool tirtc_session_connection_media_deferred(tirtc_conn_t conn);
 void tirtc_session_start_time_stream_messages(void);

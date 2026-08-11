@@ -14,7 +14,7 @@
 | G32S10X 最小 TiRTC 集成示例 | `0.8.3` | [`g32s10x-minimal-integration-v0.8.3`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-minimal-integration-v0.8.3) |
 | ESP32-S3 日志示例 | `0.3.0` | [`esp32-s3-logging-v0.3.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-logging-v0.3.0) |
 | ESP32-S3 Device Monitor | `1.8.0` | [`esp32-s3-device-monitor-v1.8.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.8.0) |
-| ESP32-P4 Device Monitor | `1.3.1` | [`esp32-p4-device-monitor-v1.3.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.1) |
+| ESP32-P4 Device Monitor | `1.3.2` | [`esp32-p4-device-monitor-v1.3.2`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.2) |
 | G32S10X Device Monitor | `0.1.1` | [`g32s10x-device-monitor-v0.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-device-monitor-v0.1.1) |
 
 每个 Release 只包含该项目的固件，以及两份核验资料：
@@ -35,7 +35,7 @@
 | S3 日志示例 | `esp32s3-tirtc-logging-full-v0.3.0.bin` | `16,777,216` | `0b85d399633d30a66089bef75da94645d23cb8c7be93216bc025486e74a5d4a5` | ESP Tool，地址 `0x0` |
 | S3 Device Monitor | `esp32s3-tirtc-device-monitor-full-v1.8.0.bin` | `16,777,216` | `ed0fb1c2fd96e6b7619a3855d562b8f98d89b1dd618fa9a1b9d0c539920768c5` | ESP Tool，地址 `0x0` |
 | S3 Device Monitor | `esp32s3-tirtc-device-monitor-ota-v1.8.0.bin` | `7,449,184` | `164cf034766d8fca0c4708f0e9d0ae6d74508abd661e3c09e47c5a0e96fe2c23` | OTA app，不写入 `0x0` |
-| P4 Device Monitor | `esp32p4-tirtc-device-monitor-full-v1.3.1.bin` | `16,777,216` | `3f55403c60ce371d81239cd5ec028fbfd1a27cac0b693eb925cb1c60f3cfe1c5` | ESP Tool，地址 `0x0` |
+| P4 Device Monitor | `esp32p4-tirtc-device-monitor-full-v1.3.2.bin` | `16,777,216` | `87bfb67d1ba30d7f79663f63891e29f7f4f4367c80ff0d5cecb1b46f301d40e9` | ESP Tool，地址 `0x0` |
 | G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-rtos-with-spl-v0.1.1.bin` | `6,965,860` | `34f926d4fd6173a9433d3652503d66a6cb0df2e961dbd3e79dc846cfe3bbe29a` | 君正 Cloner 主固件区，按项目 policy 烧录 |
 | G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-fs-v0.1.1.yaffs2` | `12,808,192` | `5a8f1fbcbd6f70291e63ae00480ea545f388c6b2eaebd72c93ccb828a6ea60f2` | 君正 Cloner 文件系统区，按项目 policy 烧录 |
 | G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-data-v0.1.1.yaffs2` | `4,096` | `8f6039987ea3d8a96a686f9b3f5f26e22028c918492b6890b336bde2dac90876` | 君正 Cloner 数据区，按项目 policy 烧录 |

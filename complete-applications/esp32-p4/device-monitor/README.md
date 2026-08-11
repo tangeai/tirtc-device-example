@@ -25,23 +25,23 @@ H264/JPEG 编解码、触摸屏和音频设备，与 C6 提供的远程 Wi-Fi、
 直接体验：
 
 1. 确认 P4 主芯片和 C6 Wi-Fi 从芯片都能正常上电。
-2. 从 [`esp32-p4-device-monitor-v1.3.1` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.1) 下载
-   `esp32p4-tirtc-device-monitor-full-v1.3.1.bin` 并核对 SHA-256。
+2. 从 [`esp32-p4-device-monitor-v1.3.2` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.2) 下载
+   `esp32p4-tirtc-device-monitor-full-v1.3.2.bin` 并核对 SHA-256。
 3. 在 [Espressif Web Serial 烧录工具](https://espressif.github.io/esptool-js/)中选择 P4 端口，
    从 `0x0` 以 `16MB`、`DIO/80MHz` 烧录。
 4. 重启后重新连接 2.4 GHz Wi-Fi 并完成绑定，再运行“网络测试”和“TiRTC 测试”。
 
 完整镜像会清除现有 NVS、Wi-Fi 和绑定信息。需要开发时，检出项目 Tag
-`esp32-p4-device-monitor-v1.3.1`，再按[开发者上手指南](docs/GETTING_STARTED_CN.md)
+`esp32-p4-device-monitor-v1.3.2`，再按[开发者上手指南](docs/GETTING_STARTED_CN.md)
 完成源码构建和分片烧录。
 
 ## 版本与平台
 
 | 项目 | 当前值 |
 | --- | --- |
-| 应用版本 | `1.3.1` |
-| 来源 Tag | `esp32-p4-device-app-v1.3.1` |
-| 来源 commit | `739146438dd4b65512bb8198731bd2c8a1eb1275` |
+| 应用版本 | `1.3.2` |
+| 来源 Tag | `esp32-p4-device-app-v1.3.2` |
+| 来源 commit | `bc1ae8fbd9b64090503128985129a72e024c0551` |
 | 目标开发板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |
 | 主芯片 | ESP32-P4 |
 | Wi-Fi 从芯片 | ESP32-C6，通过 ESP-Hosted/SDIO 连接 P4 |
@@ -50,7 +50,7 @@ H264/JPEG 编解码、触摸屏和音频设备，与 C6 提供的远程 Wi-Fi、
 | FreeRTOS tick | `1000Hz` |
 | 屏幕 | `480x320` 横屏触摸屏 |
 | Flash | `16MB`，双 OTA 分区 |
-| 发布形式 | 源码与 `esp32p4-tirtc-device-monitor-full-v1.3.1.bin` 完整镜像 |
+| 发布形式 | 源码与 `esp32p4-tirtc-device-monitor-full-v1.3.2.bin` 完整镜像 |
 
 ## P4 和 C6 各自负责什么
 
@@ -82,30 +82,28 @@ OV5647 / Audio Codec / LCD / Touch
 - `480x320` LVGL 界面覆盖 Wi-Fi、绑定、联系人、呼叫、设置和 OTA。
 - 应用生命周期统一管理摄像头、显示、音频、AEC、PSRAM pool 和 TiRTC 连接。
 
-## 1.3.1 重点变化
+## 1.3.2 重点变化
 
-这次更新主要收紧媒体节拍、故障定位和资源边界，没有把“多打日志”当成修复：
+本版集中收紧持久化和 RTC 连接生命周期。TiRTC SDK 仍为 `2.3.0` 定制兼容快照，摄像头、
+编解码和默认媒体参数没有变化。
 
-- 摄像头帧按 V4L2 `sequence` 去重并排出旧完成帧；应用节拍按目标 fps 锁相推进，避免积压帧
-  被当作新帧发送，也避免每次延迟后重新起算造成节拍漂移。
-- GOP 统一按 2 秒计算：IPC `20fps` 对应 `40` 帧，通话 `15fps` 对应 `30` 帧。
-- TinyH264 双任务模式增加同步通知保护。helper 优先级高于同步等待它的 decoder caller，通知忙时
-  等待并发送原阶段值，避免直接覆盖或丢失阶段通知。
-- 本地上行、远端接收和 renderer 增加分阶段 liveness：能区分采集、发送队列、SDK API、
-  transport 首包、renderer 提交和 H264 decode 卡在哪一段。
-- 内存策略增加 `normal`、`warning`、`critical` 水位，只在状态变化、恢复或新分配失败时记录，
-  同时保留 internal、DMA、PSRAM 的 free、largest block 和历史低水位。
-- 微信耗时操作改由固定 worker 串行处理；接听 worker 的大栈常驻 PSRAM，并用请求序号隔离
-  已取消或已过期的接听任务。
-- 可调媒体值集中到 `main/media/media_tuning.h` 和
-  `main/services/call_video_renderer_config.h`。Kconfig 继续管理构建组成和硬件开关，不再让
-  生成的 `sdkconfig` 充当运行时媒体参数的唯一来源。
-- TiRTC SDK 保持公开 `2.3.0` 头文件契约，使用 Nano 基线 `aaad3da...` 并回移
-  `fde4f1...` 的 HTTP DNS disable 修正，避免缓存 DNS 过期时出现递归锁。
+- 新增 `main/platform/platform_nvs_async.c`。运行时 NVS 写入统一进入 internal-RAM worker，
+  每个请求按 `open -> set/erase -> commit -> close` 串行完成；调用方即使使用 PSRAM task stack，
+  也不会直接在该栈上执行 flash/NVS 操作。
+- 设备 UUID、音量、AI 头像、RTC 设备身份和绑定 pending session 均复用这条持久化路径。
+  需要立即确认落盘的配置使用等待接口；凭证 blob 提交成功后才更新应用状态。
+- 服务端要求重置绑定时，回调只投递 `DEVICE_REBIND_REQUIRED` 事件，真正的重绑定由 APP
+  control task 执行，避免服务回调跨层进入绑定和 RTC 生命周期。
+- WHIP 提交增加 attempt ID 和原子占位。同一时刻只允许一次连接提交；SDK 回调返回后才释放
+  该占位，网络离线或 SDK 停止时也会清理它。
+- 连接接受路径区分“应拒绝的新连接”和“已经进入关闭流程的过期回调”。后者直接忽略，
+  不再次销毁同一 SDK 连接；按具体句柄断连时，重复请求保持幂等。
+- AI Chat 在申请 Token 前先等待 RTC 进入可建立新连接的状态，并持续核对 session generation；
+  已取消或已过期的启动流程不能继续提交连接。
 
-TinyH264 当前可以识别超过 2 秒的 decode 阻塞并隔离后续媒体；只有阻塞调用最终返回后，
-才能安全销毁 decoder 并从新 IDR 重建。第三方 decoder 永久不返回时的强制回收仍需长时间
-真机验证，本文不会把这一边界写成已经解决。
+`1.3.1` 已有的媒体节拍、TinyH264 同步保护、分阶段 liveness 和内存水位诊断继续保留。
+这些连接与持久化改动已完成源码静态收口；烧录、重复绑定、连续呼叫和长稳结果仍应在目标板
+逐项记录，本文不把未执行的真机检查写成已通过。
 
 ## 默认媒体参数
 
@@ -153,13 +151,15 @@ idf.py build
 串口先确认固件身份：
 
 ```text
-firmware version: 1.3.1 project=tirtc_esp32p4_device_app ...
+firmware version: 1.3.2 project=tirtc_esp32p4_device_app ...
 system ready: ESP32-P4 TiRTC dashboard
 ```
 
-屏幕随后进入 Wi-Fi 或绑定流程。公开候选已在 ESP-IDF `5.5.4` 完成一次干净构建，应用镜像
-为 `6,924,512` bytes，未出现编译错误。由该构建生成的 `16MB` 完整镜像只上传 GitHub
-Release，不进入 Git。Wi-Fi、绑定、TiRTC、首帧、双向音频和长稳仍要在目标板逐项验证。
+屏幕随后进入 Wi-Fi 或绑定流程。`1.3.2` 正式构建的应用镜像大小为
+`6,927,360` bytes，SHA-256 为 `2df6d9d626a05f19a4fd1f15eb854c54119a32ccd475090f6713f2629afc90e2`；由同一构建生成的 `16MB`
+完整镜像大小为 `16,777,216` bytes，SHA-256 为 `87bfb67d1ba30d7f79663f63891e29f7f4f4367c80ff0d5cecb1b46f301d40e9`。完整镜像
+只上传 GitHub Release，不进入 Git。Wi-Fi、绑定、TiRTC、首帧、双向音频和长稳仍要在目标板
+逐项验证。
 
 ## 目录
 

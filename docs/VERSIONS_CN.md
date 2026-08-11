@@ -12,7 +12,7 @@
 | 最小示例 | G32S10X 最小 TiRTC 集成示例 | `0.8.3` | `2.2.1` | `v0.8.3` / `b2abc22` | `g32s10x-minimal-integration-v0.8.3` |
 | 日志示例 | ESP32-S3 日志示例 | `0.3.0` | `2.2.1` | 独立开发目录快照 | `esp32-s3-logging-v0.3.0` |
 | 完整应用 | ESP32-S3 Device Monitor | `1.8.0` | `2.2.0` | `v1.8.0` / `8211e3b` | `esp32-s3-device-monitor-v1.8.0` |
-| 完整应用 | ESP32-P4 Device Monitor | `1.3.1` | `2.3.0` 定制兼容快照 | `esp32-p4-device-app-v1.3.1` / `7391464` | `esp32-p4-device-monitor-v1.3.1` |
+| 完整应用 | ESP32-P4 Device Monitor | `1.3.2` | `2.3.0` 定制兼容快照 | `esp32-p4-device-app-v1.3.2` / `bc1ae8fbd9b64090503128985129a72e024c0551` | `esp32-p4-device-monitor-v1.3.2` |
 | 完整应用 | G32S10X Device Monitor | `0.1.1` | `2.2.1` | `v0.1.1` / `5630152` | `g32s10x-device-monitor-v0.1.1` |
 
 ESP32-S3 日志示例的开发目录没有可公开引用的 Git 历史。公开证据保留其 `93` 文件核心源码
@@ -29,7 +29,7 @@ ESP32-S3 日志示例的开发目录没有可公开引用的 Git 历史。公开
 | G32S10X 最小示例 `0.8.3` | 来源 Tag、SDK `2.2.1`、君正覆盖层和凭据范围已核对 | 君正 SDK 正式构建通过 | 源码与主固件 |
 | S3 日志示例 `0.3.0` | 目录快照、SDK、媒体来源、凭据和公开路径已核对 | ESP-IDF `5.5.4` 正式干净构建通过；app `1,442,496` 字节 | 源码与 `0x0` 完整镜像 |
 | S3 Device Monitor `1.8.0` | 来源 Tag、SDK、源码增量、资源和凭据已核对 | ESP-IDF `5.5.4` 正式干净构建通过；app `7,449,184` 字节 | 源码、完整镜像与 OTA app |
-| P4 Device Monitor `1.3.1` | 来源 Tag、定制 SDK 快照、源码增量、媒体参数和凭据已核对 | ESP-IDF `5.5.4` 正式干净构建通过；app `6,924,512` 字节 | 源码与 `0x0` 完整镜像 |
+| P4 Device Monitor `1.3.2` | 来源 Tag、定制 SDK 快照、源码增量、媒体参数和凭据已核对 | ESP-IDF `5.5.4` 正式干净构建通过；app `6,927,360` 字节，SHA-256 `2df6d9d626a05f19a4fd1f15eb854c54119a32ccd475090f6713f2629afc90e2` | 源码与 `0x0` 完整镜像 |
 | G32S10X Device Monitor `0.1.1` | 来源 Tag、SDK、君正覆盖层、文件系统打包范围已核对 | 固件构建通过；文件系统在同一 SDK 树恢复打包，发布树与构建树为 `compile-input-equivalent` | 源码、主固件与两个 YAFFS 镜像 |
 
 本次项目级 Tag 规范化只调整公开文档、Release 身份和项目级 manifest，没有重新编译或改动
