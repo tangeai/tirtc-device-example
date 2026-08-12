@@ -29,6 +29,10 @@
 #define CONTROLLER_TASK_STACK 16384
 #define BOOTSTRAP_TASK_STACK 32768
 #define CONFIG_IO_TASK_STACK 6144
+#define BIND_PENDING_NVS_NAMESPACE "bind"
+#define BIND_PENDING_NVS_KEY "pending"
+#define BIND_PENDING_MAGIC 0x42504E44U
+#define BIND_PENDING_VERSION 2U
 #define TIRTC_START_TIMEOUT_MS 15000
 #define TIRTC_STOP_TIMEOUT_MS 5000
 #define PLATFORM_RETRY_INITIAL_MS 2000
@@ -72,6 +76,26 @@ typedef struct {
     esp_err_t result;
     bool load;
 } config_io_context_t;
+
+typedef enum {
+    BIND_PENDING_IO_LOAD = 0,
+    BIND_PENDING_IO_SAVE,
+    BIND_PENDING_IO_CLEAR,
+} bind_pending_io_operation_t;
+
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t reserved;
+    platform_pending_provision_t pending;
+} bind_pending_store_t;
+
+typedef struct {
+    bind_pending_io_operation_t operation;
+    bind_pending_store_t store;
+    SemaphoreHandle_t completed;
+    esp_err_t result;
+} bind_pending_io_context_t;
 
 static QueueHandle_t s_queue;
 static QueueHandle_t s_session_critical_fallback;
@@ -179,6 +203,134 @@ static esp_err_t save_runtime_config(runtime_tirtc_config_t *config)
 {
     return execute_runtime_config_io(config, false);
 }
+
+static void bind_pending_io_task(void *argument)
+{
+    bind_pending_io_context_t *context =
+        (bind_pending_io_context_t *)argument;
+    nvs_handle_t handle = 0;
+    const nvs_open_mode_t mode =
+        context->operation == BIND_PENDING_IO_LOAD ? NVS_READONLY : NVS_READWRITE;
+    context->result = nvs_open(BIND_PENDING_NVS_NAMESPACE, mode, &handle);
+    if (context->result == ESP_ERR_NVS_NOT_FOUND &&
+        context->operation == BIND_PENDING_IO_LOAD) {
+        context->result = ESP_ERR_NOT_FOUND;
+    }
+    if (context->result == ESP_OK) {
+        if (context->operation == BIND_PENDING_IO_LOAD) {
+            size_t size = sizeof(context->store);
+            context->result = nvs_get_blob(handle, BIND_PENDING_NVS_KEY,
+                                           &context->store, &size);
+            if (context->result == ESP_ERR_NVS_NOT_FOUND) {
+                context->result = ESP_ERR_NOT_FOUND;
+            } else if (context->result == ESP_OK &&
+                       size != sizeof(context->store)) {
+                context->result = ESP_ERR_INVALID_SIZE;
+            }
+        } else if (context->operation == BIND_PENDING_IO_SAVE) {
+            context->result = nvs_set_blob(handle, BIND_PENDING_NVS_KEY,
+                                           &context->store,
+                                           sizeof(context->store));
+            if (context->result == ESP_OK) {
+                context->result = nvs_commit(handle);
+            }
+        } else {
+            context->result = nvs_erase_key(handle, BIND_PENDING_NVS_KEY);
+            if (context->result == ESP_ERR_NVS_NOT_FOUND) {
+                context->result = ESP_OK;
+            } else if (context->result == ESP_OK) {
+                context->result = nvs_commit(handle);
+            }
+        }
+        nvs_close(handle);
+    } else if (context->operation == BIND_PENDING_IO_CLEAR &&
+               context->result == ESP_ERR_NVS_NOT_FOUND) {
+        context->result = ESP_OK;
+    }
+
+    SemaphoreHandle_t completed = context->completed;
+    (void)xSemaphoreGive(completed);
+    vTaskDelete(NULL);
+}
+
+static esp_err_t execute_bind_pending_io(
+    bind_pending_io_operation_t operation,
+    platform_pending_provision_t *pending)
+{
+    if ((operation == BIND_PENDING_IO_LOAD ||
+         operation == BIND_PENDING_IO_SAVE) && pending == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    bind_pending_io_context_t *context = heap_caps_calloc(
+        1, sizeof(*context), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (context == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    context->operation = operation;
+    context->store.magic = BIND_PENDING_MAGIC;
+    context->store.version = BIND_PENDING_VERSION;
+    if (operation == BIND_PENDING_IO_SAVE) {
+        context->store.pending = *pending;
+    }
+    context->completed = xSemaphoreCreateBinary();
+    if (context->completed == NULL) {
+        secure_zero(context, sizeof(*context));
+        heap_caps_free(context);
+        return ESP_ERR_NO_MEM;
+    }
+
+    BaseType_t created = xTaskCreatePinnedToCore(
+        bind_pending_io_task, "bind_pending_io", CONFIG_IO_TASK_STACK,
+        context, 5, NULL, tskNO_AFFINITY);
+    if (created != pdPASS) {
+        vSemaphoreDelete(context->completed);
+        secure_zero(context, sizeof(*context));
+        heap_caps_free(context);
+        return ESP_ERR_NO_MEM;
+    }
+
+    (void)xSemaphoreTake(context->completed, portMAX_DELAY);
+    esp_err_t result = context->result;
+    if (operation == BIND_PENDING_IO_LOAD && result == ESP_OK) {
+        if (context->store.magic != BIND_PENDING_MAGIC ||
+            context->store.version != BIND_PENDING_VERSION) {
+            result = ESP_ERR_INVALID_SIZE;
+        } else {
+            *pending = context->store.pending;
+        }
+    }
+    vSemaphoreDelete(context->completed);
+    secure_zero(context, sizeof(*context));
+    heap_caps_free(context);
+    return result;
+}
+
+static esp_err_t load_pending_provision(
+    platform_pending_provision_t *pending, void *user_data)
+{
+    (void)user_data;
+    return execute_bind_pending_io(BIND_PENDING_IO_LOAD, pending);
+}
+
+static esp_err_t save_pending_provision(
+    const platform_pending_provision_t *pending, void *user_data)
+{
+    (void)user_data;
+    if (pending == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    platform_pending_provision_t copy = *pending;
+    esp_err_t result = execute_bind_pending_io(BIND_PENDING_IO_SAVE, &copy);
+    secure_zero(&copy, sizeof(copy));
+    return result;
+}
+
+static esp_err_t clear_pending_provision(void *user_data)
+{
+    (void)user_data;
+    return execute_bind_pending_io(BIND_PENDING_IO_CLEAR, NULL);
+}
 static atomic_bool s_rebind_needed;
 static atomic_bool s_wifi_reconcile_needed;
 static atomic_uint_fast32_t s_session_overflow_count;
@@ -253,6 +405,7 @@ static const char *app_session_owner_name(device_service_t owner)
     case DEVICE_SERVICE_NONE: return "none";
     case DEVICE_SERVICE_AI: return "ai";
     case DEVICE_SERVICE_CALL: return "call";
+    case DEVICE_SERVICE_VIEW: return "view";
     default: return "unknown";
     }
 }
@@ -275,6 +428,7 @@ static const char *app_intent_name(app_intent_type_t type)
     case APP_INTENT_CALL_REJECT: return "CALL_REJECT";
     case APP_INTENT_CALL_CANCEL: return "CALL_CANCEL";
     case APP_INTENT_CALL_HANGUP: return "CALL_HANGUP";
+    case APP_INTENT_CALL_MESSAGE: return "CALL_MESSAGE";
     case APP_INTENT_CONTACTS_LIST: return "CONTACTS_LIST";
     case APP_INTENT_PENDING_LIST: return "PENDING_LIST";
     case APP_INTENT_CONTACT_REQUEST: return "CONTACT_REQUEST";
@@ -439,6 +593,9 @@ static void bootstrap_task(void *argument)
                 load_error == ESP_OK ? config.device_secret : NULL,
             .timeout_seconds = 190,
             .persist_credentials = persist_provisioned_credentials,
+            .load_pending = load_pending_provision,
+            .save_pending = save_pending_provision,
+            .clear_pending = clear_pending_provision,
         };
         outcome.error = platform_client_provision(&provision, &provisioned);
         if (outcome.error == ESP_OK) {
@@ -490,6 +647,9 @@ static void bootstrap_task(void *argument)
             .existing_device_secret = config.device_secret,
             .timeout_seconds = 190,
             .persist_credentials = persist_provisioned_credentials,
+            .load_pending = load_pending_provision,
+            .save_pending = save_pending_provision,
+            .clear_pending = clear_pending_provision,
         };
         outcome.error = platform_client_provision(&provision, &provisioned);
         if (outcome.error == ESP_OK) {
@@ -922,6 +1082,14 @@ static void handle_platform(const platform_client_event_t *event)
         break;
     }
     case PLATFORM_CLIENT_EVENT_REBIND_REQUIRED:
+        /* A live client reaches this path only after the cloud has revoked its
+         * binding. Reboot once so startup re-enters the signed binding flow;
+         * the bootstrap task itself already owns first-boot 6006 handling. */
+        if (s_bootstrap_task == NULL) {
+            reset_bootstrap_retry();
+            schedule_restart("cloud_reset");
+            break;
+        }
         atomic_store_explicit(&s_rebind_needed,
                               false,
                               memory_order_release);
@@ -948,13 +1116,17 @@ static void handle_platform(const platform_client_event_t *event)
         }
         break;
     case PLATFORM_CLIENT_EVENT_ERROR:
-    default:
+    default: {
+        const bool bootstrap_owns_result = s_bootstrap_task != NULL;
         lock_snapshot();
         s_snapshot.last_error = event->error;
         unlock_snapshot();
-        emit_simple(APP_EVENT_ERROR, "PLATFORM", generation, 0,
-                    event->error, esp_err_to_name(event->error), NULL);
+        if (!bootstrap_owns_result) {
+            emit_simple(APP_EVENT_ERROR, "PLATFORM", generation, 0,
+                        event->error, esp_err_to_name(event->error), NULL);
+        }
         break;
+    }
     }
 }
 
@@ -992,7 +1164,11 @@ static void handle_session(const session_runtime_event_t *source)
     switch (source->type) {
     case SESSION_RUNTIME_EVENT_STATE:
         (void)snprintf(event.name, sizeof(event.name), "%s:STATE",
-                       routed_owner == DEVICE_SERVICE_AI ? "AI" : "CALL");
+                       routed_owner == DEVICE_SERVICE_AI
+                           ? "AI"
+                           : routed_owner == DEVICE_SERVICE_CALL
+                                 ? "CALL"
+                                 : "VIEW");
         (void)snprintf(event.first, sizeof(event.first), "%s", state);
         (void)snprintf(event.second,
                        sizeof(event.second),
@@ -1063,6 +1239,14 @@ static void handle_session(const session_runtime_event_t *source)
         copy_text(event.payload,
                   sizeof(event.payload),
                   source->json[0] != '\0' ? source->json : source->text);
+        break;
+    case SESSION_RUNTIME_EVENT_VIEW_EVENT:
+        (void)snprintf(event.name, sizeof(event.name), "VIEW:EVENT");
+        (void)snprintf(event.first,
+                       sizeof(event.first),
+                       "%s",
+                       source->name);
+        copy_text(event.payload, sizeof(event.payload), source->text);
         break;
     case SESSION_RUNTIME_EVENT_CONTACT:
         (void)snprintf(event.name,
@@ -1437,6 +1621,9 @@ static esp_err_t dispatch_session_intent(const app_intent_t *intent)
         return session_runtime_call_cancel(intent->request_id);
     case APP_INTENT_CALL_HANGUP:
         return session_runtime_call_hangup(intent->request_id);
+    case APP_INTENT_CALL_MESSAGE:
+        return session_runtime_call_send_message(intent->first,
+                                                 intent->request_id);
     case APP_INTENT_CONTACTS_LIST:
         return session_runtime_contacts_list(intent->request_id);
     case APP_INTENT_PENDING_LIST:
@@ -1551,13 +1738,25 @@ static void handle_bootstrap_done(const bootstrap_result_t *result)
         return;
     }
     if (result->error != ESP_OK) {
-        emit_simple(APP_EVENT_ERROR,
-                    result->attempted_provision ? "BIND" : "PLATFORM_BOOTSTRAP",
-                    result->generation,
-                    0,
-                    result->error,
-                    esp_err_to_name(result->error),
-                    NULL);
+        if (!result->attempted_provision &&
+            result->error == ESP_ERR_TIMEOUT) {
+            emit_simple(APP_EVENT_PLATFORM,
+                        "RETRY",
+                        result->generation,
+                        0,
+                        result->error,
+                        "TIMEOUT",
+                        NULL);
+        } else {
+            emit_simple(APP_EVENT_ERROR,
+                        result->attempted_provision ? "BIND"
+                                                    : "PLATFORM_BOOTSTRAP",
+                        result->generation,
+                        0,
+                        result->error,
+                        esp_err_to_name(result->error),
+                        NULL);
+        }
         if (result->attempted_provision) {
             reset_bootstrap_retry();
             lock_snapshot();
@@ -1789,6 +1988,10 @@ esp_err_t app_controller_init(app_event_callback_t callback, void *user_data)
     reset_bootstrap_retry();
     atomic_store_explicit(&s_session_overflow_count,
                           0,
+                          memory_order_release);
+    atomic_store_explicit(&s_rebind_needed, false, memory_order_release);
+    atomic_store_explicit(&s_wifi_reconcile_needed,
+                          false,
                           memory_order_release);
     atomic_store_explicit(&s_restart_scheduled, false, memory_order_release);
     (void)snprintf(s_snapshot.session_owner,

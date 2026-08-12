@@ -1158,7 +1158,8 @@ esp_err_t media_runtime_set_session(tirtc_adapter_media_profile_t profile,
     if (!s_ready || profile == TIRTC_ADAPTER_MEDIA_NONE ||
         session_generation == 0U ||
         (profile != TIRTC_ADAPTER_MEDIA_AI &&
-         profile != TIRTC_ADAPTER_MEDIA_CALL)) {
+         profile != TIRTC_ADAPTER_MEDIA_CALL &&
+         profile != TIRTC_ADAPTER_MEDIA_VIEW)) {
         return ESP_ERR_INVALID_ARG;
     }
     if (uplink_video_enabled && !s_config.video.uplink_enabled) {

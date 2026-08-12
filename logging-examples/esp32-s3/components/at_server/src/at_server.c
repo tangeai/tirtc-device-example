@@ -71,18 +71,57 @@ static TaskHandle_t task_handle(void) {
   return (TaskHandle_t)atomic_load_explicit(&s_task, memory_order_acquire);
 }
 
-static bool ascii_equal_ignore_case(const char *left, const char *right) {
+static unsigned char ascii_upper(unsigned char character) {
+  if (character >= 'a' && character <= 'z') {
+    return (unsigned char)(character - ('a' - 'A'));
+  }
+  return character;
+}
+
+static bool utf8_equal_ascii_ignore_case(const char *left, const char *right) {
   if (left == NULL || right == NULL) {
     return false;
   }
   while (*left != '\0' && *right != '\0') {
-    if (toupper((unsigned char)*left) != toupper((unsigned char)*right)) {
+    if (ascii_upper((unsigned char)*left) !=
+        ascii_upper((unsigned char)*right)) {
       return false;
     }
     ++left;
     ++right;
   }
   return *left == '\0' && *right == '\0';
+}
+
+static size_t valid_utf8_sequence_length(const unsigned char *text,
+                                         size_t remaining) {
+  if (text == NULL || remaining == 0U) {
+    return 0U;
+  }
+  if (text[0] >= 0xC2U && text[0] <= 0xDFU && remaining >= 2U &&
+      text[1] >= 0x80U && text[1] <= 0xBFU) {
+    return 2U;
+  }
+  if (remaining >= 3U &&
+      ((text[0] == 0xE0U && text[1] >= 0xA0U && text[1] <= 0xBFU) ||
+       ((text[0] >= 0xE1U && text[0] <= 0xECU) && text[1] >= 0x80U &&
+        text[1] <= 0xBFU) ||
+       (text[0] == 0xEDU && text[1] >= 0x80U && text[1] <= 0x9FU) ||
+       ((text[0] >= 0xEEU && text[0] <= 0xEFU) && text[1] >= 0x80U &&
+        text[1] <= 0xBFU)) &&
+      text[2] >= 0x80U && text[2] <= 0xBFU) {
+    return 3U;
+  }
+  if (remaining >= 4U &&
+      ((text[0] == 0xF0U && text[1] >= 0x90U && text[1] <= 0xBFU) ||
+       ((text[0] >= 0xF1U && text[0] <= 0xF3U) && text[1] >= 0x80U &&
+        text[1] <= 0xBFU) ||
+       (text[0] == 0xF4U && text[1] >= 0x80U && text[1] <= 0x8FU)) &&
+      text[2] >= 0x80U && text[2] <= 0xBFU && text[3] >= 0x80U &&
+      text[3] <= 0xBFU) {
+    return 4U;
+  }
+  return 0U;
 }
 
 static bool command_name_valid(const char *name) {
@@ -93,11 +132,21 @@ static bool command_name_valid(const char *name) {
   if (length > AT_SERVER_COMMAND_NAME_MAX) {
     return false;
   }
-  for (size_t index = 0; index < length; ++index) {
+  for (size_t index = 0; index < length;) {
     const unsigned char character = (unsigned char)name[index];
-    if (!(isalnum(character) || character == '_')) {
+    if (character < 0x80U) {
+      if (!(isalnum(character) || character == '_')) {
+        return false;
+      }
+      ++index;
+      continue;
+    }
+    const size_t sequence_length = valid_utf8_sequence_length(
+        (const unsigned char *)&name[index], length - index);
+    if (sequence_length == 0U) {
       return false;
     }
+    index += sequence_length;
   }
   return true;
 }
@@ -214,10 +263,9 @@ static esp_err_t flush_pending_urcs(void) {
   uint32_t dropped = (uint32_t)atomic_exchange_explicit(&s_urc_dropped, 0,
                                                         memory_order_acq_rel);
   if (dropped != 0U) {
-    int length = snprintf(
-        s_output_buffer, sizeof(s_output_buffer),
-        "+TIRTC:警告,\"消息过多，部分状态已丢失\",%lu",
-        (unsigned long)dropped);
+    int length = snprintf(s_output_buffer, sizeof(s_output_buffer),
+                          "+TIRTC:警告,\"消息过多，部分状态已丢失\",%lu",
+                          (unsigned long)dropped);
     if (length > 0 && (size_t)length < sizeof(s_output_buffer)) {
       esp_err_t err = write_locked_line(s_output_buffer);
       wipe_output_buffer();
@@ -258,7 +306,7 @@ esp_err_t at_server_flush_urcs(void) {
 
 static const at_server_command_t *find_command(const char *name) {
   for (size_t index = 0; index < s_config.command_count; ++index) {
-    if (ascii_equal_ignore_case(name, s_config.commands[index].name)) {
+    if (utf8_equal_ascii_ignore_case(name, s_config.commands[index].name)) {
       return &s_config.commands[index];
     }
   }
@@ -332,12 +380,12 @@ static void dispatch_line(char *raw_line, size_t raw_line_size) {
   esp_err_t result = ESP_ERR_INVALID_ARG;
   char parsed_name[AT_SERVER_COMMAND_NAME_MAX + 1];
   secure_zero(parsed_name, sizeof(parsed_name));
-  if (ascii_equal_ignore_case(line, "AT")) {
+  if (utf8_equal_ascii_ignore_case(line, "AT")) {
     result = ESP_OK;
-  } else if (ascii_equal_ignore_case(line, "ATE0")) {
+  } else if (utf8_equal_ascii_ignore_case(line, "ATE0")) {
     s_echo = false;
     result = ESP_OK;
-  } else if (ascii_equal_ignore_case(line, "ATE1")) {
+  } else if (utf8_equal_ascii_ignore_case(line, "ATE1")) {
     s_echo = false;
     result = ESP_ERR_NOT_SUPPORTED;
   } else if (toupper((unsigned char)line[0]) == 'A' &&
@@ -479,8 +527,8 @@ esp_err_t at_server_init(const at_server_config_t *config) {
     }
     for (size_t duplicate = index + 1; duplicate < config->command_count;
          ++duplicate) {
-      if (ascii_equal_ignore_case(command->name,
-                                  config->commands[duplicate].name)) {
+      if (utf8_equal_ascii_ignore_case(command->name,
+                                       config->commands[duplicate].name)) {
         return ESP_ERR_INVALID_ARG;
       }
     }

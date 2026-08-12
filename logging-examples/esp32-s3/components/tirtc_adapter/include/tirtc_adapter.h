@@ -24,6 +24,7 @@ typedef enum {
     TIRTC_ADAPTER_MEDIA_NONE = 0,
     TIRTC_ADAPTER_MEDIA_AI,
     TIRTC_ADAPTER_MEDIA_CALL,
+    TIRTC_ADAPTER_MEDIA_VIEW,
 } tirtc_adapter_media_profile_t;
 
 typedef struct {
@@ -43,6 +44,8 @@ typedef struct {
     uint32_t session_generation;
     uint32_t connection_generation;
 } tirtc_adapter_connection_event_t;
+
+bool tirtc_adapter_is_remote_close_error(int error);
 
 typedef struct {
     bool connected;
@@ -113,6 +116,9 @@ int tirtc_adapter_set_media_profile(tirtc_adapter_media_profile_t profile,
                                     bool downlink_video_enabled);
 /* Arm one incoming call connection for this session; consumed on acceptance. */
 int tirtc_adapter_expect_incoming(uint32_t session_generation);
+/* Reserve the idle listener for one authenticated Web viewing connection. */
+int tirtc_adapter_arm_view(uint32_t session_generation);
+int tirtc_adapter_cancel_view(uint32_t session_generation);
 tirtc_adapter_media_profile_t tirtc_adapter_media_profile(void);
 uint32_t tirtc_adapter_media_session_generation(void);
 void tirtc_adapter_get_metrics(tirtc_adapter_metrics_t *metrics);

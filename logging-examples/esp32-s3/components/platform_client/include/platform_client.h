@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 
@@ -38,6 +39,21 @@ typedef esp_err_t (*platform_credentials_persist_callback_t)(
     const platform_provision_result_t *credentials, void *user_data);
 
 typedef struct {
+  int64_t expires_at_unix;
+  char mac_address[18];
+  char code[17];
+  char temp_token[1024];
+  char temp_client_id[65];
+} platform_pending_provision_t;
+
+typedef esp_err_t (*platform_pending_provision_load_callback_t)(
+    platform_pending_provision_t *pending, void *user_data);
+typedef esp_err_t (*platform_pending_provision_save_callback_t)(
+    const platform_pending_provision_t *pending, void *user_data);
+typedef esp_err_t (*platform_pending_provision_clear_callback_t)(
+    void *user_data);
+
+typedef struct {
   const char *mac_address;
   const char *existing_device_id;
   const char *existing_device_secret;
@@ -45,6 +61,10 @@ typedef struct {
   unsigned timeout_seconds;
   platform_credentials_persist_callback_t persist_credentials;
   void *persist_user_data;
+  platform_pending_provision_load_callback_t load_pending;
+  platform_pending_provision_save_callback_t save_pending;
+  platform_pending_provision_clear_callback_t clear_pending;
+  void *pending_user_data;
 } platform_provision_config_t;
 
 typedef void (*platform_response_callback_t)(const char *body, void *user_data);
@@ -106,10 +126,11 @@ esp_err_t platform_client_start(const platform_client_config_t *config);
  * modified. The client may be started again afterwards. */
 esp_err_t platform_client_stop(void);
 
-/* First-boot / rebind flow. persist_credentials is mandatory: auth_grant is
- * ACKed at QoS 1 only after that callback succeeds, and success is returned
- * only after the ACK PUBACK arrives. Existing credentials are optional and
- * enable a signed report after server-side unbind. */
+/* First-boot / rebind flow. The binding HTTP and temporary MQTT endpoints are
+ * obtained from one service-discovery response. auth_grant is ACKed at QoS 1
+ * before the server's short delivery deadline; credentials are persisted only
+ * after the ACK PUBACK arrives. Existing credentials are optional and enable
+ * a signed report after server-side unbind. */
 esp_err_t platform_client_provision(const platform_provision_config_t *config,
                                     platform_provision_result_t *result);
 bool platform_client_ready(void);

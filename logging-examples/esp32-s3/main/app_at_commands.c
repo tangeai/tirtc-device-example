@@ -89,7 +89,7 @@ static esp_err_t help_command(const at_server_request_t *request,
       request->operation != AT_SERVER_OP_TEST) {
     return ESP_ERR_INVALID_ARG;
   }
-  return at_server_response("+HELP:\"发送 AT+TIRTC=? 查看中文简易指令\"");
+  return at_server_response("+HELP:\"内部回归指令\"");
 }
 
 static const char *adapter_state_name(int state) {
@@ -101,7 +101,7 @@ static const char *adapter_state_name(int state) {
 }
 
 static const char *media_profile_name(int profile) {
-  static const char *const names[] = {"none", "ai", "call"};
+  static const char *const names[] = {"none", "ai", "call", "view"};
   return profile >= 0 && (size_t)profile < ARRAY_SIZE(names) ? names[profile]
                                                              : "unknown";
 }
@@ -508,18 +508,18 @@ static esp_err_t raw_only_command(const at_server_request_t *request,
     return ESP_ERR_INVALID_ARG;
   }
   if (!app_at_facade_raw_mode()) {
-    (void)at_server_response(
-        "+TIRTC:失败,\"请使用 AT+TIRTC；兼容指令需先切换 RAW 模式\"");
+    (void)at_server_response("+失败,\"请发送 AT+帮助 查看可用指令\"");
     return ESP_ERR_NOT_SUPPORTED;
   }
   return binding->handler(request, binding->context);
 }
 
 #define RAW_BINDING(name, command_handler, command_context)                    \
-  static raw_command_binding_t name = {                                        \
-      .handler = command_handler, .context = command_context}
+  static raw_command_binding_t name = {.handler = command_handler,             \
+                                       .context = command_context}
 
 RAW_BINDING(s_raw_help, help_command, NULL);
+RAW_BINDING(s_raw_tirtc, app_at_facade_legacy_command, NULL);
 RAW_BINDING(s_raw_build, build_command, NULL);
 RAW_BINDING(s_raw_status, status_command, NULL);
 RAW_BINDING(s_raw_session, session_command, NULL);
@@ -549,9 +549,34 @@ RAW_BINDING(s_raw_restart, simple_intent_command,
 #define RAW_COMMAND(command_name, binding)                                     \
   {.name = command_name, .handler = raw_only_command, .context = &binding}
 
+#define PUBLIC_COMMAND(command_name, command_id)                               \
+  {.name = command_name,                                                       \
+   .handler = app_at_facade_command,                                           \
+   .context = (void *)(uintptr_t)(command_id)}
+
 static const at_server_command_t s_commands[] = {
-    {.name = "TIRTC", .handler = app_at_facade_command},
+    PUBLIC_COMMAND("帮助", APP_AT_PUBLIC_HELP),
+    PUBLIC_COMMAND("状态", APP_AT_PUBLIC_STATUS),
+    PUBLIC_COMMAND("配网", APP_AT_PUBLIC_WIFI),
+    PUBLIC_COMMAND("绑定", APP_AT_PUBLIC_BIND),
+    PUBLIC_COMMAND("设备ID", APP_AT_PUBLIC_DEVICE_ID),
+    PUBLIC_COMMAND("讲故事", APP_AT_PUBLIC_STORY),
+    PUBLIC_COMMAND("讲笑话", APP_AT_PUBLIC_JOKE),
+    PUBLIC_COMMAND("查天气", APP_AT_PUBLIC_WEATHER),
+    PUBLIC_COMMAND("结束对讲", APP_AT_PUBLIC_AI_STOP),
+    PUBLIC_COMMAND("联系人", APP_AT_PUBLIC_CONTACTS),
+    PUBLIC_COMMAND("好友申请", APP_AT_PUBLIC_PENDING),
+    PUBLIC_COMMAND("加好友", APP_AT_PUBLIC_CONTACT_REQUEST),
+    PUBLIC_COMMAND("同意好友", APP_AT_PUBLIC_CONTACT_ACCEPT),
+    PUBLIC_COMMAND("备注", APP_AT_PUBLIC_CONTACT_REMARK),
+    PUBLIC_COMMAND("呼叫", APP_AT_PUBLIC_CALL),
+    PUBLIC_COMMAND("接听", APP_AT_PUBLIC_CALL_ACCEPT),
+    PUBLIC_COMMAND("拒接", APP_AT_PUBLIC_CALL_REJECT),
+    PUBLIC_COMMAND("取消呼叫", APP_AT_PUBLIC_CALL_CANCEL),
+    PUBLIC_COMMAND("挂断", APP_AT_PUBLIC_CALL_HANGUP),
+    PUBLIC_COMMAND("发消息", APP_AT_PUBLIC_CALL_MESSAGE),
     {.name = "PROTO", .handler = app_at_protocol_command},
+    RAW_COMMAND("TIRTC", s_raw_tirtc),
     RAW_COMMAND("HELP", s_raw_help),
     RAW_COMMAND("BUILD", s_raw_build),
     RAW_COMMAND("STATUS", s_raw_status),

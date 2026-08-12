@@ -1,5 +1,6 @@
 #include "device/device_media_file.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 device_media_file_result_t device_g711_file_open(device_g711_file_t *source,
@@ -350,26 +351,28 @@ void device_mjpeg_file_close(device_mjpeg_file_t *source)
     memset(source, 0, sizeof(*source));
 }
 
-static bool find_h264_start_code(FILE *file, long *offset)
+static bool find_h264_start_code(const uint8_t *data,
+                                 size_t data_size,
+                                 size_t *cursor,
+                                 size_t *offset)
 {
-    int zero_count = 0;
-    for (;;) {
-        int byte = fgetc(file);
-        if (byte == EOF) {
-            return false;
-        }
-        if (byte == 0) {
+    size_t zero_count = 0U;
+    for (size_t index = *cursor; index < data_size; ++index) {
+        uint8_t byte = data[index];
+        if (byte == 0U) {
             zero_count++;
             continue;
         }
-        if (byte == 1 && zero_count >= 2) {
-            long after = ftell(file);
-            int start_code_size = zero_count >= 3 ? 4 : 3;
-            *offset = after - start_code_size;
+        if (byte == 1U && zero_count >= 2U) {
+            size_t start_code_size = zero_count >= 3U ? 4U : 3U;
+            *offset = index + 1U - start_code_size;
+            *cursor = index + 1U;
             return true;
         }
-        zero_count = 0;
+        zero_count = 0U;
     }
+    *cursor = data_size;
+    return false;
 }
 
 static bool h264_is_slice(int nal_type)
@@ -378,7 +381,9 @@ static bool h264_is_slice(int nal_type)
 }
 
 typedef struct {
-    FILE *file;
+    const uint8_t *data;
+    size_t data_size;
+    size_t cursor;
     uint8_t current_byte;
     uint8_t bits_remaining;
     uint8_t consecutive_zeros;
@@ -387,12 +392,12 @@ typedef struct {
 static bool h264_rbsp_read_bit(h264_rbsp_reader_t *reader, uint8_t *bit)
 {
     if (reader->bits_remaining == 0U) {
-        int byte;
+        uint8_t byte;
         for (;;) {
-            byte = fgetc(reader->file);
-            if (byte == EOF) {
+            if (reader->cursor >= reader->data_size) {
                 return false;
             }
+            byte = reader->data[reader->cursor++];
             if (reader->consecutive_zeros >= 2U && byte == 0x03) {
                 continue;
             }
@@ -408,10 +413,15 @@ static bool h264_rbsp_read_bit(h264_rbsp_reader_t *reader, uint8_t *bit)
     return true;
 }
 
-static bool h264_read_first_mb_in_slice(FILE *file, uint32_t *first_mb)
+static bool h264_read_first_mb_in_slice(const uint8_t *data,
+                                        size_t data_size,
+                                        size_t *cursor,
+                                        uint32_t *first_mb)
 {
     h264_rbsp_reader_t reader = {
-        .file = file,
+        .data = data,
+        .data_size = data_size,
+        .cursor = *cursor,
     };
     uint8_t bit = 0;
     unsigned leading_zero_bits = 0;
@@ -436,6 +446,7 @@ static bool h264_read_first_mb_in_slice(FILE *file, uint32_t *first_mb)
         suffix = (suffix << 1U) | bit;
     }
     *first_mb = ((1UL << leading_zero_bits) - 1UL) + suffix;
+    *cursor = reader.cursor;
     return true;
 }
 
@@ -446,44 +457,51 @@ static bool h264_is_access_unit_prefix(int nal_type)
 }
 
 static device_media_file_result_t read_h264_access_unit(device_h264_file_t *source,
-                                                        uint8_t *buffer,
-                                                        size_t capacity,
-                                                        size_t *size,
-                                                        bool *key_frame)
+                                                         uint8_t *buffer,
+                                                         size_t capacity,
+                                                         size_t *size,
+                                                         bool *key_frame)
 {
-    long access_unit_start;
-    if (!find_h264_start_code(source->file, &access_unit_start)) {
-        return ferror(source->file) ? DEVICE_MEDIA_FILE_IO_ERROR : DEVICE_MEDIA_FILE_EOF;
+    size_t cursor = source->cursor;
+    size_t access_unit_start;
+    if (!find_h264_start_code(source->data,
+                              source->data_size,
+                              &cursor,
+                              &access_unit_start)) {
+        return DEVICE_MEDIA_FILE_EOF;
     }
 
-    int nal_header = fgetc(source->file);
-    if (nal_header == EOF) {
+    if (cursor >= source->data_size) {
         return DEVICE_MEDIA_FILE_INVALID;
     }
+    int nal_header = source->data[cursor++];
     int nal_type = nal_header & 0x1f;
     bool has_slice = h264_is_slice(nal_type);
     bool has_idr = nal_type == 5;
-    long access_unit_end = -1;
+    size_t access_unit_end = source->data_size;
 
     for (;;) {
-        long next_start;
-        if (!find_h264_start_code(source->file, &next_start)) {
-            if (ferror(source->file)) {
-                return DEVICE_MEDIA_FILE_IO_ERROR;
-            }
-            access_unit_end = ftell(source->file);
+        size_t next_start;
+        if (!find_h264_start_code(source->data,
+                                  source->data_size,
+                                  &cursor,
+                                  &next_start)) {
+            source->cursor = source->data_size;
             break;
         }
 
-        nal_header = fgetc(source->file);
-        if (nal_header == EOF) {
+        if (cursor >= source->data_size) {
             return DEVICE_MEDIA_FILE_INVALID;
         }
+        nal_header = source->data[cursor++];
         int next_type = nal_header & 0x1f;
         bool next_is_slice = h264_is_slice(next_type);
         uint32_t first_mb = 0;
         if (next_is_slice &&
-            !h264_read_first_mb_in_slice(source->file, &first_mb)) {
+            !h264_read_first_mb_in_slice(source->data,
+                                         source->data_size,
+                                         &cursor,
+                                         &first_mb)) {
             return DEVICE_MEDIA_FILE_INVALID;
         }
         bool starts_new_access_unit =
@@ -492,6 +510,7 @@ static device_media_file_result_t read_h264_access_unit(device_h264_file_t *sour
              (next_is_slice && first_mb == 0U));
         if (starts_new_access_unit) {
             access_unit_end = next_start;
+            source->cursor = next_start;
             break;
         }
         has_slice = has_slice || next_is_slice;
@@ -503,15 +522,10 @@ static device_media_file_result_t read_h264_access_unit(device_h264_file_t *sour
     }
     size_t access_unit_size = (size_t)(access_unit_end - access_unit_start);
     if (access_unit_size > capacity) {
-        (void)fseek(source->file, access_unit_end, SEEK_SET);
+        source->cursor = access_unit_end;
         return DEVICE_MEDIA_FILE_BUFFER_TOO_SMALL;
     }
-    clearerr(source->file);
-    if (fseek(source->file, access_unit_start, SEEK_SET) != 0 ||
-        fread(buffer, 1, access_unit_size, source->file) != access_unit_size ||
-        fseek(source->file, access_unit_end, SEEK_SET) != 0) {
-        return DEVICE_MEDIA_FILE_IO_ERROR;
-    }
+    memcpy(buffer, source->data + access_unit_start, access_unit_size);
 
     *size = access_unit_size;
     *key_frame = has_idr;
@@ -530,6 +544,29 @@ device_media_file_result_t device_h264_file_open(device_h264_file_t *source,
     if (source->file == NULL) {
         return DEVICE_MEDIA_FILE_IO_ERROR;
     }
+    if (fseek(source->file, 0, SEEK_END) != 0) {
+        device_h264_file_close(source);
+        return DEVICE_MEDIA_FILE_IO_ERROR;
+    }
+    long file_size = ftell(source->file);
+    if (file_size <= 0 || fseek(source->file, 0, SEEK_SET) != 0) {
+        device_h264_file_close(source);
+        return file_size == 0 ? DEVICE_MEDIA_FILE_INVALID
+                              : DEVICE_MEDIA_FILE_IO_ERROR;
+    }
+    source->data = malloc((size_t)file_size);
+    if (source->data == NULL) {
+        device_h264_file_close(source);
+        return DEVICE_MEDIA_FILE_BUFFER_TOO_SMALL;
+    }
+    source->data_size = (size_t)file_size;
+    if (fread(source->data, 1, source->data_size, source->file) !=
+        source->data_size) {
+        device_h264_file_close(source);
+        return DEVICE_MEDIA_FILE_IO_ERROR;
+    }
+    fclose(source->file);
+    source->file = NULL;
     return DEVICE_MEDIA_FILE_OK;
 }
 
@@ -546,7 +583,8 @@ device_media_file_result_t device_h264_file_next(device_h264_file_t *source,
     if (key_frame != NULL) {
         *key_frame = false;
     }
-    if (source == NULL || source->file == NULL || buffer == NULL ||
+    if (source == NULL || source->data == NULL || source->data_size == 0U ||
+        buffer == NULL ||
         size == NULL || key_frame == NULL || capacity == 0) {
         return DEVICE_MEDIA_FILE_INVALID;
     }
@@ -554,8 +592,7 @@ device_media_file_result_t device_h264_file_next(device_h264_file_t *source,
     device_media_file_result_t result = read_h264_access_unit(
         source, buffer, capacity, size, key_frame);
     if (result == DEVICE_MEDIA_FILE_EOF && loop) {
-        clearerr(source->file);
-        rewind(source->file);
+        source->cursor = 0U;
         source->frame_index = 0;
         result = read_h264_access_unit(source, buffer, capacity, size, key_frame);
     }
@@ -570,6 +607,7 @@ void device_h264_file_close(device_h264_file_t *source)
     if (source->file != NULL) {
         fclose(source->file);
     }
+    free(source->data);
     memset(source, 0, sizeof(*source));
 }
 

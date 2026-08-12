@@ -104,8 +104,11 @@ bool device_media_config_validate(const device_media_config_t *config,
             return fail(error, error_size, "uplink video asset path is empty");
         }
         if (!((config->video.width == 640 && config->video.height == 480) ||
-              (config->video.width == 640 && config->video.height == 360))) {
-            return fail(error, error_size, "video resolution must be 640x480 or 640x360");
+              (config->video.width == 640 && config->video.height == 360) ||
+              (config->video.width == 1280 && config->video.height == 720))) {
+            return fail(error,
+                        error_size,
+                        "video resolution must be 640x480, 640x360, or 1280x720");
         }
         if (config->video.duration_ms == 0 ||
             config->video.duration_ms > DEVICE_MEDIA_REFERENCE_DURATION_MS) {

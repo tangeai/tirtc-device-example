@@ -38,10 +38,7 @@ Release，不再用日期批次同时代表整仓内容。当前版本和下载�
 | 文档 | 版本 | TiRTC SDK | 解决的问题 |
 | --- | --- | --- | --- |
 | [日志示例总览](../logging-examples/README.md) | - | - | 选择日志与协议联调入口 |
-| [ESP32-S3 日志示例](../logging-examples/esp32-s3/README.md) | `0.3.0` | `2.2.1` | 串口 AT、中文简洁日志、绑定、AI 对讲和设备呼叫 |
-| [AT 使用说明](../logging-examples/esp32-s3/docs/USER_GUIDE_CN.md) | `0.3.0` | `2.2.1` | 配网、绑定、状态、AI 和呼叫操作 |
-| [AI 呼叫设备流程](../logging-examples/esp32-s3/docs/EXPERIENCE_FLOW_CN.md) | `0.3.0` | `2.2.1` | AI 动作解析、联系人匹配和生命周期交接 |
-| [日志示例架构](../logging-examples/esp32-s3/docs/ARCHITECTURE_CN.md) | `0.3.0` | `2.2.1` | 控制面、平台、会话、媒体和日志分层 |
+| [ESP32-S3 日志示例](../logging-examples/esp32-s3/README.md) | `0.7.0` | `2.2.1` | 烧录、配网、绑定、网页查看、AI 对讲和设备呼叫 |
 
 ## 完整应用
 

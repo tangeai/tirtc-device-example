@@ -18,6 +18,7 @@ extern "C" {
 #define SESSION_RUNTIME_TEXT_MAX 513
 #define SESSION_RUNTIME_JSON_MAX 1025
 #define SESSION_RUNTIME_REQUEST_ID_MAX 129
+#define SESSION_RUNTIME_PEER_MESSAGE_MAX 129
 
 typedef enum {
     SESSION_RUNTIME_EVENT_STATE = 0,
@@ -27,6 +28,7 @@ typedef enum {
     SESSION_RUNTIME_EVENT_AI_ACTION,
     SESSION_RUNTIME_EVENT_CALL_INCOMING,
     SESSION_RUNTIME_EVENT_CALL_EVENT,
+    SESSION_RUNTIME_EVENT_VIEW_EVENT,
     SESSION_RUNTIME_EVENT_CONTACT,
     SESSION_RUNTIME_EVENT_CONTACTS_DONE,
     SESSION_RUNTIME_EVENT_DIAGNOSTIC,
@@ -127,6 +129,9 @@ esp_err_t session_runtime_call_accept(uint32_t origin_request_id);
 esp_err_t session_runtime_call_reject(uint32_t origin_request_id);
 esp_err_t session_runtime_call_cancel(uint32_t origin_request_id);
 esp_err_t session_runtime_call_hangup(uint32_t origin_request_id);
+/* Sends one UTF-8 line to the peer of the active device call. */
+esp_err_t session_runtime_call_send_message(const char *message,
+                                            uint32_t origin_request_id);
 esp_err_t session_runtime_call_recover(uint32_t origin_request_id);
 
 esp_err_t session_runtime_contacts_list(uint32_t origin_request_id);

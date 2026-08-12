@@ -13,6 +13,8 @@ static const char *TAG = "设备日志";
 static bool s_ai_active;
 static bool s_call_in_progress;
 static bool s_call_connected;
+static bool s_view_in_progress;
+static bool s_platform_retry_reported;
 
 static void clear_message(app_user_log_message_t *message) {
   if (message != NULL) {
@@ -84,6 +86,8 @@ void app_user_log_init(void) {
   s_ai_active = false;
   s_call_in_progress = false;
   s_call_connected = false;
+  s_view_in_progress = false;
+  s_platform_retry_reported = false;
 }
 
 static void summarize_caption(const char *source, char *destination,
@@ -158,7 +162,12 @@ static bool log_session_event(const app_event_t *event,
       if (!s_call_in_progress && !s_call_connected) {
         return false;
       }
-      if (s_call_connected && event->code == 0) {
+      bool target_resolution_failed =
+          strncmp(event->payload, "call-target-", 12) == 0 ||
+          strncmp(event->payload, "call-contacts-", 14) == 0;
+      if (target_resolution_failed) {
+        displayed = false;
+      } else if (s_call_connected && event->code == 0) {
         displayed = display_message(message, APP_USER_LOG_LEVEL_INFO, "呼叫",
                                     NULL, "通话结束");
       } else if (event->code != 0) {
@@ -179,6 +188,47 @@ static bool log_session_event(const app_event_t *event,
       s_call_connected = false;
     }
     return displayed;
+  }
+  if (strcmp(event->name, "CALL:EVENT") == 0 &&
+      strcmp(event->first, "message-received") == 0) {
+    char text[APP_TEXT_MEDIUM];
+    summarize_caption(event->payload, text, sizeof(text));
+    return display_message(message, APP_USER_LOG_LEVEL_INFO, "收到消息", NULL,
+                           "%s", text);
+  }
+  if (strcmp(event->name, "CALL:EVENT") == 0 &&
+      strcmp(event->first, "message-sent") == 0) {
+    if (event->code == 0) {
+      return display_message(message, APP_USER_LOG_LEVEL_INFO, "消息", NULL,
+                             "已发送");
+    }
+    return display_message(message, APP_USER_LOG_LEVEL_WARNING, "消息", NULL,
+                           "发送失败（代码=%d）", event->code);
+  }
+  if (strcmp(event->name, "VIEW:STATE") == 0) {
+    if (strcmp(event->first, "viewing") == 0) {
+      if (!s_view_in_progress) {
+        s_view_in_progress = true;
+        return display_message(message, APP_USER_LOG_LEVEL_INFO, "远程查看",
+                               NULL, "已连接");
+      }
+      return false;
+    }
+    if (strcmp(event->first, "idle") == 0 && s_view_in_progress) {
+      s_view_in_progress = false;
+      if (event->code == 0) {
+        return display_message(message, APP_USER_LOG_LEVEL_INFO, "远程查看",
+                               NULL, "已结束");
+      }
+      return display_message(message, APP_USER_LOG_LEVEL_WARNING, "远程查看",
+                             NULL, "异常结束（代码=%d）", event->code);
+    }
+    return false;
+  }
+  if (strcmp(event->name, "VIEW:EVENT") == 0 &&
+      strcmp(event->first, "media-started") == 0) {
+    return display_message(message, APP_USER_LOG_LEVEL_INFO, "远程查看", NULL,
+                           "音视频已开始循环播放");
   }
   if (event->code != 0) {
     if (strcmp(event->name, "AI:OP") == 0) {
@@ -234,6 +284,9 @@ static const char *restart_text(const char *reason) {
   if (strcmp(reason, "at_request") == 0) {
     return "按指令重启中";
   }
+  if (strcmp(reason, "cloud_reset") == 0) {
+    return "云端已重置，设备重启中";
+  }
   return "故障恢复，重启中";
 }
 
@@ -249,6 +302,8 @@ bool app_user_log_event(const app_event_t *event,
       s_ai_active = false;
       s_call_in_progress = false;
       s_call_connected = false;
+      s_view_in_progress = false;
+      s_platform_retry_reported = false;
       return display_message(message, APP_USER_LOG_LEVEL_INFO, "系统", NULL,
                              "启动中");
     } else if (strcmp(event->name, "RESTARTING") == 0) {
@@ -275,7 +330,18 @@ bool app_user_log_event(const app_event_t *event,
     }
     break;
   case APP_EVENT_PLATFORM:
-    if (strcmp(event->name, "MQTT") == 0 &&
+    if (strcmp(event->name, "RETRY") == 0) {
+      if (s_platform_retry_reported) {
+        return false;
+      }
+      s_platform_retry_reported = true;
+      return display_message(message, APP_USER_LOG_LEVEL_WARNING, "平台", NULL,
+                             "连接较慢，正在重试");
+    } else if (strcmp(event->name, "MQTT") == 0 &&
+               strcmp(event->first, "ONLINE") == 0) {
+      s_platform_retry_reported = false;
+      return false;
+    } else if (strcmp(event->name, "MQTT") == 0 &&
         strcmp(event->first, "OFFLINE") == 0) {
       return display_message(message, APP_USER_LOG_LEVEL_WARNING, "网络", NULL,
                              "平台连接已断开（代码=%d）", event->code);
@@ -283,6 +349,7 @@ bool app_user_log_event(const app_event_t *event,
     break;
   case APP_EVENT_TIRTC:
     if (strcmp(event->name, "READY") == 0) {
+      s_platform_retry_reported = false;
       return display_message(message, APP_USER_LOG_LEVEL_INFO, "系统", NULL,
                              "已就绪");
     } else if (strcmp(event->name, "ERROR") == 0) {

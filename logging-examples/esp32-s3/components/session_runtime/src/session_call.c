@@ -7,6 +7,7 @@
 
 #include "device/device_utf8.h"
 #include "esp_err.h"
+#include "esp_log.h"
 #include "media_runtime.h"
 #include "platform_client.h"
 
@@ -15,6 +16,30 @@
 #define CALL_INCOMING_TIMEOUT_MS 45000
 #define CALL_CONNECT_TIMEOUT_MS 10000
 #define CALL_CONFIRM_TIMEOUT_MS 10000
+
+static const char *TAG = "session_call";
+
+static bool copy_valid_peer_message(const char *data,
+                                    size_t length,
+                                    char output[SESSION_RUNTIME_PEER_MESSAGE_MAX])
+{
+    if (data == NULL || output == NULL || length == 0U ||
+        length >= SESSION_RUNTIME_PEER_MESSAGE_MAX ||
+        memchr(data, '\0', length) != NULL) {
+        return false;
+    }
+    memcpy(output, data, length);
+    output[length] = '\0';
+    if (!device_utf8_validate(output)) {
+        return false;
+    }
+    char sanitized[SESSION_RUNTIME_PEER_MESSAGE_MAX];
+    (void)device_utf8_sanitize_line(output,
+                                    sanitized,
+                                    sizeof(sanitized),
+                                    SESSION_RUNTIME_PEER_MESSAGE_MAX - 1U);
+    return strcmp(output, sanitized) == 0;
+}
 
 static cJSON *parse_json_exact(const char *payload, size_t length)
 {
@@ -51,6 +76,21 @@ static bool safe_device_id(const char *value)
         }
     }
     return true;
+}
+
+static bool safe_contact_target(const char *value)
+{
+    if (value == NULL || value[0] == '\0' ||
+        strlen(value) >= SESSION_CONTACT_LABEL_MAX ||
+        !device_utf8_validate(value)) {
+        return false;
+    }
+    char sanitized[SESSION_CONTACT_LABEL_MAX];
+    (void)device_utf8_sanitize_line(value,
+                                    sanitized,
+                                    sizeof(sanitized),
+                                    SESSION_CONTACT_LABEL_MAX - 1U);
+    return strcmp(value, sanitized) == 0;
 }
 
 static void clear_device_contact_cache(session_context_t *context,
@@ -137,26 +177,6 @@ static void cache_device_contact(session_context_t *context,
     entry->online =
         cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(item, "online"));
     context->device_contact_count++;
-}
-
-static bool cached_device_contact(const session_context_t *context,
-                                  bool pending,
-                                  const char *device_id)
-{
-    if (!safe_device_id(device_id)) {
-        return false;
-    }
-    uint8_t count = pending ? context->pending_device_contact_count
-                            : context->device_contact_count;
-    for (uint8_t index = 0U; index < count; ++index) {
-        const char *cached_id =
-            pending ? context->pending_device_contacts[index]
-                    : context->device_contacts[index].device_id;
-        if (strcmp(cached_id, device_id) == 0) {
-            return true;
-        }
-    }
-    return false;
 }
 
 static esp_err_t submit_json(session_context_t *context,
@@ -362,53 +382,29 @@ static void connect_once(session_context_t *context)
     }
 }
 
-static bool handle_call_start(session_context_t *context,
-                              const session_internal_event_t *event,
-                              bool from_ai_handoff)
+static bool submit_call_request(session_context_t *context,
+                                const char *target_device_id)
 {
-    if (context->owner != DEVICE_SERVICE_NONE ||
-        (session_ai_call_reserved(context) && !from_ai_handoff)) {
-        session_emit_operation(context,
-                               "call-start",
-                               ESP_ERR_INVALID_STATE,
-                               "busy",
-                               NULL);
-        return false;
-    }
-    if (!safe_device_id(event->first) || !platform_client_ready() ||
-        tirtc_adapter_state() != TIRTC_ADAPTER_RUNNING) {
-        session_emit_operation(context,
-                               "call-start",
-                               ESP_ERR_INVALID_STATE,
-                               "invalid-target-or-platform-not-ready",
-                               NULL);
-        return false;
-    }
-    bool video = event->call_type == SESSION_RUNTIME_CALL_VIDEO;
-    if (!session_claim(context,
-                       DEVICE_SERVICE_CALL,
-                       DEVICE_SESSION_CALLING,
-                       TIRTC_ADAPTER_MEDIA_CALL,
-                       video,
-                       "call-request")) {
-        session_emit_operation(context,
-                               "call-start",
-                               ESP_ERR_INVALID_STATE,
-                               "media-profile-busy-or-unsupported",
-                               NULL);
+    if (context->owner != DEVICE_SERVICE_CALL ||
+        !safe_device_id(target_device_id)) {
+        session_finish(context,
+                       "call-target-device-id-invalid",
+                       ESP_ERR_INVALID_ARG);
         return false;
     }
     context->call.phase = SESSION_CALL_PHASE_REQUEST;
-    context->call.caller = true;
-    context->call.call_type = event->call_type;
-    (void)session_copy_string(context->call.target_id,
-                              sizeof(context->call.target_id),
-                              event->first);
-    (void)session_copy_string(context->call.peer_id,
-                              sizeof(context->call.peer_id),
-                              event->first);
-    int incoming_rc =
-        tirtc_adapter_expect_incoming(context->generation);
+    if (!session_copy_string(context->call.target_id,
+                             sizeof(context->call.target_id),
+                             target_device_id) ||
+        !session_copy_string(context->call.peer_id,
+                             sizeof(context->call.peer_id),
+                             target_device_id)) {
+        session_finish(context,
+                       "call-target-device-id-too-large",
+                       ESP_ERR_INVALID_SIZE);
+        return false;
+    }
+    int incoming_rc = tirtc_adapter_expect_incoming(context->generation);
     if (incoming_rc != 0) {
         session_emit_operation(context,
                                "call-start",
@@ -426,10 +422,10 @@ static bool handle_call_start(session_context_t *context,
     cJSON *targets = cJSON_CreateArray();
     bool ok = root != NULL && targets != NULL &&
               cJSON_AddItemToArray(targets,
-                                  cJSON_CreateString(event->first)) &&
+                                  cJSON_CreateString(target_device_id)) &&
               cJSON_AddStringToObject(root,
                                      "call_type",
-                                     call_type_name(event->call_type)) != NULL;
+                                     call_type_name(context->call.call_type)) != NULL;
     if (ok) {
         cJSON_AddItemToObject(root, "targets", targets);
         targets = NULL;
@@ -446,9 +442,94 @@ static bool handle_call_start(session_context_t *context,
     if (err != ESP_OK) {
         session_finish(context, "call-request-submit-failed", err);
         return false;
-    } else {
-        session_emit_operation(context, "call-start", 0, "accepted", NULL);
     }
+    session_emit_operation(context, "call-start", 0, "accepted", NULL);
+    return true;
+}
+
+static bool handle_call_start(session_context_t *context,
+                              const session_internal_event_t *event,
+                              bool from_ai_handoff)
+{
+    if (context->owner != DEVICE_SERVICE_NONE ||
+        (session_ai_call_reserved(context) && !from_ai_handoff)) {
+        session_emit_operation(context,
+                               "call-start",
+                               ESP_ERR_INVALID_STATE,
+                               "busy",
+                               NULL);
+        return false;
+    }
+    bool target_is_device_id = safe_device_id(event->first);
+    if ((!target_is_device_id && !safe_contact_target(event->first)) ||
+        !platform_client_ready() ||
+        tirtc_adapter_state() != TIRTC_ADAPTER_RUNNING) {
+        session_emit_operation(context,
+                               "call-start",
+                               ESP_ERR_INVALID_STATE,
+                               "invalid-target-or-platform-not-ready",
+                               NULL);
+        return false;
+    }
+    bool video = event->call_type == SESSION_RUNTIME_CALL_VIDEO;
+    if (!session_claim(context,
+                       DEVICE_SERVICE_CALL,
+                       DEVICE_SESSION_CALLING,
+                       TIRTC_ADAPTER_MEDIA_CALL,
+                       video,
+                       target_is_device_id ? "call-request"
+                                           : "call-resolving-contact")) {
+        session_emit_operation(context,
+                               "call-start",
+                               ESP_ERR_INVALID_STATE,
+                               "media-profile-busy-or-unsupported",
+                               NULL);
+        return false;
+    }
+    context->call.phase = SESSION_CALL_PHASE_REQUEST;
+    context->call.caller = true;
+    context->call.call_type = event->call_type;
+    if (target_is_device_id) {
+        return submit_call_request(context, event->first);
+    }
+
+    context->call.phase = SESSION_CALL_PHASE_RESOLVING;
+    if (!session_copy_string(context->call.target_label,
+                             sizeof(context->call.target_label),
+                             event->first)) {
+        session_finish(context,
+                       "call-target-label-too-large",
+                       ESP_ERR_INVALID_SIZE);
+        return false;
+    }
+    context->http_sequence++;
+    if (context->http_sequence == 0U) {
+        context->http_sequence = 1U;
+    }
+    context->call.contacts_request_cookie = context->http_sequence;
+    context->deadline_ms = session_now_ms() + CALL_HTTP_TIMEOUT_MS;
+    esp_err_t err = session_submit_http_correlated(
+        context,
+        SESSION_HTTP_CALL_CONTACTS,
+        context->generation,
+        context->call.contacts_request_cookie,
+        "GET",
+        "/v1/call/device/contacts",
+        NULL);
+    if (err != ESP_OK) {
+        session_emit_operation(context,
+                               "call-start",
+                               err,
+                               "contacts-submit-failed",
+                               NULL);
+        session_finish(context, "call-contacts-submit-failed", err);
+        return false;
+    }
+    session_emit_operation(context,
+                           "call-start",
+                           0,
+                           "contacts-refresh-submitted",
+                           NULL);
     return true;
 }
 
@@ -725,6 +806,24 @@ static void handle_call_command(session_context_t *context,
         context->owner != DEVICE_SERVICE_CALL) {
         return;
     }
+    if (event->command == SESSION_COMMAND_DEVICE_MESSAGE) {
+        char message[SESSION_RUNTIME_PEER_MESSAGE_MAX];
+        if (context->state == DEVICE_SESSION_IN_CALL &&
+            context->call.phase == SESSION_CALL_PHASE_ACTIVE &&
+            !event->truncated &&
+            copy_valid_peer_message(event->payload,
+                                    event->length,
+                                    message)) {
+            emit_call_event(context,
+                            "message-received",
+                            0,
+                            message,
+                            NULL);
+        } else {
+            ESP_LOGW(TAG, "invalid or out-of-state peer message dropped");
+        }
+        return;
+    }
     if (event->command == SESSION_COMMAND_CALL_HANGUP) {
         session_finish(context, "call-remote-hangup", 0);
         return;
@@ -774,6 +873,39 @@ static void handle_call_command(session_context_t *context,
         context->call.phase == SESSION_CALL_PHASE_WAIT_CONFIRM) {
         (void)activate_call_media(context, "call-active");
     }
+}
+
+static void handle_call_message_intent(session_context_t *context,
+                                       const session_internal_event_t *event)
+{
+    char message[SESSION_RUNTIME_PEER_MESSAGE_MAX];
+    bool valid = event != NULL &&
+                 copy_valid_peer_message(event->first,
+                                         strlen(event->first),
+                                         message);
+    if (!valid) {
+        emit_call_event(context,
+                        "message-sent",
+                        ESP_ERR_INVALID_ARG,
+                        NULL,
+                        NULL);
+        return;
+    }
+    if (context->owner != DEVICE_SERVICE_CALL ||
+        context->state != DEVICE_SESSION_IN_CALL ||
+        context->call.phase != SESSION_CALL_PHASE_ACTIVE ||
+        !tirtc_adapter_has_connection()) {
+        emit_call_event(context,
+                        "message-sent",
+                        ESP_ERR_INVALID_STATE,
+                        NULL,
+                        NULL);
+        return;
+    }
+    int rc = send_call_command(context,
+                               SESSION_COMMAND_DEVICE_MESSAGE,
+                               message);
+    emit_call_event(context, "message-sent", rc, NULL, NULL);
 }
 
 static void handle_reject_intent(session_context_t *context)
@@ -1170,14 +1302,101 @@ static bool device_contacts_valid(const cJSON *array,
     return true;
 }
 
+static void handle_call_contacts_response(session_context_t *context,
+                                          const session_internal_event_t *event,
+                                          bool cache_valid)
+{
+    if (context->owner != DEVICE_SERVICE_CALL ||
+        context->call.phase != SESSION_CALL_PHASE_RESOLVING ||
+        event->generation != context->generation ||
+        event->request_cookie != context->call.contacts_request_cookie) {
+        return;
+    }
+    if (!cache_valid || !context->device_contact_cache_complete) {
+        session_finish(context,
+                       "call-contacts-invalid",
+                       ESP_ERR_INVALID_RESPONSE);
+        return;
+    }
+
+    session_contact_resolution_t resolution =
+        session_contact_resolve(context->device_contacts,
+                                context->device_contact_count,
+                                context->call.target_label);
+    int status = ESP_ERR_INVALID_ARG;
+    const char *phase = "target-invalid";
+    const char *reason = "call-target-invalid";
+    switch (resolution.status) {
+    case SESSION_CONTACT_RESOLVE_FOUND:
+        break;
+    case SESSION_CONTACT_RESOLVE_OFFLINE:
+        status = ESP_ERR_INVALID_STATE;
+        phase = "target-offline";
+        reason = "call-target-offline";
+        break;
+    case SESSION_CONTACT_RESOLVE_AMBIGUOUS:
+        phase = "target-ambiguous";
+        reason = "call-target-ambiguous";
+        break;
+    case SESSION_CONTACT_RESOLVE_NOT_FOUND:
+        status = ESP_ERR_NOT_FOUND;
+        phase = "target-not-found";
+        reason = "call-target-not-found";
+        break;
+    case SESSION_CONTACT_RESOLVE_INVALID:
+    default:
+        break;
+    }
+    if (resolution.status != SESSION_CONTACT_RESOLVE_FOUND) {
+        session_emit_operation(context, "call-start", status, phase, NULL);
+        session_finish(context, reason, status);
+        return;
+    }
+    if (resolution.index >= context->device_contact_count) {
+        session_emit_operation(context,
+                               "call-start",
+                               ESP_ERR_INVALID_RESPONSE,
+                               "target-invalid",
+                               NULL);
+        session_finish(context,
+                       "call-target-invalid",
+                       ESP_ERR_INVALID_RESPONSE);
+        return;
+    }
+
+    char target_device_id[SESSION_RUNTIME_ID_MAX] = {0};
+    if (!session_copy_string(
+            target_device_id,
+            sizeof(target_device_id),
+            context->device_contacts[resolution.index].device_id)) {
+        session_emit_operation(context,
+                               "call-start",
+                               ESP_ERR_INVALID_RESPONSE,
+                               "target-invalid",
+                               NULL);
+        session_finish(context,
+                       "call-target-invalid",
+                       ESP_ERR_INVALID_RESPONSE);
+        return;
+    }
+    context->call.contacts_request_cookie = 0U;
+    context->call.target_label[0] = '\0';
+    context->deadline_ms = 0;
+    (void)submit_call_request(context, target_device_id);
+}
+
 static void handle_contacts_response(session_context_t *context,
                                      const session_internal_event_t *event,
                                      bool pending,
-                                     bool ai_call_refresh)
+                                     bool ai_call_refresh,
+                                     bool direct_call_refresh)
 {
     const char *operation =
-        ai_call_refresh ? "ai-call-device"
-                        : (pending ? "contacts-pending" : "contacts-list");
+        ai_call_refresh
+            ? "ai-call-device"
+            : (direct_call_refresh
+                   ? "call-start"
+                   : (pending ? "contacts-pending" : "contacts-list"));
     if (event->truncated) {
         session_emit_operation(context,
                                operation,
@@ -1186,6 +1405,8 @@ static void handle_contacts_response(session_context_t *context,
                                NULL);
         if (ai_call_refresh) {
             session_ai_call_contacts_response(context, event, false);
+        } else if (direct_call_refresh) {
+            handle_call_contacts_response(context, event, false);
         }
         return;
     }
@@ -1199,13 +1420,20 @@ static void handle_contacts_response(session_context_t *context,
     int code = session_json_response_code(root);
     if ((code != 0 && code != 200) || !cJSON_IsArray(array)) {
         cJSON_Delete(root);
+        int status = code == 0 || code == 200
+                         ? ESP_ERR_INVALID_RESPONSE
+                         : code;
         session_emit_operation(context,
                                operation,
-                               code,
+                               status,
                                "request-failed-or-invalid-response",
-                               ai_call_refresh ? NULL : event->payload);
+                               (ai_call_refresh || direct_call_refresh)
+                                   ? NULL
+                                   : event->payload);
         if (ai_call_refresh) {
             session_ai_call_contacts_response(context, event, false);
+        } else if (direct_call_refresh) {
+            handle_call_contacts_response(context, event, false);
         }
         return;
     }
@@ -1220,6 +1448,8 @@ static void handle_contacts_response(session_context_t *context,
                                NULL);
         if (ai_call_refresh) {
             session_ai_call_contacts_response(context, event, false);
+        } else if (direct_call_refresh) {
+            handle_call_contacts_response(context, event, false);
         }
         return;
     }
@@ -1249,7 +1479,7 @@ static void handle_contacts_response(session_context_t *context,
         } else {
             cache_device_contact(context, item);
         }
-        if (!ai_call_refresh) {
+        if (!ai_call_refresh && !direct_call_refresh) {
             emit_contact_item(context,
                               pending ? "pending" : "contact",
                               emitted,
@@ -1264,6 +1494,13 @@ static void handle_contacts_response(session_context_t *context,
     cJSON_Delete(root);
     if (ai_call_refresh) {
         session_ai_call_contacts_response(
+            context,
+            event,
+            context->device_contact_cache_complete);
+        return;
+    }
+    if (direct_call_refresh) {
+        handle_call_contacts_response(
             context,
             event,
             context->device_contact_cache_complete);
@@ -1287,11 +1524,33 @@ static void handle_mutation_response(session_context_t *context,
                       : parse_json_exact(event->payload, event->length);
     int code = session_json_response_code(root);
     bool ok = code == 0 || code == 200;
+    const char *phase = ok ? "completed" : "rejected";
+    if (ok && strcmp(operation, "contacts-request") == 0) {
+        const cJSON *data = session_json_response_data(root);
+        const cJSON *status = cJSON_IsObject(data)
+                                  ? cJSON_GetObjectItemCaseSensitive(data,
+                                                                    "status")
+                                  : NULL;
+        const cJSON *source = cJSON_IsObject(data)
+                                  ? cJSON_GetObjectItemCaseSensitive(data,
+                                                                    "source")
+                                  : NULL;
+        if (cJSON_IsString(status) && status->valuestring != NULL) {
+            if (strcmp(status->valuestring, "pending") == 0) {
+                phase = "pending";
+            } else if (strcmp(status->valuestring, "accepted") == 0) {
+                phase = cJSON_IsString(source) && source->valuestring != NULL &&
+                                strcmp(source->valuestring, "auto") == 0
+                            ? "auto-accepted"
+                            : "accepted";
+            }
+        }
+    }
     cJSON_Delete(root);
     session_emit_operation(context,
                            operation,
                            ok ? 0 : code,
-                           ok ? "completed" : "rejected",
+                           phase,
                            event->payload);
 }
 
@@ -1477,7 +1736,7 @@ static void submit_contact_intent(session_context_t *context,
     }
     case SESSION_INT_CONTACTS_RESPOND: {
         operation = "contacts-respond";
-        if (!cached_device_contact(context, true, event->first)) {
+        if (!safe_device_id(event->first)) {
             err = ESP_ERR_INVALID_ARG;
             break;
         }
@@ -1501,7 +1760,7 @@ static void submit_contact_intent(session_context_t *context,
     }
     case SESSION_INT_CONTACTS_REMARK: {
         operation = "contacts-remark";
-        if (!cached_device_contact(context, false, event->first)) {
+        if (!safe_device_id(event->first)) {
             err = ESP_ERR_INVALID_ARG;
             break;
         }
@@ -1521,7 +1780,7 @@ static void submit_contact_intent(session_context_t *context,
     }
     case SESSION_INT_CONTACTS_DELETE: {
         operation = "contacts-delete";
-        if (!cached_device_contact(context, false, event->first)) {
+        if (!safe_device_id(event->first)) {
             err = ESP_ERR_INVALID_ARG;
             break;
         }
@@ -1563,8 +1822,33 @@ static void handle_http_response(session_context_t *context,
     case SESSION_HTTP_CALL_RECOVER:
         handle_recovery_response(context, event);
         break;
+    case SESSION_HTTP_CALL_CONTACTS:
+        if (context->owner == DEVICE_SERVICE_CALL &&
+            context->call.phase == SESSION_CALL_PHASE_RESOLVING &&
+            event->generation == context->generation &&
+            event->request_cookie ==
+                context->call.contacts_request_cookie) {
+            if (context->deadline_ms != 0 &&
+                session_now_ms() >= context->deadline_ms) {
+                session_emit_operation(context,
+                                       "call-start",
+                                       ESP_ERR_TIMEOUT,
+                                       "contacts-timeout",
+                                       NULL);
+                session_finish(context,
+                               "call-contacts-timeout",
+                               ESP_ERR_TIMEOUT);
+            } else {
+                handle_contacts_response(context,
+                                         event,
+                                         false,
+                                         false,
+                                         true);
+            }
+        }
+        break;
     case SESSION_HTTP_CONTACTS_LIST:
-        handle_contacts_response(context, event, false, false);
+        handle_contacts_response(context, event, false, false, false);
         break;
     case SESSION_HTTP_AI_CALL_CONTACTS:
         if (session_ai_call_reserved(context) &&
@@ -1589,12 +1873,13 @@ static void handle_http_response(session_context_t *context,
                 handle_contacts_response(context,
                                          event,
                                          false,
-                                         true);
+                                         true,
+                                         false);
             }
         }
         break;
     case SESSION_HTTP_CONTACTS_PENDING:
-        handle_contacts_response(context, event, true, false);
+        handle_contacts_response(context, event, true, false, false);
         break;
     case SESSION_HTTP_CONTACTS_REQUEST:
         handle_mutation_response(context, event, "contacts-request");
@@ -1661,7 +1946,8 @@ bool session_call_handles(const session_internal_event_t *event,
     return event->type == SESSION_INT_ADAPTER_CONNECTION ||
            (event->type == SESSION_INT_ADAPTER_COMMAND &&
             (event->command == SESSION_COMMAND_CALL_CONFIRM ||
-             event->command == SESSION_COMMAND_CALL_HANGUP));
+             event->command == SESSION_COMMAND_CALL_HANGUP ||
+             event->command == SESSION_COMMAND_DEVICE_MESSAGE));
 }
 
 void session_call_handle(session_context_t *context,
@@ -1682,6 +1968,9 @@ void session_call_handle(session_context_t *context,
         break;
     case SESSION_INT_CALL_HANGUP:
         handle_hangup_intent(context);
+        break;
+    case SESSION_INT_CALL_MESSAGE:
+        handle_call_message_intent(context, event);
         break;
     case SESSION_INT_CALL_RECOVER:
         handle_recover_intent(context);
@@ -1720,6 +2009,14 @@ void session_call_tick(session_context_t *context, int64_t current_ms)
         return;
     }
     switch (context->call.phase) {
+    case SESSION_CALL_PHASE_RESOLVING:
+        session_emit_operation(context,
+                               "call-start",
+                               ESP_ERR_TIMEOUT,
+                               "contacts-timeout",
+                               NULL);
+        session_finish(context, "call-contacts-timeout", ESP_ERR_TIMEOUT);
+        break;
     case SESSION_CALL_PHASE_RINGING:
         (void)submit_room_action(context,
                                  SESSION_HTTP_CALL_REJECT,

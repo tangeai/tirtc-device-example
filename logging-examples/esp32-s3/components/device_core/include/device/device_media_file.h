@@ -44,6 +44,9 @@ typedef struct {
 
 typedef struct {
     FILE *file;
+    uint8_t *data;
+    size_t data_size;
+    size_t cursor;
     uint32_t frame_index;
 } device_h264_file_t;
 

@@ -14,6 +14,7 @@
 #define SESSION_COMMAND_CALL_CONFIRM 0x2000U
 #define SESSION_COMMAND_CALL_HANGUP 0x2001U
 #define SESSION_COMMAND_AI 0x2100U
+#define SESSION_COMMAND_DEVICE_MESSAGE 0x2200U
 
 #define SESSION_INTERNAL_ARGUMENT_MAX 513
 #define SESSION_INTERNAL_PAYLOAD_MAX 4097
@@ -31,6 +32,7 @@ typedef enum {
 
 typedef enum {
     SESSION_CALL_PHASE_NONE = 0,
+    SESSION_CALL_PHASE_RESOLVING,
     SESSION_CALL_PHASE_REQUEST,
     SESSION_CALL_PHASE_OUTGOING_WAIT,
     SESSION_CALL_PHASE_RINGING,
@@ -52,6 +54,7 @@ typedef enum {
     SESSION_HTTP_CALL_CANCEL,
     SESSION_HTTP_CALL_HANGUP,
     SESSION_HTTP_CALL_RECOVER,
+    SESSION_HTTP_CALL_CONTACTS,
     SESSION_HTTP_CONTACTS_LIST,
     SESSION_HTTP_AI_CALL_CONTACTS,
     SESSION_HTTP_CONTACTS_PENDING,
@@ -81,6 +84,7 @@ typedef enum {
     SESSION_INT_CALL_REJECT,
     SESSION_INT_CALL_CANCEL,
     SESSION_INT_CALL_HANGUP,
+    SESSION_INT_CALL_MESSAGE,
     SESSION_INT_CALL_RECOVER,
     SESSION_INT_CONTACTS_LIST,
     SESSION_INT_CONTACTS_PENDING,
@@ -140,10 +144,12 @@ typedef struct {
 
 typedef struct {
     session_call_phase_t phase;
+    uint32_t contacts_request_cookie;
     char room_id[SESSION_RUNTIME_ID_MAX];
     char peer_id[SESSION_RUNTIME_ID_MAX];
     char peer_name[SESSION_RUNTIME_ID_MAX];
     char target_id[SESSION_RUNTIME_ID_MAX];
+    char target_label[SESSION_CONTACT_LABEL_MAX];
     char connect_token[SESSION_RUNTIME_TOKEN_MAX];
     char confirm_room_id[SESSION_RUNTIME_ID_MAX];
     session_runtime_call_type_t call_type;
@@ -187,6 +193,7 @@ typedef struct {
     uint32_t rpc_sequence;
     uint32_t http_sequence;
     int64_t deadline_ms;
+    bool view_media_started;
     session_ai_context_t ai;
     session_call_context_t call;
     session_ai_call_handoff_t ai_call_handoff;

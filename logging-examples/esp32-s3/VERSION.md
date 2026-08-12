@@ -1,7 +1,10 @@
 # 版本信息
 
-- 日志示例：`0.3.0`
+- 日志示例：`0.7.0`
+- 发布阶段：正式发布
 - 目标芯片：ESP32-S3
+- Flash：4 MB 或更大
+- PSRAM：必需
 - ESP-IDF：`v5.5.4`
 - TiRTC SDK：`v2.2.1`
 - TiRTC SDK commit：`3a33bf4ae51b3ab9eb246648adb274d0fae32ebf`
@@ -9,15 +12,10 @@
   `{"tirtc":"v2.2.1","commit":"3a33bf4ae51b","tgtrp":"v1.4.6"}`
 - TiRTC 静态库 SHA-256：
   `dc9f869194584fd43fe091f887342d170a1422e657ce1fc2a144c90a3ade1f8e`
-- AT 响应 schema：`BUILD=1`、`SESSION=3`（22 个 CSV 字段）、`MEDIA=1`
-- 硬件证据摘要 schema：`4`
-  - 每条 JSONL 记录使用同一个随机 `run_id`
-  - `summary.json.raw_evidence` 记录同一 `run_id`、原始 JSONL 路径、
-    大小、记录数和 SHA-256
+- Tag：`esp32-s3-logging-v0.7.0`
 
-`0.3.0` 是 ESP32-S3 AT ThingConnect 日志示例的正式源码版本，包含可由
-AT 选择的 AI 提示、精简中文日志、最终字幕类型校验和联系人备注持久化。
-公开项目 Tag 为 `esp32-s3-logging-v0.3.0`。
+本版本提供中文精简 AT 交互、开发者平台绑定、网页远程查看、预录音视频、
+设备间呼叫与消息、联系人备注、AI 对讲，以及 AI 按联系人备注呼叫设备。
 
-这些字段用于识别源码、SDK 和证据格式。构建、烧录、平台绑定、AI、设备
-呼叫、竞态和真实媒体验证仍按各自证据独立记录。
+构建、烧录和真机运行是相互独立的验证层。Release 清单会记录本版本实际完成的
+验证，不用静态检查或历史运行记录代替本次真机证据。

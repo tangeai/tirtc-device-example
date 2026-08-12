@@ -12,6 +12,7 @@ typedef enum {
     DEVICE_SERVICE_NONE = 0,
     DEVICE_SERVICE_AI,
     DEVICE_SERVICE_CALL,
+    DEVICE_SERVICE_VIEW,
 } device_service_t;
 
 typedef enum {
@@ -24,6 +25,7 @@ typedef enum {
     DEVICE_SESSION_CALLING,
     DEVICE_SESSION_CALL_CONNECTING,
     DEVICE_SESSION_IN_CALL,
+    DEVICE_SESSION_VIEWING,
     DEVICE_SESSION_RECOVERING,
     DEVICE_SESSION_ENDING,
 } device_session_state_t;

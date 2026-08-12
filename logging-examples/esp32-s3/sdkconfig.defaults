@@ -40,6 +40,10 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=12288
 # MQTT, the TiRTC listener/ICE transport and an in-flight platform HTTPS
 # request must have independent descriptors during call teardown/recovery.
 CONFIG_LWIP_MAX_SOCKETS=16
+CONFIG_LWIP_SNTP_MAX_SERVERS=4
+# Start the first clock request immediately. Platform authentication cannot
+# begin until the timestamp is valid, so the RFC startup jitter hurts boot UX.
+# CONFIG_LWIP_SNTP_STARTUP_DELAY is not set
 
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"

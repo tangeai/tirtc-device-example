@@ -25,6 +25,7 @@ const char *device_service_name(device_service_t service)
     case DEVICE_SERVICE_NONE: return "none";
     case DEVICE_SERVICE_AI: return "ai";
     case DEVICE_SERVICE_CALL: return "device-call";
+    case DEVICE_SERVICE_VIEW: return "remote-view";
     default: return "unknown";
     }
 }
@@ -41,6 +42,7 @@ const char *device_session_state_name(device_session_state_t state)
     case DEVICE_SESSION_CALLING: return "calling";
     case DEVICE_SESSION_CALL_CONNECTING: return "call-connecting";
     case DEVICE_SESSION_IN_CALL: return "in-call";
+    case DEVICE_SESSION_VIEWING: return "viewing";
     case DEVICE_SESSION_RECOVERING: return "recovering";
     case DEVICE_SESSION_ENDING: return "ending";
     default: return "unknown";

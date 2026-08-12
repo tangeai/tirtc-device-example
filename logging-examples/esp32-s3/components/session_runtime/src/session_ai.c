@@ -314,11 +314,18 @@ static void handle_connection(session_context_t *context,
         return;
     }
     if (!event->connection.connected) {
+        bool remote_closed_active_session =
+            context->ai.phase == SESSION_AI_PHASE_ACTIVE &&
+            tirtc_adapter_is_remote_close_error(event->connection.error);
         session_finish(context,
-                       context->ai.phase == SESSION_AI_PHASE_ACTIVE
-                           ? "ai-remote-disconnected"
-                           : "ai-whip-connect-failed",
-                       event->connection.error);
+                       remote_closed_active_session
+                           ? "ai-remote-closed"
+                           : (context->ai.phase == SESSION_AI_PHASE_ACTIVE
+                                  ? "ai-remote-disconnected"
+                                  : "ai-whip-connect-failed"),
+                       remote_closed_active_session
+                           ? 0
+                           : event->connection.error);
         return;
     }
     if (context->ai.phase != SESSION_AI_PHASE_WHIP) {

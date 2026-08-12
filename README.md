@@ -57,7 +57,7 @@ git checkout esp32-s3-device-monitor-v1.8.0
 
 | 平台 | 示例 | 版本 | TiRTC SDK | 来源版本 | 公开 Release |
 | --- | --- | --- | --- | --- | --- |
-| ESP32-S3 | [TiRTC 日志示例（AT ThingConnect）](logging-examples/esp32-s3/README.md) | `0.3.0` | `2.2.1` | 独立源码快照 / public commit | [`esp32-s3-logging-v0.3.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-logging-v0.3.0) |
+| ESP32-S3 | [TiRTC 日志示例（AT ThingConnect）](logging-examples/esp32-s3/README.md) | `0.7.0` | `2.2.1` | 独立源码快照 / public commit | [`esp32-s3-logging-v0.7.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-logging-v0.7.0) |
 
 ### 完整应用
 

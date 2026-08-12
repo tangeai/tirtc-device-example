@@ -1,0 +1,5 @@
+# Build a standalone 4 MB image without the two OTA application slots.
+# CONFIG_ESPTOOLPY_FLASHSIZE_16MB is not set
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_4mb.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions_4mb.csv"

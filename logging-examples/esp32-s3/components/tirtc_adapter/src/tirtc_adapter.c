@@ -63,6 +63,7 @@ static atomic_uint_fast32_t s_connect_session_generation;
 static uintptr_t s_failed_connect_connection;
 static uint32_t s_failed_connect_generation;
 static uint32_t s_incoming_session_generation;
+static tirtc_adapter_media_profile_t s_incoming_media_profile;
 static atomic_uint_fast32_t s_connect_submissions;
 static atomic_bool s_connect_request_pending;
 static atomic_bool s_connect_callback_pending;
@@ -147,6 +148,11 @@ static bool is_terminal_connection_send_result(int error)
            error == TIRTC_E_CONN_TIMEOUTCLOSE ||
            error == TIRTC_E_CONN_REMOTECLOSE ||
            error == TIRTC_E_CONN_OTHER_ERROR;
+}
+
+bool tirtc_adapter_is_remote_close_error(int error)
+{
+    return error == TIRTC_E_CONN_REMOTECLOSE;
 }
 
 static int record_media_send_result(
@@ -283,19 +289,42 @@ static bool install_active_connection(
     uint32_t media_session_generation =
         (uint32_t)atomic_load_explicit(&s_media_session_generation,
                                        memory_order_relaxed);
+    tirtc_adapter_media_profile_t media_profile =
+        (tirtc_adapter_media_profile_t)atomic_load_explicit(
+            &s_media_profile, memory_order_relaxed);
+    bool expected_call =
+        incoming && s_incoming_media_profile == TIRTC_ADAPTER_MEDIA_CALL &&
+        media_profile == TIRTC_ADAPTER_MEDIA_CALL &&
+        media_session_generation != 0U &&
+        s_incoming_session_generation == media_session_generation;
+    bool expected_view =
+        incoming && s_incoming_media_profile == TIRTC_ADAPTER_MEDIA_VIEW &&
+        media_profile == TIRTC_ADAPTER_MEDIA_NONE &&
+        media_session_generation == 0U &&
+        s_incoming_session_generation != 0U;
     if (connection != NULL && event != NULL && s_connection_users == 0U &&
         (!incoming ||
          (!atomic_load_explicit(&s_connect_request_pending,
                                 memory_order_relaxed) &&
           !atomic_load_explicit(&s_connect_callback_pending,
                                 memory_order_relaxed) &&
-          media_session_generation != 0U &&
-          s_incoming_session_generation ==
-              media_session_generation)) &&
+          (expected_call || expected_view))) &&
         atomic_load_explicit(&s_disconnects_pending,
                              memory_order_relaxed) == 0U &&
         atomic_load_explicit(&s_active_connection,
                              memory_order_relaxed) == 0U) {
+        if (expected_view) {
+            media_session_generation = s_incoming_session_generation;
+            atomic_store_explicit(&s_downlink_video_enabled,
+                                  true,
+                                  memory_order_relaxed);
+            atomic_store_explicit(&s_media_session_generation,
+                                  media_session_generation,
+                                  memory_order_relaxed);
+            atomic_store_explicit(&s_media_profile,
+                                  TIRTC_ADAPTER_MEDIA_VIEW,
+                                  memory_order_release);
+        }
         atomic_store_explicit(&s_active_connection,
                               (uintptr_t)connection,
                               memory_order_release);
@@ -304,6 +333,7 @@ static bool install_active_connection(
                               memory_order_relaxed);
         if (incoming) {
             s_incoming_session_generation = 0U;
+            s_incoming_media_profile = TIRTC_ADAPTER_MEDIA_NONE;
         }
         prepare_connection_event_locked(event, true, incoming, 0);
         installed = true;
@@ -369,6 +399,7 @@ static tirtc_conn_t detach_active_connection_for_disconnect(
     /* Closing a session revokes its one-shot incoming permit in the same
      * critical section that detaches any connection which won the race. */
     s_incoming_session_generation = 0U;
+    s_incoming_media_profile = TIRTC_ADAPTER_MEDIA_NONE;
     tirtc_conn_t connection = (tirtc_conn_t)atomic_load_explicit(
         &s_active_connection,
         memory_order_relaxed);
@@ -702,6 +733,7 @@ static bool profile_streams(tirtc_adapter_media_profile_t profile,
         }
         return true;
     case TIRTC_ADAPTER_MEDIA_CALL:
+    case TIRTC_ADAPTER_MEDIA_VIEW:
         if (audio_stream != NULL) {
             *audio_stream = 10U;
         }
@@ -770,15 +802,9 @@ static void on_conn_accepted(tirtc_conn_t connection)
     (void)atomic_fetch_add_explicit(&s_accept_callbacks_pending,
                                     1,
                                     memory_order_acq_rel);
-    tirtc_adapter_media_profile_t profile =
-        (tirtc_adapter_media_profile_t)atomic_load_explicit(
-            &s_media_profile, memory_order_acquire);
-    uint32_t session_generation = (uint32_t)atomic_load_explicit(
-        &s_media_session_generation, memory_order_acquire);
     if (adapter_state_load() != TIRTC_ADAPTER_RUNNING ||
         atomic_load_explicit(&s_disconnects_pending,
-                             memory_order_acquire) != 0U ||
-        profile == TIRTC_ADAPTER_MEDIA_NONE || session_generation == 0U) {
+                             memory_order_acquire) != 0U) {
         ESP_LOGW(TAG, "rejecting unowned incoming connection");
         defer_disconnect(connection, "unowned-incoming");
         goto done;
@@ -787,6 +813,13 @@ static void on_conn_accepted(tirtc_conn_t connection)
         ESP_LOGW(TAG, "rejecting additional connection while another session is active");
         defer_disconnect(connection, "additional-incoming");
         goto done;
+    }
+    tirtc_adapter_media_profile_t profile =
+        (tirtc_adapter_media_profile_t)atomic_load_explicit(
+            &s_media_profile, memory_order_acquire);
+    uint32_t session_generation = connected_event.session_generation;
+    if (profile == TIRTC_ADAPTER_MEDIA_VIEW) {
+        reset_media_metrics(profile, session_generation);
     }
     if (adapter_state_load() != TIRTC_ADAPTER_RUNNING ||
         atomic_load_explicit(&s_disconnects_pending,
@@ -1326,6 +1359,7 @@ int tirtc_adapter_start(const tirtc_adapter_config_t *config)
     atomic_store_explicit(&s_active_connection, 0, memory_order_release);
     atomic_store_explicit(&s_connection_incoming, false, memory_order_relaxed);
     s_incoming_session_generation = 0U;
+    s_incoming_media_profile = TIRTC_ADAPTER_MEDIA_NONE;
     s_connection_users = 0U;
     s_failed_connect_connection = 0U;
     s_failed_connect_generation = 0U;
@@ -1577,35 +1611,42 @@ int tirtc_adapter_set_media_profile(tirtc_adapter_media_profile_t profile,
         (profile != TIRTC_ADAPTER_MEDIA_NONE && session_generation == 0U) ||
         (profile != TIRTC_ADAPTER_MEDIA_NONE &&
          profile != TIRTC_ADAPTER_MEDIA_AI &&
-         profile != TIRTC_ADAPTER_MEDIA_CALL)) {
+         profile != TIRTC_ADAPTER_MEDIA_CALL &&
+         profile != TIRTC_ADAPTER_MEDIA_VIEW)) {
         return TIRTC_E_INVALID_PARAMETER;
     }
+    int rc = 0;
+    portENTER_CRITICAL(&s_connection_lock);
     if (profile != TIRTC_ADAPTER_MEDIA_NONE &&
         (adapter_state_load() != TIRTC_ADAPTER_RUNNING ||
-         tirtc_adapter_has_connection() ||
-         atomic_load_explicit(&s_connect_request_pending, memory_order_acquire) ||
+         atomic_load_explicit(&s_active_connection,
+                              memory_order_relaxed) != 0U ||
+         s_connection_users != 0U ||
+         atomic_load_explicit(&s_connect_request_pending,
+                              memory_order_relaxed) ||
          atomic_load_explicit(&s_connect_callback_pending,
-                              memory_order_acquire) ||
+                              memory_order_relaxed) ||
          atomic_load_explicit(&s_connect_submissions,
-                              memory_order_acquire) != 0U ||
+                              memory_order_relaxed) != 0U ||
          atomic_load_explicit(&s_disconnects_pending,
-                              memory_order_acquire) != 0U)) {
-        return TIRTC_E_BUSY;
+                              memory_order_relaxed) != 0U)) {
+        rc = TIRTC_E_BUSY;
+    } else {
+        s_incoming_session_generation = 0U;
+        s_incoming_media_profile = TIRTC_ADAPTER_MEDIA_NONE;
+        atomic_store_explicit(&s_downlink_video_enabled,
+                              downlink_video_enabled,
+                              memory_order_relaxed);
+        atomic_store_explicit(&s_media_session_generation,
+                              session_generation,
+                              memory_order_relaxed);
+        atomic_store_explicit(&s_media_profile, profile, memory_order_release);
     }
-    portENTER_CRITICAL(&s_connection_lock);
-    s_incoming_session_generation = 0U;
     portEXIT_CRITICAL(&s_connection_lock);
-    atomic_store_explicit(&s_downlink_video_enabled,
-                          downlink_video_enabled,
-                          memory_order_release);
-    atomic_store_explicit(&s_media_session_generation,
-                          session_generation,
-                          memory_order_release);
-    atomic_store_explicit(&s_media_profile, profile, memory_order_release);
-    if (profile != TIRTC_ADAPTER_MEDIA_NONE) {
+    if (rc == 0 && profile != TIRTC_ADAPTER_MEDIA_NONE) {
         reset_media_metrics(profile, session_generation);
     }
-    return 0;
+    return rc;
 }
 
 int tirtc_adapter_expect_incoming(uint32_t session_generation)
@@ -1620,6 +1661,9 @@ int tirtc_adapter_expect_incoming(uint32_t session_generation)
         atomic_load_explicit(&s_media_profile,
                              memory_order_relaxed) ==
             TIRTC_ADAPTER_MEDIA_CALL &&
+        (s_incoming_session_generation == 0U ||
+         (s_incoming_session_generation == session_generation &&
+          s_incoming_media_profile == TIRTC_ADAPTER_MEDIA_CALL)) &&
         s_connection_users == 0U &&
         atomic_load_explicit(&s_active_connection,
                              memory_order_relaxed) == 0U &&
@@ -1630,6 +1674,60 @@ int tirtc_adapter_expect_incoming(uint32_t session_generation)
         !atomic_load_explicit(&s_connect_callback_pending,
                               memory_order_relaxed)) {
         s_incoming_session_generation = session_generation;
+        s_incoming_media_profile = TIRTC_ADAPTER_MEDIA_CALL;
+        rc = 0;
+    }
+    portEXIT_CRITICAL(&s_connection_lock);
+    return rc;
+}
+
+int tirtc_adapter_arm_view(uint32_t session_generation)
+{
+    int rc = TIRTC_E_BUSY;
+    portENTER_CRITICAL(&s_connection_lock);
+    bool already_armed =
+        s_incoming_session_generation == session_generation &&
+        s_incoming_media_profile == TIRTC_ADAPTER_MEDIA_VIEW;
+    if (adapter_state_load() == TIRTC_ADAPTER_RUNNING &&
+        session_generation != 0U &&
+        atomic_load_explicit(&s_media_session_generation,
+                             memory_order_relaxed) == 0U &&
+        atomic_load_explicit(&s_media_profile,
+                             memory_order_relaxed) ==
+            TIRTC_ADAPTER_MEDIA_NONE &&
+        s_connection_users == 0U &&
+        atomic_load_explicit(&s_active_connection,
+                             memory_order_relaxed) == 0U &&
+        atomic_load_explicit(&s_disconnects_pending,
+                             memory_order_relaxed) == 0U &&
+        !atomic_load_explicit(&s_connect_request_pending,
+                              memory_order_relaxed) &&
+        !atomic_load_explicit(&s_connect_callback_pending,
+                              memory_order_relaxed) &&
+        (s_incoming_session_generation == 0U || already_armed)) {
+        s_incoming_session_generation = session_generation;
+        s_incoming_media_profile = TIRTC_ADAPTER_MEDIA_VIEW;
+        rc = 0;
+    }
+    portEXIT_CRITICAL(&s_connection_lock);
+    return rc;
+}
+
+int tirtc_adapter_cancel_view(uint32_t session_generation)
+{
+    int rc = TIRTC_E_BUSY;
+    portENTER_CRITICAL(&s_connection_lock);
+    if (s_incoming_session_generation == 0U) {
+        rc = 0;
+    } else if (s_incoming_session_generation == session_generation &&
+               s_incoming_media_profile == TIRTC_ADAPTER_MEDIA_VIEW &&
+               atomic_load_explicit(&s_media_profile,
+                                    memory_order_relaxed) ==
+                   TIRTC_ADAPTER_MEDIA_NONE &&
+               atomic_load_explicit(&s_active_connection,
+                                    memory_order_relaxed) == 0U) {
+        s_incoming_session_generation = 0U;
+        s_incoming_media_profile = TIRTC_ADAPTER_MEDIA_NONE;
         rc = 0;
     }
     portEXIT_CRITICAL(&s_connection_lock);

@@ -25,8 +25,6 @@ typedef enum {
   FACADE_ACTION_STORY,
   FACADE_ACTION_JOKE,
   FACADE_ACTION_WEATHER,
-  FACADE_ACTION_CALL_XIAOZHANG,
-  FACADE_ACTION_CALL_XIAOLI,
 } facade_action_t;
 
 typedef enum {
@@ -125,7 +123,7 @@ static esp_err_t parse_set(const at_server_request_t *request,
 }
 
 static esp_err_t respond_failure(esp_err_t error, const char *message) {
-  (void)at_server_response("+TIRTC:失败,\"%s\"",
+  (void)at_server_response("+失败,\"%s\"",
                            message == NULL ? "请求失败" : message);
   return error;
 }
@@ -140,12 +138,12 @@ static esp_err_t respond_accepted(esp_err_t result, const char *message) {
     }
     return respond_failure(result, "请求未受理，请稍后重试");
   }
-  (void)at_server_response("+TIRTC:已受理,\"%s\"", message);
+  (void)at_server_response("+提示,\"%s\"", message);
   return ESP_OK;
 }
 
 static const char *system_state_text(const app_snapshot_t *snapshot) {
-  if (snapshot->last_error != 0 || snapshot->state == APP_STATE_ERROR) {
+  if (snapshot->state == APP_STATE_ERROR) {
     return "运行异常";
   }
   switch (snapshot->state) {
@@ -183,15 +181,14 @@ static const char *session_state_text(const app_snapshot_t *snapshot) {
 
 static esp_err_t respond_help(void) {
   static const char *const lines[] = {
-      "+TIRTC:帮助,\"状态\",\"AT+TIRTC?；设备；媒体；重启\"",
-      "+TIRTC:帮助,\"配网\",\"AT+TIRTC=配网,\\\"名称\\\",\\\"密码\\\"\"",
-      "+TIRTC:帮助,\"绑定\",\"AT+TIRTC=绑定\"",
-      "+TIRTC:帮助,\"AI\",\"故事、笑话、天气[,纬度,经度]、结束AI\"",
-      "+TIRTC:帮助,\"AI呼叫\",\"呼叫,\\\"小张或小李\\\"；"
-      "直呼,\\\"设备ID\\\"[,\\\"视频\\\"]\"",
-      "+TIRTC:帮助,\"通话\",\"AT+TIRTC=接听|拒接|取消|挂断\"",
-      "+TIRTC:帮助,\"联系人\",\"联系人|待处理|加好友|同意好友|拒绝好友|"
-      "备注|删除好友\"",
+      "+帮助,\"准备\",\"AT+配网=\\\"名称\\\",\\\"密码\\\"；AT+绑定；AT+"
+      "设备ID；AT+状态\"",
+      "+帮助,\"AI对讲\",\"AT+讲故事；AT+讲笑话；AT+查天气；AT+结束对讲\"",
+      "+帮助,\"联系人\",\"AT+联系人；AT+好友申请；AT+加好友=\\\"设备ID\\\"；AT+"
+      "同意好友=\\\"设备ID\\\"；AT+备注=\\\"设备ID\\\",\\\"小张\\\"\"",
+      "+帮助,\"呼叫\",\"AT+呼叫=\\\"小张\\\" 或 AT+呼叫=\\\"设备ID\\\"；AT+"
+      "接听；AT+拒接；AT+取消呼叫；AT+挂断\"",
+      "+帮助,\"消息\",\"通话接通后：AT+发消息=\\\"文字\\\"\"",
   };
   for (size_t index = 0; index < sizeof(lines) / sizeof(lines[0]); ++index) {
     esp_err_t err = at_server_response("%s", lines[index]);
@@ -205,8 +202,7 @@ static esp_err_t respond_help(void) {
 static esp_err_t respond_status(void) {
   app_snapshot_t snapshot = {0};
   app_controller_snapshot(&snapshot);
-  return at_server_response("+TIRTC:状态,\"%s\",\"%s\"",
-                            system_state_text(&snapshot),
+  return at_server_response("+状态,\"%s\",\"%s\"", system_state_text(&snapshot),
                             session_state_text(&snapshot));
 }
 
@@ -219,8 +215,41 @@ static esp_err_t respond_device(void) {
   if (err != ESP_OK) {
     return err;
   }
-  return at_server_response("+TIRTC:设备,\"%s\"",
+  return at_server_response("+设备ID,\"%s\"",
                             device_id[0] == '\0' ? "未绑定" : device_id);
+}
+
+static esp_err_t handle_bind(void) {
+  app_snapshot_t snapshot = {0};
+  app_controller_snapshot(&snapshot);
+
+  if (snapshot.state == APP_STATE_BINDING) {
+    if (snapshot.verification_code[0] != '\0') {
+      char code[sizeof(snapshot.verification_code) * 2U + 1U];
+      esp_err_t err = app_at_escape(snapshot.verification_code, code,
+                                    sizeof(code));
+      if (err != ESP_OK) {
+        return respond_failure(err, "暂时无法读取绑定码");
+      }
+      return at_server_response("+绑定码,\"%s\"", code);
+    }
+    (void)at_server_response("+提示,\"正在获取绑定码，请稍候\"");
+    return ESP_OK;
+  }
+  if (snapshot.state == APP_STATE_READY || snapshot.device_id[0] != '\0') {
+    (void)at_server_response("+提示,\"设备已经绑定\"");
+    return ESP_OK;
+  }
+  if (!snapshot.wifi_online) {
+    return respond_failure(ESP_ERR_INVALID_STATE, "请先完成配网并等待联网");
+  }
+  if (snapshot.state != APP_STATE_NEED_BINDING) {
+    return respond_failure(ESP_ERR_INVALID_STATE, "设备正在启动，请稍候");
+  }
+
+  return respond_accepted(
+      s_submit(APP_INTENT_BIND_START, NULL, NULL, NULL, false, NULL),
+      "正在获取绑定码");
 }
 
 static const char *media_profile_text(int profile) {
@@ -229,6 +258,8 @@ static const char *media_profile_text(int profile) {
     return "AI";
   case 2:
     return "通话";
+  case 3:
+    return "远程查看";
   default:
     return "空闲";
   }
@@ -259,10 +290,6 @@ static const char *action_preset(facade_action_t action) {
     return "JOKE";
   case FACADE_ACTION_WEATHER:
     return "WEATHER";
-  case FACADE_ACTION_CALL_XIAOZHANG:
-    return "CALL_XIAOZHANG";
-  case FACADE_ACTION_CALL_XIAOLI:
-    return "CALL_XIAOLI";
   case FACADE_ACTION_NONE:
   default:
     return NULL;
@@ -277,10 +304,6 @@ static const char *action_accepted_text(facade_action_t action) {
     return "正在准备笑话";
   case FACADE_ACTION_WEATHER:
     return "正在查询天气";
-  case FACADE_ACTION_CALL_XIAOZHANG:
-    return "正在呼叫小张";
-  case FACADE_ACTION_CALL_XIAOLI:
-    return "正在呼叫小李";
   case FACADE_ACTION_NONE:
   default:
     return "正在处理";
@@ -299,12 +322,6 @@ static bool action_caption_matches(facade_action_t action,
     break;
   case FACADE_ACTION_WEATHER:
     keyword = "天气";
-    break;
-  case FACADE_ACTION_CALL_XIAOZHANG:
-    keyword = "小张";
-    break;
-  case FACADE_ACTION_CALL_XIAOLI:
-    keyword = "小李";
     break;
   case FACADE_ACTION_NONE:
   default:
@@ -403,10 +420,9 @@ static esp_err_t submit_compound_action(facade_action_t action,
   } else {
     const char *preset = action_preset(action);
     err = preset == NULL ? ESP_ERR_INVALID_ARG
-                         : submit_pending(
-                               action, FACADE_PHASE_WAIT_AI_CAPTION,
-                               session.session_generation, NULL,
-                               APP_INTENT_AI_PROMPT, preset);
+                         : submit_pending(action, FACADE_PHASE_WAIT_AI_CAPTION,
+                                          session.session_generation, NULL,
+                                          APP_INTENT_AI_PROMPT, preset);
   }
   if (err == ESP_ERR_INVALID_STATE) {
     return respond_failure(err, "已有一条AI请求正在处理");
@@ -445,8 +461,7 @@ static esp_err_t submit_contact(app_intent_type_t intent, const char *first,
   }
   if (s_contact_request_id != 0) {
     give_lock();
-    return respond_failure(ESP_ERR_INVALID_STATE,
-                           "上一条联系人指令仍在处理");
+    return respond_failure(ESP_ERR_INVALID_STATE, "上一条联系人指令仍在处理");
   }
 
   uint32_t request_id = 0;
@@ -498,12 +513,10 @@ static esp_err_t handle_contact(const app_at_fields_t *fields) {
 
 static esp_err_t read_session(app_session_snapshot_t *session) {
   esp_err_t err = app_controller_session_snapshot(session);
-  return err == ESP_OK
-             ? ESP_OK
-             : respond_failure(err, "暂时无法读取会话状态");
+  return err == ESP_OK ? ESP_OK : respond_failure(err, "暂时无法读取会话状态");
 }
 
-static esp_err_t submit_direct_call(const char *device_id, const char *media) {
+static esp_err_t submit_direct_call(const char *target, const char *media) {
   app_session_snapshot_t session = {0};
   esp_err_t err = read_session(&session);
   if (err != ESP_OK) {
@@ -514,8 +527,8 @@ static esp_err_t submit_direct_call(const char *device_id, const char *media) {
     return respond_failure(ESP_ERR_INVALID_STATE, "当前正在处理其他会话");
   }
   return respond_accepted(
-      s_submit(APP_INTENT_CALL_START, device_id, media, NULL, false, NULL),
-      "正在呼叫设备");
+      s_submit(APP_INTENT_CALL_START, target, media, NULL, false, NULL),
+      "正在呼叫");
 }
 
 static esp_err_t submit_call_control(app_intent_type_t intent,
@@ -532,15 +545,15 @@ static esp_err_t submit_call_control(app_intent_type_t intent,
     allowed = allowed && session.pending_incoming_call;
     failure = "当前没有来电";
   } else if (intent == APP_INTENT_CALL_CANCEL) {
-    allowed = allowed && session.caller &&
-              strcmp(session.state, "in-call") != 0;
+    allowed =
+        allowed && session.caller && strcmp(session.state, "in-call") != 0;
     failure = "当前没有正在拨出的呼叫";
   }
   if (!allowed) {
     return respond_failure(ESP_ERR_INVALID_STATE, failure);
   }
-  return respond_accepted(
-      s_submit(intent, NULL, NULL, NULL, false, NULL), accepted_message);
+  return respond_accepted(s_submit(intent, NULL, NULL, NULL, false, NULL),
+                          accepted_message);
 }
 
 static esp_err_t handle_set(const app_at_fields_t *fields) {
@@ -550,9 +563,7 @@ static esp_err_t handle_set(const app_at_fields_t *fields) {
                             "正在保存网络配置，成功后设备将重启");
   }
   if (fields->count == 1 && equals(fields->values[0], "绑定")) {
-    return respond_accepted(
-        s_submit(APP_INTENT_BIND_START, NULL, NULL, NULL, false, NULL),
-        "正在获取绑定码");
+    return handle_bind();
   }
   if (fields->count == 1 && equals(fields->values[0], "设备")) {
     return respond_device();
@@ -589,15 +600,12 @@ static esp_err_t handle_set(const app_at_fields_t *fields) {
     return handle_weather(fields);
   }
   if (fields->count == 2 && equals(fields->values[0], "呼叫")) {
-    facade_action_t action;
-    if (equals(fields->values[1], "小张")) {
-      action = FACADE_ACTION_CALL_XIAOZHANG;
-    } else if (equals(fields->values[1], "小李")) {
-      action = FACADE_ACTION_CALL_XIAOLI;
-    } else {
-      return respond_failure(ESP_ERR_INVALID_ARG, "当前只支持呼叫小张或小李");
+    if (!valid_single_line_text(fields->values[1]) ||
+        fields->values[1][0] == '\0') {
+      return respond_failure(ESP_ERR_INVALID_ARG,
+                             "请输入联系人备注或设备ID");
     }
-    return submit_compound_action(action, NULL);
+    return submit_direct_call(fields->values[1], "AUDIO");
   }
   if (fields->count >= 2 && fields->count <= 3 &&
       equals(fields->values[0], "直呼")) {
@@ -626,6 +634,23 @@ static esp_err_t handle_set(const app_at_fields_t *fields) {
   if (fields->count == 1 && equals(fields->values[0], "挂断")) {
     return submit_call_control(APP_INTENT_CALL_HANGUP, "正在挂断");
   }
+  if (fields->count == 2 && equals(fields->values[0], "发消息")) {
+    if (!valid_single_line_text(fields->values[1]) ||
+        fields->values[1][0] == '\0') {
+      return respond_failure(ESP_ERR_INVALID_ARG,
+                             "消息必须是128字节以内的单行文字");
+    }
+    app_session_snapshot_t session = {0};
+    if (read_session(&session) != ESP_OK ||
+        strcmp(session.owner, "call") != 0 ||
+        strcmp(session.state, "in-call") != 0) {
+      return respond_failure(ESP_ERR_INVALID_STATE, "请先接通设备通话");
+    }
+    return respond_accepted(
+        s_submit(APP_INTENT_CALL_MESSAGE, fields->values[1], NULL, NULL,
+                 false, NULL),
+        "正在发送消息");
+  }
   if (fields->count == 1 && equals(fields->values[0], "重启")) {
     clear_all_pending();
     return respond_accepted(
@@ -643,11 +668,128 @@ static esp_err_t handle_set(const app_at_fields_t *fields) {
     return handle_contact(fields);
   }
   return respond_failure(ESP_ERR_INVALID_ARG,
-                         "未知操作，请发送 AT+TIRTC=? 查看帮助");
+                         "未知操作，请发送 AT+帮助 查看帮助");
+}
+
+static const char *public_action(app_at_public_command_t command) {
+  switch (command) {
+  case APP_AT_PUBLIC_WIFI:
+    return "配网";
+  case APP_AT_PUBLIC_BIND:
+    return "绑定";
+  case APP_AT_PUBLIC_DEVICE_ID:
+    return "设备";
+  case APP_AT_PUBLIC_STORY:
+    return "故事";
+  case APP_AT_PUBLIC_JOKE:
+    return "笑话";
+  case APP_AT_PUBLIC_WEATHER:
+    return "天气";
+  case APP_AT_PUBLIC_AI_STOP:
+    return "结束AI";
+  case APP_AT_PUBLIC_CONTACTS:
+    return "联系人";
+  case APP_AT_PUBLIC_PENDING:
+    return "待处理";
+  case APP_AT_PUBLIC_CONTACT_REQUEST:
+    return "加好友";
+  case APP_AT_PUBLIC_CONTACT_ACCEPT:
+    return "同意好友";
+  case APP_AT_PUBLIC_CONTACT_REMARK:
+    return "备注";
+  case APP_AT_PUBLIC_CALL:
+    return "呼叫";
+  case APP_AT_PUBLIC_CALL_ACCEPT:
+    return "接听";
+  case APP_AT_PUBLIC_CALL_REJECT:
+    return "拒接";
+  case APP_AT_PUBLIC_CALL_CANCEL:
+    return "取消";
+  case APP_AT_PUBLIC_CALL_HANGUP:
+    return "挂断";
+  case APP_AT_PUBLIC_CALL_MESSAGE:
+    return "发消息";
+  case APP_AT_PUBLIC_HELP:
+  case APP_AT_PUBLIC_STATUS:
+  default:
+    return NULL;
+  }
+}
+
+static bool public_command_has_arguments(app_at_public_command_t command) {
+  return command == APP_AT_PUBLIC_WIFI ||
+         command == APP_AT_PUBLIC_CONTACT_REQUEST ||
+         command == APP_AT_PUBLIC_CONTACT_ACCEPT ||
+         command == APP_AT_PUBLIC_CONTACT_REMARK ||
+         command == APP_AT_PUBLIC_CALL ||
+         command == APP_AT_PUBLIC_CALL_MESSAGE;
+}
+
+static esp_err_t build_public_fields(const at_server_request_t *request,
+                                     app_at_public_command_t command,
+                                     app_at_fields_t *fields) {
+  const char *action = public_action(command);
+  if (request == NULL || fields == NULL || action == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  const bool has_arguments = public_command_has_arguments(command);
+  if ((has_arguments && request->operation != AT_SERVER_OP_SET) ||
+      (!has_arguments && request->operation != AT_SERVER_OP_EXECUTE)) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  memset(fields, 0, sizeof(*fields));
+  (void)snprintf(fields->values[0], sizeof(fields->values[0]), "%s", action);
+  fields->count = 1;
+  if (!has_arguments) {
+    return ESP_OK;
+  }
+
+  app_at_fields_t arguments;
+  esp_err_t err = parse_set(request, &arguments);
+  if (err != ESP_OK || arguments.count + 1U > APP_AT_MAX_FIELDS) {
+    secure_zero(&arguments, sizeof(arguments));
+    return err == ESP_OK ? ESP_ERR_INVALID_SIZE : err;
+  }
+  for (size_t index = 0; index < arguments.count; ++index) {
+    (void)snprintf(fields->values[index + 1U],
+                   sizeof(fields->values[index + 1U]), "%s",
+                   arguments.values[index]);
+  }
+  fields->count += arguments.count;
+  secure_zero(&arguments, sizeof(arguments));
+  return ESP_OK;
 }
 
 esp_err_t app_at_facade_command(const at_server_request_t *request,
                                 void *context) {
+  if (request == NULL || s_submit == NULL) {
+    return ESP_ERR_INVALID_STATE;
+  }
+  const app_at_public_command_t command =
+      (app_at_public_command_t)(uintptr_t)context;
+  if (command == APP_AT_PUBLIC_HELP &&
+      request->operation == AT_SERVER_OP_EXECUTE) {
+    return respond_help();
+  }
+  if (command == APP_AT_PUBLIC_STATUS &&
+      request->operation == AT_SERVER_OP_EXECUTE) {
+    return respond_status();
+  }
+
+  app_at_fields_t fields;
+  esp_err_t err = build_public_fields(request, command, &fields);
+  if (err != ESP_OK) {
+    secure_zero(&fields, sizeof(fields));
+    return respond_failure(err, "指令格式不正确，请发送 AT+帮助");
+  }
+  err = handle_set(&fields);
+  secure_zero(&fields, sizeof(fields));
+  return err;
+}
+
+esp_err_t app_at_facade_legacy_command(const at_server_request_t *request,
+                                       void *context) {
   (void)context;
   if (request == NULL || s_submit == NULL) {
     return ESP_ERR_INVALID_STATE;
@@ -734,7 +876,7 @@ bool app_at_facade_raw_mode(void) {
 
 static void emit_simple_failure_locked(const char *message) {
   if (s_mode == APP_AT_MODE_USER) {
-    (void)at_server_urc("+TIRTC:失败,\"%s\"", message);
+    (void)at_server_urc("+失败,\"%s\"", message);
   }
 }
 
@@ -743,8 +885,7 @@ static void pending_timer_callback(TimerHandle_t timer) {
   if (take_lock() != ESP_OK) {
     return;
   }
-  if (s_pending.action != FACADE_ACTION_NONE &&
-      s_pending.deadline_us > 0 &&
+  if (s_pending.action != FACADE_ACTION_NONE && s_pending.deadline_us > 0 &&
       esp_timer_get_time() >= s_pending.deadline_us) {
     clear_pending_locked();
     emit_simple_failure_locked("AI请求超时，请重试");
@@ -835,17 +976,6 @@ static bool coordinate_event_locked(const app_event_t *event) {
     clear_pending_locked();
     return true;
   }
-  if (strcmp(event->name, "AI:ACTION") == 0 &&
-      strcmp(event->second, "call_device") == 0 &&
-      (s_pending.action == FACADE_ACTION_CALL_XIAOZHANG ||
-       s_pending.action == FACADE_ACTION_CALL_XIAOLI) &&
-      (s_pending.phase == FACADE_PHASE_WAIT_AI_CAPTION ||
-       s_pending.phase == FACADE_PHASE_WAIT_AI_ROUND_END) &&
-      s_pending.session_generation != 0 &&
-      event->generation == s_pending.session_generation) {
-    clear_pending_locked();
-    return true;
-  }
   if (strcmp(event->name, "AI:CAPTION") == 0 && event->flag &&
       s_pending.phase == FACADE_PHASE_WAIT_AI_CAPTION &&
       event->generation == s_pending.session_generation) {
@@ -887,15 +1017,12 @@ static void coordinate_contact_event_locked(const app_event_t *event) {
     return;
   }
   if (strcmp(event->name, "CONTACT:OP") == 0 &&
-      (event->code != 0 || strcmp(event->second, "completed") == 0 ||
-       strcmp(event->second, "rejected") == 0 ||
-       strcmp(event->second, "response-timeout") == 0 ||
-       strcmp(event->second, "submit-failed") == 0)) {
+      (event->code != 0 || strcmp(event->second, "submitted") != 0)) {
     clear_contact_pending_locked();
   }
 }
 
-static const char *ai_call_error_text(const char *phase) {
+static const char *call_error_text(const char *phase) {
   if (strcmp(phase, "target-offline") == 0) {
     return "目标设备不在线";
   }
@@ -908,11 +1035,28 @@ static const char *ai_call_error_text(const char *phase) {
   if (strcmp(phase, "target-invalid") == 0) {
     return "联系人名称无效";
   }
+  if (strcmp(phase, "contacts-timeout") == 0) {
+    return "查询联系人超时，请重试";
+  }
+  if (strncmp(phase, "contacts-", 9) == 0 ||
+      strcmp(phase, "request-failed-or-invalid-response") == 0) {
+    return "暂时无法读取联系人，请重试";
+  }
   return "呼叫设备失败";
 }
 
-static const char *contact_completed_text(const char *operation) {
+static const char *contact_completed_text(const char *operation,
+                                          const char *phase) {
   if (strcmp(operation, "contacts-request") == 0) {
+    if (strcmp(phase, "auto-accepted") == 0) {
+      return "同一账号设备，已自动成为联系人";
+    }
+    if (strcmp(phase, "accepted") == 0) {
+      return "双方已经是联系人";
+    }
+    if (strcmp(phase, "pending") == 0) {
+      return "好友申请已发送，等待对方同意";
+    }
     return "好友申请已提交";
   }
   if (strcmp(operation, "contacts-respond") == 0) {
@@ -933,7 +1077,7 @@ static void emit_user_event_locked(const app_event_t *event,
   char second[APP_TEXT_MEDIUM * 2U + 1U];
   if (event->domain == APP_EVENT_BIND && strcmp(event->name, "CODE") == 0) {
     if (app_at_escape(event->first, first, sizeof(first)) == ESP_OK) {
-      (void)at_server_urc("+TIRTC:绑定码,\"%s\"", first);
+      (void)at_server_urc("+绑定码,\"%s\"", first);
     }
     return;
   }
@@ -941,7 +1085,7 @@ static void emit_user_event_locked(const app_event_t *event,
       strcmp(event->name, "CONTACT") == 0) {
     if (app_at_escape(event->first, first, sizeof(first)) == ESP_OK &&
         app_at_escape(event->second, second, sizeof(second)) == ESP_OK) {
-      (void)at_server_urc("+TIRTC:联系人,%d,%d,\"%s\",\"%s\"", event->value1,
+      (void)at_server_urc("+联系人,%d,%d,\"%s\",\"%s\"", event->value1,
                           event->flag, first, second);
     }
     return;
@@ -949,7 +1093,7 @@ static void emit_user_event_locked(const app_event_t *event,
   if (event->domain == APP_EVENT_SESSION &&
       strcmp(event->name, "PENDING") == 0) {
     if (app_at_escape(event->first, first, sizeof(first)) == ESP_OK) {
-      (void)at_server_urc("+TIRTC:好友申请,%d,\"%s\"", event->value1, first);
+      (void)at_server_urc("+好友申请,%d,\"%s\"", event->value1, first);
     }
     return;
   }
@@ -958,23 +1102,22 @@ static void emit_user_event_locked(const app_event_t *event,
     if (app_at_escape(event->first, first, sizeof(first)) == ESP_OK) {
       const char *media =
           strcmp(event->payload, "video") == 0 ? "视频" : "音频";
-      (void)at_server_urc("+TIRTC:呼叫,\"收到来电\",\"%s\",\"%s\"",
-                          first, media);
+      (void)at_server_urc("+来电,\"%s\",\"%s\"", first, media);
     }
     return;
   }
   if (event->domain == APP_EVENT_SESSION &&
       strcmp(event->name, "CONTACT:OP") == 0 && event->code == 0 &&
-      strcmp(event->second, "completed") == 0) {
-    (void)at_server_urc("+TIRTC:联系人,\"%s\"",
-                        contact_completed_text(event->first));
+      strcmp(event->second, "submitted") != 0) {
+    (void)at_server_urc("+联系人,\"%s\"",
+                        contact_completed_text(event->first, event->second));
     return;
   }
   if (event->domain == APP_EVENT_SESSION &&
       (strcmp(event->name, "CONTACTS:DONE") == 0 ||
        strcmp(event->name, "PENDING:DONE") == 0) &&
       event->code == 0) {
-    (void)at_server_urc("+TIRTC:%s,\"共%d个\"",
+    (void)at_server_urc("+%s,\"共%d个\"",
                         strcmp(event->name, "CONTACTS:DONE") == 0 ? "联系人"
                                                                   : "好友申请",
                         event->value1);
@@ -983,13 +1126,18 @@ static void emit_user_event_locked(const app_event_t *event,
   if (event->domain == APP_EVENT_SESSION &&
       strcmp(event->name, "AI:EVENT") == 0 &&
       strcmp(event->first, "round_end") == 0) {
-    (void)at_server_urc("+TIRTC:AI,\"本轮完成\"");
+    (void)at_server_urc("+AI对讲,\"本轮完成\"");
     return;
   }
   if (event->domain == APP_EVENT_SESSION && strcmp(event->name, "AI:OP") == 0 &&
       strcmp(event->first, "ai-call-device") == 0 && event->code != 0) {
-    (void)at_server_urc("+TIRTC:失败,\"%s\"",
-                        ai_call_error_text(event->second));
+    (void)at_server_urc("+失败,\"%s\"", call_error_text(event->second));
+    return;
+  }
+  if (event->domain == APP_EVENT_SESSION &&
+      strcmp(event->name, "CALL:OP") == 0 &&
+      strcmp(event->first, "call-start") == 0 && event->code != 0) {
+    (void)at_server_urc("+失败,\"%s\"", call_error_text(event->second));
     return;
   }
   if (message == NULL || message->category[0] == '\0') {
@@ -1005,9 +1153,9 @@ static void emit_user_event_locked(const app_event_t *event,
     return;
   }
   if (subject[0] == '\0') {
-    (void)at_server_urc("+TIRTC:%s,\"%s\"", category, text);
+    (void)at_server_urc("+%s,\"%s\"", category, text);
   } else {
-    (void)at_server_urc("+TIRTC:%s,\"%s\",\"%s\"", category, subject, text);
+    (void)at_server_urc("+%s,\"%s\",\"%s\"", category, subject, text);
   }
 }
 

@@ -13,13 +13,11 @@ P4 静态库以 Nano baseline `aaad3da251bac90e0642b51b3279a1f40ca9fa9a` 为基�
 该快照的身份和逐文件 SHA-256 以项目 `components/tirtc_sdk/VERSION.md`、
 `SHA256SUMS.txt` 和 `SOURCE_PROVENANCE.md` 为准。
 
-项目明确标记为自生成且按仓库根许可分发的测试素材，以项目内 `media/README.md` 的来源、
-内容和 SHA-256 声明为准；这不改变编解码器实现本身的许可。
-
-ESP32-S3 日志示例中的五个短语音提示由 Windows 本地 `Microsoft Huihui Desktop` 语音合成，
-仅作为固定协议测试输入；文件来源、提示文本和 SHA-256 见
-[`media/README.md`](../logging-examples/esp32-s3/media/README.md)。该来源说明不改变 Microsoft
-语音组件或输出可能适用的条款，二次分发和商用前应结合使用环境核对相应许可。
+ESP32-S3 日志示例的 `audio.g711a` 和 `video.h264` 测试输入来自
+[`tirtc-server-example/thing-connect/device-sim/assets`](https://github.com/tangeai/tirtc-server-example/tree/main/thing-connect/device-sim/assets)。
+五个 `ai_*.g711a` 短语音提示由 Windows 本地 `Microsoft Huihui Desktop` 语音合成，
+仅用于固定协议测试。这些来源说明不改变编解码器、语音组件或输出可能适用的条款；
+二次分发和商用前应结合使用环境核对相应许可。
 
 具体许可证文件随对应组件保留在项目目录中。使用、修改或再分发前，请同时核对目标项目的
 `SOURCE_PROVENANCE.md`、组件目录中的 `LICENSE`/`NOTICE`，以及 SDK 或素材供应方提供的条款。

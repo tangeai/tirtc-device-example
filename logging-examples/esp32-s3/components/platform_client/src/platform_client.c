@@ -36,9 +36,10 @@
 #define PLATFORM_DEFAULT_DISCOVERY "https://ep-open.tangeopen.com/services"
 #define PLATFORM_DEFAULT_PROVISION_TIMEOUT_SECONDS 190U
 #define PLATFORM_PROVISION_ACK_TIMEOUT_MS 10000U
-#define PLATFORM_PROVISION_REPORT_MAX_ATTEMPTS 2U
-#define PLATFORM_PROVISION_REPORT_DEFAULT_RETRY_SECONDS 1U
-#define PLATFORM_PROVISION_REPORT_MAX_RETRY_SECONDS 190U
+#define PLATFORM_PROVISION_REPORT_DEFAULT_RETRY_SECONDS 10U
+#define PLATFORM_PROVISION_REPORT_RETRY_MAX_SECONDS 300U
+#define PLATFORM_PROVISION_NETWORK_RETRY_SECONDS 5U
+#define PLATFORM_PROVISION_NETWORK_RETRY_MAX_SECONDS 60U
 #define PLATFORM_WORKER_STACK (24U * 1024U)
 #define PLATFORM_WORKER_PRIORITY 5U
 #define PLATFORM_WORKER_STOP_TIMEOUT_MS 20000U
@@ -49,8 +50,16 @@
 #define PLATFORM_TOKEN_REFRESH_SETTLE_MS 100U
 #define PLATFORM_MQTT_ACK_PENDING_MAX 8U
 #define PLATFORM_MQTT_DEDUP_MAX 16U
+#define PLATFORM_TIME_VALID_UNIX_SECONDS 1704067200LL
+#define PLATFORM_TIME_SYNC_WAIT_MS 800U
+#define PLATFORM_TIME_SYNC_WAIT_COUNT 5U
+#define PLATFORM_TIME_SERVER_COUNT 4U
+#define PLATFORM_TIME_SERVER_0 "ntp.aliyun.com"
+#define PLATFORM_TIME_SERVER_1 "ntp.tencent.com"
+#define PLATFORM_TIME_SERVER_2 "ntp.huaweicloud.com"
+#define PLATFORM_TIME_SERVER_3 "cn.pool.ntp.org"
 
-#define PROVISION_SUBSCRIBED_BIT BIT0
+#define PROVISION_READY_BIT BIT0
 #define PROVISION_GRANT_BIT BIT1
 #define PROVISION_ERROR_BIT BIT2
 
@@ -133,6 +142,8 @@ typedef struct {
   mqtt_reassembly_t incoming;
   QueueHandle_t published_ids;
   int subscription_message_id;
+  int grant_ack_message_id;
+  char verification_code[17];
   bool grant_ready;
 } provision_mqtt_t;
 
@@ -197,6 +208,7 @@ static bool s_notify_subscription_ready;
 static bool s_unbind_pending;
 static bool s_rebind_event_pending;
 static bool s_rebind_emit_mqtt_disconnected;
+static platform_client_event_source_t s_rebind_source;
 static int s_rebind_status_code;
 static unsigned s_rebind_reason_code;
 static uint32_t s_client_epoch;
@@ -305,11 +317,12 @@ static void platform_emit_error(platform_client_event_source_t source,
   platform_emit_event(&event);
 }
 
-static void platform_emit_rebind_required(int status_code,
-                                          unsigned reason_code) {
+static void platform_emit_rebind_required(
+    platform_client_event_source_t source, int status_code,
+    unsigned reason_code) {
   const platform_client_event_t event = {
       .type = PLATFORM_CLIENT_EVENT_REBIND_REQUIRED,
-      .source = PLATFORM_CLIENT_EVENT_SOURCE_AUTH,
+      .source = source,
       .error = ESP_ERR_NOT_FOUND,
       .status_code = status_code,
       .reason_code = reason_code,
@@ -1223,8 +1236,9 @@ static void mqtt_confirm_command_ack(int publish_message_id) {
   }
 }
 
-static bool latch_rebind_required(uint32_t expected_epoch, int status_code,
-                                  unsigned reason_code,
+static bool latch_rebind_required(uint32_t expected_epoch,
+                                  platform_client_event_source_t source,
+                                  int status_code, unsigned reason_code,
                                   bool *was_connected) {
   bool latched = false;
   taskENTER_CRITICAL(&s_state_mux);
@@ -1239,6 +1253,7 @@ static bool latch_rebind_required(uint32_t expected_epoch, int status_code,
     }
     s_rebind_event_pending = true;
     s_rebind_emit_mqtt_disconnected = s_mqtt_connected;
+    s_rebind_source = source;
     s_rebind_status_code = status_code;
     s_rebind_reason_code = reason_code;
     s_mqtt_connected = false;
@@ -1257,7 +1272,8 @@ static void mqtt_enter_unbind_required(void) {
   taskENTER_CRITICAL(&s_state_mux);
   client_epoch = s_client_epoch;
   taskEXIT_CRITICAL(&s_state_mux);
-  if (latch_rebind_required(client_epoch, 0, 6006U, NULL)) {
+  if (latch_rebind_required(client_epoch, PLATFORM_CLIENT_EVENT_SOURCE_MQTT, 0,
+                            6006U, NULL)) {
     mqtt_subscription_state_reset();
   }
 }
@@ -1265,6 +1281,8 @@ static void mqtt_enter_unbind_required(void) {
 static void emit_pending_rebind_event(void) {
   bool pending = false;
   bool emit_mqtt_disconnected = false;
+  platform_client_event_source_t source =
+      PLATFORM_CLIENT_EVENT_SOURCE_INTERNAL;
   int status_code = 0;
   unsigned reason_code = 0U;
 
@@ -1272,10 +1290,12 @@ static void emit_pending_rebind_event(void) {
   if (s_rebind_event_pending) {
     pending = true;
     emit_mqtt_disconnected = s_rebind_emit_mqtt_disconnected;
+    source = s_rebind_source;
     status_code = s_rebind_status_code;
     reason_code = s_rebind_reason_code;
     s_rebind_event_pending = false;
     s_rebind_emit_mqtt_disconnected = false;
+    s_rebind_source = PLATFORM_CLIENT_EVENT_SOURCE_INTERNAL;
     s_rebind_status_code = 0;
     s_rebind_reason_code = 0U;
   }
@@ -1286,7 +1306,7 @@ static void emit_pending_rebind_event(void) {
   }
   (void)emit_mqtt_disconnected;
   emit_observer_mqtt_state(false, reason_code);
-  platform_emit_rebind_required(status_code, reason_code);
+  platform_emit_rebind_required(source, status_code, reason_code);
 }
 
 static void mqtt_complete_message(esp_mqtt_client_handle_t mqtt,
@@ -1932,7 +1952,8 @@ static esp_err_t client_operation_status(uint32_t expected_epoch,
 
 static bool enter_rebind_required(uint32_t expected_epoch, int status_code,
                                   unsigned reason_code) {
-  if (!latch_rebind_required(expected_epoch, status_code, reason_code, NULL)) {
+  if (!latch_rebind_required(expected_epoch, PLATFORM_CLIENT_EVENT_SOURCE_AUTH,
+                             status_code, reason_code, NULL)) {
     return false;
   }
   stop_mqtt();
@@ -2231,24 +2252,44 @@ static esp_err_t ensure_worker(void) {
 }
 
 static esp_err_t sync_clock(void) {
-  if (time(NULL) > 1700000000) {
+  time_t now = 0;
+  time(&now);
+  if (now >= (time_t)PLATFORM_TIME_VALID_UNIX_SECONDS) {
     return ESP_OK;
   }
 
-  esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+  esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
+      PLATFORM_TIME_SERVER_COUNT,
+      ESP_SNTP_SERVER_LIST(PLATFORM_TIME_SERVER_0, PLATFORM_TIME_SERVER_1,
+                           PLATFORM_TIME_SERVER_2, PLATFORM_TIME_SERVER_3));
+  const int64_t started_ms = monotonic_ms();
+  esp_netif_sntp_deinit();
   esp_err_t err = esp_netif_sntp_init(&config);
-  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "network clock initialization failed: %s",
+             esp_err_to_name(err));
     return err;
   }
-  for (int attempt = 0; attempt < 5; ++attempt) {
-    err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(2000));
-    if (err == ESP_OK || time(NULL) > 1700000000) {
-      ESP_LOGI(TAG, "network clock synchronized");
-      return ESP_OK;
+
+  for (unsigned attempt = 0; attempt < PLATFORM_TIME_SYNC_WAIT_COUNT;
+       ++attempt) {
+    err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(PLATFORM_TIME_SYNC_WAIT_MS));
+    time(&now);
+    if (err != ESP_ERR_TIMEOUT ||
+        now >= (time_t)PLATFORM_TIME_VALID_UNIX_SECONDS) {
+      break;
     }
   }
-  ESP_LOGE(TAG, "network clock synchronization timed out");
-  return ESP_ERR_TIMEOUT;
+  esp_netif_sntp_deinit();
+
+  if (now >= (time_t)PLATFORM_TIME_VALID_UNIX_SECONDS) {
+    ESP_LOGI(TAG, "network clock synchronized in %lld ms",
+             (long long)(monotonic_ms() - started_ms));
+    return ESP_OK;
+  }
+  ESP_LOGE(TAG, "network clock synchronization failed after %lld ms: %s",
+           (long long)(monotonic_ms() - started_ms), esp_err_to_name(err));
+  return err == ESP_OK ? ESP_FAIL : err;
 }
 
 static esp_err_t report_for_provision(const platform_provision_config_t *config,
@@ -2270,8 +2311,8 @@ static esp_err_t report_for_provision(const platform_provision_config_t *config,
                        config->existing_device_secret != NULL &&
                        config->existing_device_secret[0] != '\0';
   char url[384] = {0};
-  int url_length =
-      snprintf(url, sizeof(url), "%s/v1/device/report", s_services.device);
+  int url_length = snprintf(url, sizeof(url), "%s/v1/device/report",
+                            s_services.device);
   if (url_length <= 0 || (size_t)url_length >= sizeof(url)) {
     free(body);
     return ESP_ERR_INVALID_SIZE;
@@ -2288,8 +2329,9 @@ static esp_err_t report_for_provision(const platform_provision_config_t *config,
   }
 
   esp_err_t result = ESP_ERR_INVALID_RESPONSE;
-  for (unsigned attempt = 0;
-       attempt < PLATFORM_PROVISION_REPORT_MAX_ATTEMPTS; ++attempt) {
+  unsigned report_waited_seconds = 0U;
+  unsigned network_waited_seconds = 0U;
+  for (;;) {
     const char *header_names[4] = {0};
     const char *header_values[4] = {0};
     size_t header_count = 0;
@@ -2335,11 +2377,27 @@ static esp_err_t report_for_provision(const platform_provision_config_t *config,
                      PLATFORM_HTTP_BODY_MAX, &status, &retry_after_seconds);
     secure_zero(signature, sizeof(signature));
     if (err != ESP_OK) {
-      ESP_LOGE(TAG, "device report transport failed: %s",
-               esp_err_to_name(err));
-      result = err;
-      break;
+      const bool retryable =
+          err != ESP_ERR_INVALID_ARG && err != ESP_ERR_NO_MEM &&
+          err != ESP_ERR_INVALID_SIZE;
+      if (!retryable ||
+          network_waited_seconds + PLATFORM_PROVISION_NETWORK_RETRY_SECONDS >
+              PLATFORM_PROVISION_NETWORK_RETRY_MAX_SECONDS) {
+        ESP_LOGE(TAG, "device report transport failed: %s",
+                 esp_err_to_name(err));
+        result = err;
+        break;
+      }
+      ESP_LOGW(TAG,
+               "device report network retry: err=%s wait=%us elapsed=%us",
+               esp_err_to_name(err), PLATFORM_PROVISION_NETWORK_RETRY_SECONDS,
+               network_waited_seconds);
+      vTaskDelay(pdMS_TO_TICKS(PLATFORM_PROVISION_NETWORK_RETRY_SECONDS *
+                               1000U));
+      network_waited_seconds += PLATFORM_PROVISION_NETWORK_RETRY_SECONDS;
+      continue;
     }
+    network_waited_seconds = 0U;
 
     cJSON *root = cJSON_Parse(response);
     const cJSON *response_code =
@@ -2364,8 +2422,7 @@ static esp_err_t report_for_provision(const platform_provision_config_t *config,
       break;
     }
     secure_zero(report, sizeof(*report));
-    if (!retryable ||
-        attempt + 1U >= PLATFORM_PROVISION_REPORT_MAX_ATTEMPTS) {
+    if (!retryable) {
       ESP_LOGW(TAG, "device report rejected: status=%d code=%d", status, code);
       result = ESP_ERR_INVALID_RESPONSE;
       break;
@@ -2375,14 +2432,23 @@ static esp_err_t report_for_provision(const platform_provision_config_t *config,
         retry_after_seconds == 0U
             ? PLATFORM_PROVISION_REPORT_DEFAULT_RETRY_SECONDS
             : retry_after_seconds;
-    if (delay_seconds > PLATFORM_PROVISION_REPORT_MAX_RETRY_SECONDS) {
-      delay_seconds = PLATFORM_PROVISION_REPORT_MAX_RETRY_SECONDS;
+    if (delay_seconds == 0U ||
+        delay_seconds > PLATFORM_PROVISION_REPORT_RETRY_MAX_SECONDS ||
+        report_waited_seconds + delay_seconds >
+            PLATFORM_PROVISION_REPORT_RETRY_MAX_SECONDS) {
+      ESP_LOGW(TAG,
+               "device report cooldown exhausted: status=%d code=%d "
+               "retry_after=%us elapsed=%us",
+               status, code, delay_seconds, report_waited_seconds);
+      result = ESP_ERR_TIMEOUT;
+      break;
     }
     ESP_LOGW(TAG,
              "device report transiently rejected: status=%d code=%d; "
              "retrying in %u seconds",
              status, code, delay_seconds);
     vTaskDelay(pdMS_TO_TICKS(delay_seconds * 1000U));
+    report_waited_seconds += delay_seconds;
   }
 
   secure_zero(response, PLATFORM_HTTP_BODY_MAX);
@@ -2394,10 +2460,71 @@ static esp_err_t report_for_provision(const platform_provision_config_t *config,
   return result;
 }
 
+static bool pending_provision_valid(
+    const platform_pending_provision_t *pending,
+    const platform_provision_config_t *config, time_t now) {
+  return pending != NULL && config != NULL && config->mac_address != NULL &&
+         pending->expires_at_unix > (int64_t)now &&
+         pending->mac_address[sizeof(pending->mac_address) - 1U] == '\0' &&
+         pending->code[sizeof(pending->code) - 1U] == '\0' &&
+         pending->temp_token[sizeof(pending->temp_token) - 1U] == '\0' &&
+         pending->temp_client_id[sizeof(pending->temp_client_id) - 1U] ==
+             '\0' &&
+         strcmp(pending->mac_address, config->mac_address) == 0 &&
+         pending->code[0] != '\0' && pending->temp_token[0] != '\0' &&
+         pending->temp_client_id[0] != '\0';
+}
+
+static void report_from_pending(const platform_pending_provision_t *pending,
+                                provision_report_t *report) {
+  memset(report, 0, sizeof(*report));
+  strlcpy(report->code, pending->code, sizeof(report->code));
+  strlcpy(report->temp_token, pending->temp_token,
+          sizeof(report->temp_token));
+  strlcpy(report->temp_client_id, pending->temp_client_id,
+          sizeof(report->temp_client_id));
+}
+
+static void pending_from_report(const platform_provision_config_t *config,
+                                const provision_report_t *report,
+                                time_t expires_at,
+                                platform_pending_provision_t *pending) {
+  memset(pending, 0, sizeof(*pending));
+  pending->expires_at_unix = (int64_t)expires_at;
+  strlcpy(pending->mac_address, config->mac_address,
+          sizeof(pending->mac_address));
+  strlcpy(pending->code, report->code, sizeof(pending->code));
+  strlcpy(pending->temp_token, report->temp_token,
+          sizeof(pending->temp_token));
+  strlcpy(pending->temp_client_id, report->temp_client_id,
+          sizeof(pending->temp_client_id));
+}
+
 static void provision_finish_with_error(provision_mqtt_t *context) {
   if (context != NULL && context->events != NULL) {
     xEventGroupSetBits(context->events, PROVISION_ERROR_BIT);
   }
+}
+
+static void provision_publish_code_ready(provision_mqtt_t *context) {
+  if (context == NULL || context->verification_code[0] == '\0') {
+    provision_finish_with_error(context);
+    return;
+  }
+
+  strlcpy(s_verification_code, context->verification_code,
+          sizeof(s_verification_code));
+  platform_client_event_t event = {
+      .type = PLATFORM_CLIENT_EVENT_PROVISION_CODE,
+      .source = PLATFORM_CLIENT_EVENT_SOURCE_PROVISION,
+      .error = ESP_OK,
+  };
+  strlcpy(event.provision_code, context->verification_code,
+          sizeof(event.provision_code));
+  platform_emit_event(&event);
+  xEventGroupSetBits(context->events, PROVISION_READY_BIT);
+  ESP_LOGI(TAG,
+           "temporary MQTT subscription confirmed; verification code is ready");
 }
 
 static const cJSON *provision_payload_object(const cJSON *root,
@@ -2456,6 +2583,9 @@ static void provision_handle_message(provision_mqtt_t *context,
       root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "type");
   if (!cJSON_IsObject(root) || parse_end != json + length ||
       !cJSON_IsString(type) || strcmp(type->valuestring, "auth_grant") != 0) {
+    ESP_LOGW(TAG, "temporary MQTT message ignored: bytes=%u type=%s",
+             (unsigned)length,
+             cJSON_IsString(type) ? type->valuestring : "-");
     json_secure_delete(root);
     return;
   }
@@ -2497,10 +2627,28 @@ static void provision_handle_message(provision_mqtt_t *context,
     return;
   }
 
+  char ack_topic[PLATFORM_MQTT_TOPIC_MAX] = {0};
+  int ack_topic_length = snprintf(ack_topic, sizeof(ack_topic),
+                                  "device/%s/ack", context->temp_client_id);
+  if (ack_topic_length <= 0 ||
+      (size_t)ack_topic_length >= sizeof(ack_topic)) {
+    ESP_LOGE(TAG, "auth_grant ACK topic is too long");
+    provision_finish_with_error(context);
+    return;
+  }
+  context->grant_ack_message_id = esp_mqtt_client_publish(
+      context->mqtt, ack_topic, "{\"ack\":true}", 12, 1, 0);
+  if (context->grant_ack_message_id < 0) {
+    ESP_LOGE(TAG, "auth_grant ACK enqueue failed");
+    provision_finish_with_error(context);
+    return;
+  }
+
   context->grant_ready = true;
   platform_emit_provision_progress(
       PLATFORM_PROVISION_PROGRESS_GRANT_VALIDATED);
   xEventGroupSetBits(context->events, PROVISION_GRANT_BIT);
+  ESP_LOGI(TAG, "auth_grant validated; ACK queued before credential persistence");
 }
 
 static void provision_mqtt_event(void *handler_args, esp_event_base_t base,
@@ -2537,7 +2685,7 @@ static void provision_mqtt_event(void *handler_args, esp_event_base_t base,
       ESP_LOGI(TAG, "temporary MQTT subscription confirmed");
       platform_emit_provision_progress(
           PLATFORM_PROVISION_PROGRESS_SUBSCRIBED);
-      xEventGroupSetBits(context->events, PROVISION_SUBSCRIBED_BIT);
+      provision_publish_code_ready(context);
     }
     return;
   }
@@ -2550,6 +2698,8 @@ static void provision_mqtt_event(void *handler_args, esp_event_base_t base,
       return;
     }
     if (mqtt_reassembly_append(&context->incoming, event)) {
+      ESP_LOGI(TAG, "temporary MQTT message received: bytes=%u",
+               (unsigned)context->incoming.received_size);
       platform_emit_provision_progress(
           PLATFORM_PROVISION_PROGRESS_MESSAGE_RECEIVED);
       if (mqtt_payload_is_json_object(context->incoming.payload,
@@ -2574,8 +2724,7 @@ static void provision_mqtt_event(void *handler_args, esp_event_base_t base,
   }
 
   if (event_id == MQTT_EVENT_DISCONNECTED) {
-    ESP_LOGE(TAG, "temporary MQTT disconnected before provisioning completed");
-    provision_finish_with_error(context);
+    ESP_LOGW(TAG, "temporary MQTT disconnected; waiting for reconnect");
     return;
   }
 
@@ -2634,10 +2783,13 @@ static esp_err_t wait_for_auth_grant(const provision_report_t *report,
                                      platform_provision_result_t *result) {
   provision_mqtt_t context = {
       .subscription_message_id = -1,
+      .grant_ack_message_id = -1,
   };
   mqtt_reassembly_reset(&context.incoming);
   strlcpy(context.temp_client_id, report->temp_client_id,
           sizeof(context.temp_client_id));
+  strlcpy(context.verification_code, report->code,
+          sizeof(context.verification_code));
   if (config->existing_device_id != NULL &&
       config->existing_device_secret != NULL) {
     strlcpy(context.device_id, config->existing_device_id,
@@ -2699,18 +2851,14 @@ static esp_err_t wait_for_auth_grant(const provision_report_t *report,
   TickType_t total_ticks = pdMS_TO_TICKS(timeout_seconds * 1000U);
   TickType_t started = xTaskGetTickCount();
   EventBits_t bits = xEventGroupWaitBits(
-      context.events, PROVISION_SUBSCRIBED_BIT | PROVISION_ERROR_BIT, pdFALSE,
+      context.events, PROVISION_READY_BIT | PROVISION_ERROR_BIT, pdFALSE,
       pdFALSE, total_ticks);
-  if ((bits & PROVISION_SUBSCRIBED_BIT) == 0U) {
+  if ((bits & PROVISION_READY_BIT) == 0U) {
     err = (bits & PROVISION_ERROR_BIT) != 0U ? ESP_FAIL : ESP_ERR_TIMEOUT;
     goto cleanup;
   }
 
   TickType_t grant_ticks = remaining_ticks(started, total_ticks);
-  if (grant_ticks == 0) {
-    err = ESP_ERR_TIMEOUT;
-    goto cleanup;
-  }
   bits = xEventGroupWaitBits(
       context.events, PROVISION_GRANT_BIT | PROVISION_ERROR_BIT, pdFALSE,
       pdFALSE, grant_ticks);
@@ -2718,6 +2866,20 @@ static esp_err_t wait_for_auth_grant(const provision_report_t *report,
     err = (bits & PROVISION_ERROR_BIT) != 0U ? ESP_FAIL : ESP_ERR_TIMEOUT;
     goto cleanup;
   }
+
+  TickType_t ack_ticks = pdMS_TO_TICKS(PLATFORM_PROVISION_ACK_TIMEOUT_MS);
+  TickType_t overall_remaining = remaining_ticks(started, total_ticks);
+  if (overall_remaining < ack_ticks) {
+    ack_ticks = overall_remaining;
+  }
+  err = provision_wait_for_puback(&context, context.grant_ack_message_id,
+                                  ack_ticks);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "auth_grant ACK PUBACK was not confirmed");
+    goto cleanup;
+  }
+  platform_emit_provision_progress(
+      PLATFORM_PROVISION_PROGRESS_ACK_CONFIRMED);
 
   platform_provision_result_t candidate = {0};
   strlcpy(candidate.device_id, context.device_id, sizeof(candidate.device_id));
@@ -2734,34 +2896,8 @@ static esp_err_t wait_for_auth_grant(const provision_report_t *report,
   platform_emit_provision_progress(
       PLATFORM_PROVISION_PROGRESS_CREDENTIALS_PERSISTED);
 
-  char ack_topic[PLATFORM_MQTT_TOPIC_MAX] = {0};
-  snprintf(ack_topic, sizeof(ack_topic), "device/%s/ack",
-           context.temp_client_id);
-  int ack_message_id = esp_mqtt_client_publish(
-      context.mqtt, ack_topic, "{\"ack\":true}", 12, 1, 0);
-  if (ack_message_id < 0) {
-    ESP_LOGE(TAG, "auth_grant ACK enqueue failed");
-    secure_zero(&candidate, sizeof(candidate));
-    err = ESP_FAIL;
-    goto cleanup;
-  }
-
-  TickType_t ack_ticks = pdMS_TO_TICKS(PLATFORM_PROVISION_ACK_TIMEOUT_MS);
-  TickType_t overall_remaining = remaining_ticks(started, total_ticks);
-  if (overall_remaining < ack_ticks) {
-    ack_ticks = overall_remaining;
-  }
-  err = provision_wait_for_puback(&context, ack_message_id, ack_ticks);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "auth_grant ACK PUBACK was not confirmed");
-    secure_zero(&candidate, sizeof(candidate));
-    goto cleanup;
-  }
-
   *result = candidate;
   secure_zero(&candidate, sizeof(candidate));
-  platform_emit_provision_progress(
-      PLATFORM_PROVISION_PROGRESS_ACK_CONFIRMED);
   ESP_LOGI(TAG, "auth_grant persisted and ACK confirmed");
   err = ESP_OK;
 
@@ -2798,18 +2934,28 @@ static void provisioning_end(void) {
 
 esp_err_t platform_client_provision(const platform_provision_config_t *config,
                                     platform_provision_result_t *result) {
+  const bool has_any_pending_callback =
+      config != NULL && (config->load_pending != NULL ||
+                         config->save_pending != NULL ||
+                         config->clear_pending != NULL);
+  const bool has_all_pending_callbacks =
+      config != NULL && config->load_pending != NULL &&
+      config->save_pending != NULL && config->clear_pending != NULL;
   if (config == NULL || result == NULL || config->persist_credentials == NULL ||
       config->mac_address == NULL || config->mac_address[0] == '\0' ||
+      (config->discovery_url != NULL && config->discovery_url[0] != '\0' &&
+       !platform_is_https_url(config->discovery_url)) ||
       strlen(config->mac_address) >= sizeof(s_mac_address) ||
       config->timeout_seconds > 3600U ||
       ((config->existing_device_id == NULL) !=
        (config->existing_device_secret == NULL)) ||
-      (config->existing_device_id != NULL &&
-       (config->existing_device_id[0] == '\0' ||
-        config->existing_device_secret[0] == '\0' ||
-        strlen(config->existing_device_id) >= sizeof(result->device_id) ||
-        strlen(config->existing_device_secret) >=
-            sizeof(result->device_secret)))) {
+       (config->existing_device_id != NULL &&
+        (config->existing_device_id[0] == '\0' ||
+         config->existing_device_secret[0] == '\0' ||
+         strlen(config->existing_device_id) >= sizeof(result->device_id) ||
+         strlen(config->existing_device_secret) >=
+             sizeof(result->device_secret))) ||
+      (has_any_pending_callback && !has_all_pending_callbacks)) {
     return ESP_ERR_INVALID_ARG;
   }
   if (!ensure_client_mutexes() ||
@@ -2829,40 +2975,88 @@ esp_err_t platform_client_provision(const platform_provision_config_t *config,
     goto done;
   }
 
+  const char *discovery =
+      config->discovery_url != NULL && config->discovery_url[0] != '\0'
+          ? config->discovery_url
+          : PLATFORM_DEFAULT_DISCOVERY;
   if (!s_services_ready) {
-    const char *discovery =
-        config->discovery_url != NULL && config->discovery_url[0] != '\0'
-            ? config->discovery_url
-            : PLATFORM_DEFAULT_DISCOVERY;
     err = discover_services(discovery);
     if (err != ESP_OK) {
+      platform_emit_error(PLATFORM_CLIENT_EVENT_SOURCE_PROVISION, err, 0, 0);
       goto done;
     }
   }
 
+  const unsigned requested_timeout =
+      config->timeout_seconds == 0U ? PLATFORM_DEFAULT_PROVISION_TIMEOUT_SECONDS
+                                    : config->timeout_seconds;
+  platform_provision_config_t effective_config = *config;
   provision_report_t report = {0};
-  err = report_for_provision(config, &report);
-  if (err != ESP_OK) {
-    platform_emit_error(PLATFORM_CLIENT_EVENT_SOURCE_PROVISION, err, 0, 0);
-    secure_zero(report.temp_token, sizeof(report.temp_token));
-    goto done;
+  platform_pending_provision_t pending = {0};
+  time_t now = time(NULL);
+  bool restored_pending = false;
+
+  if (has_all_pending_callbacks) {
+    esp_err_t load_err =
+        config->load_pending(&pending, config->pending_user_data);
+    if (load_err == ESP_OK && pending_provision_valid(&pending, config, now)) {
+      report_from_pending(&pending, &report);
+      const int64_t remaining = pending.expires_at_unix - (int64_t)now;
+      effective_config.timeout_seconds =
+          remaining > 0 && remaining < (int64_t)requested_timeout
+              ? (unsigned)remaining
+              : requested_timeout;
+      restored_pending = true;
+      ESP_LOGI(TAG, "pending binding session restored; ttl_left=%us",
+               effective_config.timeout_seconds);
+    } else if (load_err == ESP_OK || load_err == ESP_ERR_INVALID_SIZE) {
+      (void)config->clear_pending(config->pending_user_data);
+    } else if (load_err != ESP_ERR_NOT_FOUND) {
+      ESP_LOGW(TAG, "pending binding session load failed: %s",
+               esp_err_to_name(load_err));
+    }
   }
 
-  strlcpy(s_verification_code, report.code, sizeof(s_verification_code));
-  platform_client_event_t event = {
-      .type = PLATFORM_CLIENT_EVENT_PROVISION_CODE,
-      .source = PLATFORM_CLIENT_EVENT_SOURCE_PROVISION,
-      .error = ESP_OK,
-  };
-  strlcpy(event.provision_code, report.code, sizeof(event.provision_code));
-  platform_emit_event(&event);
-  ESP_LOGI(TAG, "verification code is available through the observer");
+  if (!restored_pending) {
+    err = report_for_provision(config, &report);
+    if (err != ESP_OK) {
+      platform_emit_error(PLATFORM_CLIENT_EVENT_SOURCE_PROVISION, err, 0, 0);
+      secure_zero(report.temp_token, sizeof(report.temp_token));
+      secure_zero(&pending, sizeof(pending));
+      goto done;
+    }
+    effective_config.timeout_seconds = requested_timeout;
+    if (has_all_pending_callbacks) {
+      now = time(NULL);
+      pending_from_report(config, &report, now + requested_timeout, &pending);
+      esp_err_t save_err =
+          config->save_pending(&pending, config->pending_user_data);
+      if (save_err != ESP_OK) {
+        ESP_LOGW(TAG, "pending binding session save failed: %s",
+                 esp_err_to_name(save_err));
+      } else {
+        ESP_LOGI(TAG, "pending binding session saved; ttl=%us",
+                 requested_timeout);
+      }
+    }
+  }
 
-  err = wait_for_auth_grant(&report, config, result);
+  err = wait_for_auth_grant(&report, &effective_config, result);
   secure_zero(report.temp_token, sizeof(report.temp_token));
   if (err != ESP_OK) {
     platform_emit_error(PLATFORM_CLIENT_EVENT_SOURCE_PROVISION, err, 0, 0);
+  } else if (has_all_pending_callbacks) {
+    esp_err_t clear_err =
+        config->clear_pending(config->pending_user_data);
+    if (clear_err != ESP_OK) {
+      ESP_LOGW(TAG, "pending binding session clear failed: %s",
+               esp_err_to_name(clear_err));
+    }
   }
+  if (err == ESP_ERR_TIMEOUT && has_all_pending_callbacks) {
+    (void)config->clear_pending(config->pending_user_data);
+  }
+  secure_zero(&pending, sizeof(pending));
 
 done:
   s_verification_code[0] = '\0';
@@ -2931,7 +3125,8 @@ platform_client_start_locked(const platform_client_config_t *config) {
   err = obtain_mqtt_token(token, sizeof(token), &status, &service_code);
   if (err == ESP_ERR_NOT_FOUND || service_code == 6006) {
     secure_zero(token, sizeof(token));
-    platform_emit_rebind_required(status, 6006U);
+    platform_emit_rebind_required(PLATFORM_CLIENT_EVENT_SOURCE_AUTH, status,
+                                  6006U);
     return ESP_ERR_NOT_FOUND;
   }
   if (err != ESP_OK) {
@@ -2955,6 +3150,7 @@ platform_client_start_locked(const platform_client_config_t *config) {
   s_unbind_pending = false;
   s_rebind_event_pending = false;
   s_rebind_emit_mqtt_disconnected = false;
+  s_rebind_source = PLATFORM_CLIENT_EVENT_SOURCE_INTERNAL;
   s_client_active = true;
   s_ready = false;
   s_client_epoch = next_generation(s_client_epoch);
@@ -3065,6 +3261,7 @@ static esp_err_t platform_client_stop_locked(void) {
   taskENTER_CRITICAL(&s_state_mux);
   s_rebind_event_pending = false;
   s_rebind_emit_mqtt_disconnected = false;
+  s_rebind_source = PLATFORM_CLIENT_EVENT_SOURCE_INTERNAL;
   s_rebind_status_code = 0;
   s_rebind_reason_code = 0U;
   s_mqtt_state_queue_overflow = false;

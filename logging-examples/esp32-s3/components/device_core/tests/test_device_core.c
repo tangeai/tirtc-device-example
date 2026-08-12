@@ -260,6 +260,8 @@ int main(void)
     assert(device_session_video_enabled(&media, DEVICE_SERVICE_AI, DEVICE_MEDIA_UPLINK));
     assert(!device_session_video_enabled(&media, DEVICE_SERVICE_AI, DEVICE_MEDIA_DOWNLINK));
     assert(device_session_video_enabled(&media, DEVICE_SERVICE_CALL, DEVICE_MEDIA_DOWNLINK));
+    assert(device_session_video_enabled(&media, DEVICE_SERVICE_VIEW, DEVICE_MEDIA_UPLINK));
+    assert(!device_session_video_enabled(&media, DEVICE_SERVICE_VIEW, DEVICE_MEDIA_DOWNLINK));
 
     media.video.uplink_enabled = false;
     media.video.downlink_enabled = false;
@@ -279,6 +281,10 @@ int main(void)
     assert(!device_media_config_validate(&media, error, sizeof(error)));
     media.video.fps = 15;
     media.video.frame_count = 150;
+    assert(device_media_config_validate(&media, error, sizeof(error)));
+    media.video.width = 1280;
+    media.video.height = 720;
+    media.video.aspect_ratio = 16.0 / 9.0;
     assert(device_media_config_validate(&media, error, sizeof(error)));
 
     media.video.codec = DEVICE_VIDEO_CODEC_H265_RESERVED;

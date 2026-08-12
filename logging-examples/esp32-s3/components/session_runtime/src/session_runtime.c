@@ -328,6 +328,106 @@ bool session_claim(session_context_t *context,
     return true;
 }
 
+static void emit_view_event(session_context_t *context,
+                            const char *name,
+                            int status)
+{
+    session_runtime_event_t event = {
+        .type = SESSION_RUNTIME_EVENT_VIEW_EVENT,
+        .status = status,
+    };
+    (void)session_copy_string(event.name, sizeof(event.name), name);
+    session_emit(context, &event);
+}
+
+static bool claim_incoming_view(session_context_t *context,
+                                uint32_t generation)
+{
+    const device_media_config_t *media = media_runtime_config();
+    bool video_enabled = device_session_video_enabled(
+        media, DEVICE_SERVICE_VIEW, DEVICE_MEDIA_UPLINK);
+    if (context->owner != DEVICE_SERVICE_NONE ||
+        context->state != DEVICE_SESSION_IDLE || generation == 0U ||
+        !tirtc_adapter_has_connection() ||
+        tirtc_adapter_media_profile() != TIRTC_ADAPTER_MEDIA_VIEW ||
+        tirtc_adapter_media_session_generation() != generation) {
+        return false;
+    }
+    esp_err_t err = media_runtime_set_session(TIRTC_ADAPTER_MEDIA_VIEW,
+                                              generation,
+                                              video_enabled);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "cannot claim remote-view media profile: %s",
+                 esp_err_to_name(err));
+        (void)tirtc_adapter_disconnect();
+        (void)tirtc_adapter_set_media_profile(TIRTC_ADAPTER_MEDIA_NONE,
+                                              0,
+                                              false);
+        return false;
+    }
+
+    session_secure_zero(&context->ai, sizeof(context->ai));
+    session_secure_zero(&context->call, sizeof(context->call));
+    context->generation = generation;
+    context->owner = DEVICE_SERVICE_VIEW;
+    context->session_origin_request_id = 0U;
+    context->last_origin_request_id = 0U;
+    context->deadline_ms = 0;
+    context->view_media_started = false;
+    session_set_state(context,
+                      DEVICE_SESSION_VIEWING,
+                      "remote-view-connected",
+                      0);
+    media_runtime_set_uplink_active(true);
+    return true;
+}
+
+static bool reserved_view_connection_event(
+    const session_internal_event_t *event,
+    const session_context_t *context)
+{
+    return event->type == SESSION_INT_ADAPTER_CONNECTION &&
+           event->connection.incoming &&
+           context->owner == DEVICE_SERVICE_NONE &&
+           context->state == DEVICE_SESSION_IDLE &&
+           event->generation == next_generation(context->generation) &&
+           tirtc_adapter_media_profile() == TIRTC_ADAPTER_MEDIA_VIEW &&
+           tirtc_adapter_media_session_generation() == event->generation;
+}
+
+static bool session_view_handles(const session_internal_event_t *event,
+                                 const session_context_t *context)
+{
+    return reserved_view_connection_event(event, context) ||
+           (context->owner == DEVICE_SERVICE_VIEW &&
+            event->type == SESSION_INT_ADAPTER_CONNECTION);
+}
+
+static void session_view_handle(session_context_t *context,
+                                const session_internal_event_t *event)
+{
+    if (context->owner == DEVICE_SERVICE_NONE) {
+        if (event->connection.connected &&
+            claim_incoming_view(context, event->generation)) {
+            return;
+        }
+        media_runtime_clear_session(event->generation);
+        (void)tirtc_adapter_disconnect();
+        (void)tirtc_adapter_set_media_profile(TIRTC_ADAPTER_MEDIA_NONE,
+                                              0,
+                                              false);
+        return;
+    }
+    if (!event->connection.connected) {
+        int status = tirtc_adapter_is_remote_close_error(
+                         event->connection.error)
+                         ? 0
+                         : event->connection.error;
+        session_finish(context, "remote-view-ended", status);
+    }
+}
+
 void session_finish(session_context_t *context,
                     const char *reason,
                     int status)
@@ -351,6 +451,7 @@ void session_finish(session_context_t *context,
 
     session_secure_zero(&context->ai, sizeof(context->ai));
     session_secure_zero(&context->call, sizeof(context->call));
+    context->view_media_started = false;
     if (!preserve_handoff) {
         session_secure_zero(&context->ai_call_handoff,
                             sizeof(context->ai_call_handoff));
@@ -709,12 +810,15 @@ static void handle_internal_event(session_internal_event_t *event)
         }
     }
 
+    bool reserved_view_event =
+        reserved_view_connection_event(event, &s_context);
     if ((event->type == SESSION_INT_ADAPTER_CONNECTION ||
          event->type == SESSION_INT_ADAPTER_COMMAND ||
          event->type == SESSION_INT_MEDIA_ERROR ||
          event->type == SESSION_INT_MEDIA_PROMPT_DONE) &&
         event->generation != 0U &&
-        event->generation != s_context.generation) {
+        event->generation != s_context.generation &&
+        !reserved_view_event) {
         ESP_LOGI(TAG,
                  "discarding stale event type=%d generation=%lu current=%lu",
                  (int)event->type,
@@ -754,6 +858,11 @@ static void handle_internal_event(session_internal_event_t *event)
     }
     if (event->type == SESSION_INT_MEDIA_ERROR) {
         session_finish(&s_context, event->first, event->status);
+        goto done;
+    }
+
+    if (session_view_handles(event, &s_context)) {
+        session_view_handle(&s_context, event);
         goto done;
     }
 
@@ -833,6 +942,16 @@ static void session_task(void *argument)
 
         tirtc_adapter_metrics_t adapter_metrics = {0};
         tirtc_adapter_get_metrics(&adapter_metrics);
+        if (s_context.owner == DEVICE_SERVICE_VIEW &&
+            !s_context.view_media_started &&
+            adapter_metrics.measured_profile == TIRTC_ADAPTER_MEDIA_VIEW &&
+            adapter_metrics.measured_session_generation ==
+                s_context.generation &&
+            adapter_metrics.tx_audio_frames > 0U &&
+            adapter_metrics.tx_video_frames > 0U) {
+            s_context.view_media_started = true;
+            emit_view_event(&s_context, "media-started", 0);
+        }
         bool adapter_quiescent =
             adapter_metrics.adapter_state == TIRTC_ADAPTER_RUNNING &&
             !adapter_metrics.connected &&
@@ -843,30 +962,51 @@ static void session_task(void *argument)
             adapter_metrics.disconnects_pending == 0U &&
             adapter_metrics.connection_users == 0U &&
             !adapter_metrics.incoming_armed;
-        if (s_context.owner == DEVICE_SERVICE_NONE &&
-            !session_ai_call_reserved(&s_context) &&
-            adapter_quiescent &&
+        bool session_idle = s_context.owner == DEVICE_SERVICE_NONE &&
+                            !session_ai_call_reserved(&s_context);
+        uint32_t view_generation = next_generation(s_context.generation);
+        bool recovery_inflight = atomic_load_explicit(
+            &s_recovery_inflight, memory_order_acquire);
+        if (session_idle && !recovery_inflight &&
             current_ms >= next_room_poll_ms && platform_client_ready()) {
-            next_room_poll_ms = current_ms + SESSION_ROOM_POLL_INTERVAL_MS;
-            bool expected = false;
-            if (atomic_compare_exchange_strong_explicit(
-                    &s_recovery_inflight,
-                    &expected,
-                    true,
-                    memory_order_acq_rel,
-                    memory_order_acquire)) {
-                esp_err_t err = session_submit_http(&s_context,
-                                                    SESSION_HTTP_CALL_RECOVER,
-                                                    0,
-                                                    "GET",
-                                                    "/v1/call/room",
-                                                    NULL);
-                if (err != ESP_OK) {
-                    atomic_store_explicit(&s_recovery_inflight,
-                                          false,
-                                          memory_order_release);
+            (void)tirtc_adapter_cancel_view(view_generation);
+            tirtc_adapter_get_metrics(&adapter_metrics);
+            adapter_quiescent =
+                adapter_metrics.adapter_state == TIRTC_ADAPTER_RUNNING &&
+                !adapter_metrics.connected &&
+                adapter_metrics.active_profile == TIRTC_ADAPTER_MEDIA_NONE &&
+                !adapter_metrics.connect_request_pending &&
+                !adapter_metrics.connect_callback_pending &&
+                adapter_metrics.accept_callbacks_pending == 0U &&
+                adapter_metrics.disconnects_pending == 0U &&
+                adapter_metrics.connection_users == 0U &&
+                !adapter_metrics.incoming_armed;
+            if (adapter_quiescent) {
+                next_room_poll_ms =
+                    current_ms + SESSION_ROOM_POLL_INTERVAL_MS;
+                bool expected = false;
+                if (atomic_compare_exchange_strong_explicit(
+                        &s_recovery_inflight,
+                        &expected,
+                        true,
+                        memory_order_acq_rel,
+                        memory_order_acquire)) {
+                    esp_err_t err = session_submit_http(
+                        &s_context,
+                        SESSION_HTTP_CALL_RECOVER,
+                        0,
+                        "GET",
+                        "/v1/call/room",
+                        NULL);
+                    if (err != ESP_OK) {
+                        atomic_store_explicit(&s_recovery_inflight,
+                                              false,
+                                              memory_order_release);
+                    }
                 }
             }
+        } else if (session_idle && !recovery_inflight) {
+            (void)tirtc_adapter_arm_view(view_generation);
         }
     }
 }
@@ -1146,6 +1286,26 @@ esp_err_t session_runtime_call_hangup(uint32_t origin_request_id)
 {
     return enqueue_intent(SESSION_INT_CALL_HANGUP, NULL, NULL, false,
                           SESSION_RUNTIME_CALL_AUDIO, origin_request_id);
+}
+
+esp_err_t session_runtime_call_send_message(const char *message,
+                                            uint32_t origin_request_id)
+{
+    if (public_owner() != DEVICE_SERVICE_CALL ||
+        session_runtime_state() != DEVICE_SESSION_IN_CALL ||
+        public_handoff_pending()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (message == NULL || message[0] == '\0' ||
+        strlen(message) >= SESSION_RUNTIME_PEER_MESSAGE_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return enqueue_intent(SESSION_INT_CALL_MESSAGE,
+                          message,
+                          NULL,
+                          false,
+                          SESSION_RUNTIME_CALL_AUDIO,
+                          origin_request_id);
 }
 
 esp_err_t session_runtime_call_recover(uint32_t origin_request_id)
