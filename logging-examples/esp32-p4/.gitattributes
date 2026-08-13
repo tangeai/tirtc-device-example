@@ -1,0 +1,7 @@
+components/tirtc_sdk/include/** -text -whitespace
+components/tirtc_sdk/manifest/** -text -whitespace
+components/tirtc_sdk/VERSION.md -text -whitespace
+components/tirtc_sdk/lib/** binary
+media/*.g711a binary
+media/*.h264 binary
+components/espressif__esp_hosted/** -whitespace

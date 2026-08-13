@@ -58,6 +58,7 @@ git checkout esp32-s3-device-monitor-v1.8.0
 | 平台 | 示例 | 版本 | TiRTC SDK | 来源版本 | 公开 Release |
 | --- | --- | --- | --- | --- | --- |
 | ESP32-S3 | [TiRTC 日志示例（AT ThingConnect）](logging-examples/esp32-s3/README.md) | `0.7.0` | `2.2.1` | 独立源码快照 / public commit | [`esp32-s3-logging-v0.7.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-logging-v0.7.0) |
+| ESP32-P4 | [TiRTC 日志示例（AT ThingConnect）](logging-examples/esp32-p4/README.md) | `0.1.0` | `2.3.0` | 独立源码快照 / public commit | [`esp32-p4-logging-v0.1.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-logging-v0.1.0) |
 
 ### 完整应用
 
@@ -67,7 +68,7 @@ git checkout esp32-s3-device-monitor-v1.8.0
 | ESP32-P4 | [Device App](complete-applications/esp32-p4/device-monitor/README.md) | `1.3.2` | `2.3.0` 定制兼容快照 | Tag `esp32-p4-device-app-v1.3.2` / commit `bc1ae8f` | [`esp32-p4-device-monitor-v1.3.2`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.2) |
 | G32S10X | [Device Monitor](complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | Tag `v0.1.1` / commit `5630152` | [`g32s10x-device-monitor-v0.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-device-monitor-v0.1.1) |
 
-七个项目独立使用 SemVer Tag。某个项目更新时，只提升并发布该项目版本；共享 SDK 或公共代码
+八个项目独立使用 SemVer Tag。某个项目更新时，只提升并发布该项目版本；共享 SDK 或公共代码
 确实影响多个项目时，各项目分别升版并在同一 commit 创建多个 Tag。每个 Release 的源码范围、
 构建证据和附件 SHA-256 见该 Release 自带的 `release-manifest.json` 与
 [版本与证据清单](docs/VERSIONS_CN.md)。

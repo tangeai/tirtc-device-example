@@ -19,6 +19,11 @@ ESP32-S3 日志示例的 `audio.g711a` 和 `video.h264` 测试输入来自
 仅用于固定协议测试。这些来源说明不改变编解码器、语音组件或输出可能适用的条款；
 二次分发和商用前应结合使用环境核对相应许可。
 
+ESP32-P4 日志示例使用 TiRTC `2.3.0` 定制兼容快照、ESP-Hosted `2.12.11` 和
+ESP-WiFi-Remote `1.6.3`。P4 固件复用同一组协议测试媒体，并保留 C6/C61 同包兼容所需的
+ESP-Hosted 源码与 Apache-2.0 许可证；各组件具体身份以项目 `VERSION.md`、
+`SOURCE_PROVENANCE.md` 和 Release manifest 为准。
+
 具体许可证文件随对应组件保留在项目目录中。使用、修改或再分发前，请同时核对目标项目的
 `SOURCE_PROVENANCE.md`、组件目录中的 `LICENSE`/`NOTICE`，以及 SDK 或素材供应方提供的条款。
 未随公开仓分发的供应商 SDK、工具链和烧录工具，需要开发者从相应授权渠道单独获取。

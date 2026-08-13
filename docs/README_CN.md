@@ -6,7 +6,7 @@
 2. 日志示例用于观察 ThingConnect、AI 对讲和设备呼叫的协议状态。
 3. 完整应用用于带屏设备、真实音视频硬件和完整业务体验。
 
-七个项目分别使用独立的“平台 + 项目 + 版本号”Tag。某个项目更新时，只增加该项目的新
+八个项目分别使用独立的“平台 + 项目 + 版本号”Tag。某个项目更新时，只增加该项目的新
 Release，不再用日期批次同时代表整仓内容。当前版本和下载入口见[版本与证据清单](VERSIONS_CN.md)
 与[固件下载与校验](RELEASES_CN.md)。
 
@@ -14,7 +14,7 @@ Release，不再用日期批次同时代表整仓内容。当前版本和下载�
 
 | 你现在要做什么 | 从这里开始 |
 | --- | --- |
-| 下载已经构建好的 ESP32-S3 固件 | [固件下载与校验](RELEASES_CN.md) |
+| 下载已经构建好的 ESP32-S3/P4 固件 | [固件下载与校验](RELEASES_CN.md) |
 | 第一次移植 TiRTC SDK | [最小 TiRTC 集成](../sdk-integration-examples/README.md) |
 | 用串口观察配网、绑定、AI 和呼叫协议 | [ESP32-S3 日志示例](../logging-examples/esp32-s3/README.md) |
 | 在带屏 S3 板上运行完整业务 | [ESP32-S3 Device Monitor](../complete-applications/esp32-s3/device-monitor/README.md) |
@@ -39,6 +39,7 @@ Release，不再用日期批次同时代表整仓内容。当前版本和下载�
 | --- | --- | --- | --- |
 | [日志示例总览](../logging-examples/README.md) | - | - | 选择日志与协议联调入口 |
 | [ESP32-S3 日志示例](../logging-examples/esp32-s3/README.md) | `0.7.0` | `2.2.1` | 烧录、配网、绑定、网页查看、AI 对讲和设备呼叫 |
+| [ESP32-P4 日志示例](../logging-examples/esp32-p4/README.md) | `0.1.0` | `2.3.0` | P4+C6/C61、串口 AT、网页查看、AI 对讲和设备呼叫 |
 
 ## 完整应用
 

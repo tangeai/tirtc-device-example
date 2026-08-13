@@ -8,6 +8,7 @@
 | 平台 | 示例 | 版本 | TiRTC SDK | 构建环境 | 来源版本 |
 | --- | --- | --- | --- | --- | --- |
 | ESP32-S3 | [TiRTC 日志示例（AT ThingConnect）](esp32-s3/README.md) | `0.7.0` | `2.2.1` | ESP-IDF `5.5.4` | 独立源码快照 / public commit |
+| ESP32-P4 | [TiRTC 日志示例（AT ThingConnect）](esp32-p4/README.md) | `0.1.0` | `2.3.0` | ESP-IDF `5.5.4` | 独立源码快照 / public commit |
 
 ## 适用场景
 
