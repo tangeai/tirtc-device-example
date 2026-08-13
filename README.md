@@ -9,12 +9,12 @@
 
 - [最小 TiRTC 集成示例](sdk-integration-examples/README.md)：聚焦联网、TiRTC 生命周期、
   连接、音视频收发和释放，适合移植 SDK 与理解最小调用链。
-- [日志示例](logging-examples/README.md)：在最小集成基础上提供可读、可脱敏、可自动检查的
-  设备日志与串口 AT 控制面，适合联调 ThingConnect、AI 对讲和设备互呼。
+- [最小系统例子](minimal-system-examples/README.md)：在最小集成基础上提供串口 AT 控制、
+  ThingConnect 绑定、AI 对讲、设备互呼和预录媒体，适合在没有真实音视频外设时体验完整协议流程。
 - [完整应用](complete-applications/README.md)：加入设备绑定、ThingConnect、UI、真实摄像头和
   音频，并提供 AI 对讲、微信 VoIP、设备互呼或 OTA 等完整业务能力。
 
-第一次接入建议先看对应平台的最小示例；需要观察完整协议流程时使用日志示例；开发带屏设备
+第一次接入建议先看对应平台的最小示例；需要观察完整协议流程时使用最小系统例子；开发带屏设备
 或演示样机时进入完整应用。
 
 ## 快速开始
@@ -53,12 +53,12 @@ git checkout esp32-s3-device-monitor-v1.8.0
 | ESP32-P4 | [最小 TiRTC 集成示例](sdk-integration-examples/esp32-p4/README.md) | `1.1.1` | `2.2.1` | Tag `v1.1.1` / commit `0f36ddb` | [`esp32-p4-minimal-integration-v1.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-minimal-integration-v1.1.1) |
 | G32S10X | [最小 TiRTC 集成示例](sdk-integration-examples/g32s10x/README.md) | `0.8.3` | `2.2.1` | Tag `v0.8.3` / commit `b2abc22` | [`g32s10x-minimal-integration-v0.8.3`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-minimal-integration-v0.8.3) |
 
-### 日志示例
+### 最小系统例子
 
 | 平台 | 示例 | 版本 | TiRTC SDK | 来源版本 | 公开 Release |
 | --- | --- | --- | --- | --- | --- |
-| ESP32-S3 | [TiRTC 日志示例（AT ThingConnect）](logging-examples/esp32-s3/README.md) | `0.7.0` | `2.2.1` | 独立源码快照 / public commit | [`esp32-s3-logging-v0.7.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-logging-v0.7.0) |
-| ESP32-P4 | [TiRTC 日志示例（AT ThingConnect）](logging-examples/esp32-p4/README.md) | `0.1.0` | `2.3.0` | 独立源码快照 / public commit | [`esp32-p4-logging-v0.1.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-logging-v0.1.0) |
+| ESP32-S3 | [TiRTC 最小系统例子（AT ThingConnect）](minimal-system-examples/esp32-s3/README.md) | `0.8.0` | `2.2.1` | 独立源码快照 / 公开 Tag | [`esp32-s3-minimal-system-v0.8.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-minimal-system-v0.8.0) |
+| ESP32-P4 | [TiRTC 最小系统例子（AT ThingConnect）](minimal-system-examples/esp32-p4/README.md) | `0.2.0` | `2.3.0` | 独立源码快照 / 公开 Tag | [`esp32-p4-minimal-system-v0.2.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-minimal-system-v0.2.0) |
 
 ### 完整应用
 
@@ -82,8 +82,8 @@ TiRTC 生命周期、连接与订阅、测试媒体以及资源释放。
 
 ### 我需要可观察的协议联调
 
-进入 `logging-examples/<platform>/`。日志示例保持轻量设备形态，通过串口 AT 驱动配网、绑定、
-AI 对讲和设备互呼，并输出稳定、脱敏的状态日志；它不是完整 UI 应用。
+进入 `minimal-system-examples/<platform>/`。最小系统例子保持轻量设备形态，通过串口 AT 驱动配网、绑定、
+AI 对讲和设备互呼，并用预录媒体验证链路；它不依赖完整 UI、摄像头、麦克风或扬声器。
 
 ### 我想使用完整应用
 
@@ -116,7 +116,7 @@ G32S10X 的供应商 SDK、工具链和 Cloner 不随本仓分发，具体入口
 ```text
 tirtc-device-example/
 ├── sdk-integration-examples/
-├── logging-examples/
+├── minimal-system-examples/
 ├── complete-applications/
 ├── docs/
 ├── README.md

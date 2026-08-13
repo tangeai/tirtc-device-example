@@ -12,8 +12,8 @@
 | ESP32-S3 最小 TiRTC 集成示例 | `1.2.0` | [`esp32-s3-minimal-integration-v1.2.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-minimal-integration-v1.2.0) |
 | ESP32-P4 最小 TiRTC 集成示例 | `1.1.1` | [`esp32-p4-minimal-integration-v1.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-minimal-integration-v1.1.1) |
 | G32S10X 最小 TiRTC 集成示例 | `0.8.3` | [`g32s10x-minimal-integration-v0.8.3`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-minimal-integration-v0.8.3) |
-| ESP32-S3 日志示例 | `0.7.0` | [`esp32-s3-logging-v0.7.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-logging-v0.7.0) |
-| ESP32-P4 日志示例 | `0.1.0` | [`esp32-p4-logging-v0.1.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-logging-v0.1.0) |
+| ESP32-S3 最小系统例子 | `0.8.0` | [`esp32-s3-minimal-system-v0.8.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-minimal-system-v0.8.0) |
+| ESP32-P4 最小系统例子 | `0.2.0` | [`esp32-p4-minimal-system-v0.2.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-minimal-system-v0.2.0) |
 | ESP32-S3 Device Monitor | `1.8.0` | [`esp32-s3-device-monitor-v1.8.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.8.0) |
 | ESP32-P4 Device Monitor | `1.3.2` | [`esp32-p4-device-monitor-v1.3.2`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.2) |
 | G32S10X Device Monitor | `0.1.1` | [`g32s10x-device-monitor-v0.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-device-monitor-v0.1.1) |
@@ -33,8 +33,8 @@
 | S3 最小示例 | `esp32s3-tirtc-minimal-full-v1.2.0.bin` | `16,777,216` | `083d59a05268da48bfb434c13e578a8920d095b8fe13831d9a9744064a955f8a` | ESP Tool，地址 `0x0` |
 | P4 最小示例 | `esp32p4-tirtc-minimal-full-v1.1.1.bin` | `16,777,216` | `1409cc0d72d470b54363909fd608468b4f1e7c84d7e0d622f46f376fa27dbc3d` | ESP Tool，地址 `0x0` |
 | G32S10X 最小示例 | `g32s10x-tirtc-minimal-rtos-with-spl-v0.8.3.bin` | `6,695,236` | `ef79659daf2f176eb6642c01af8fdb901e5a5499c861da9f9e5f322f0dde180f` | 君正 Cloner 主固件区，按项目 policy 烧录 |
-| S3 日志示例 | `esp32s3-tirtc-at-demo-full-v0.7.0.bin` | `4,194,304` | 见本 Release 的 `SHA256SUMS.txt` | ESP Tool，地址 `0x0` |
-| P4 日志示例 | `esp32p4-tirtc-at-demo-full-v0.1.0.bin` | `4,194,304` | 见本 Release 的 `SHA256SUMS.txt` | ESP Tool，地址 `0x0` |
+| S3 最小系统例子 | `esp32s3-tirtc-minimal-system-full-v0.8.0.bin` | `4,194,304` | 见本 Release 的 `SHA256SUMS.txt` | ESP Tool，地址 `0x0` |
+| P4 最小系统例子 | `esp32p4-tirtc-minimal-system-full-v0.2.0.bin` | `4,194,304` | 见本 Release 的 `SHA256SUMS.txt` | ESP Tool，地址 `0x0` |
 | S3 Device Monitor | `esp32s3-tirtc-device-monitor-full-v1.8.0.bin` | `16,777,216` | `ed0fb1c2fd96e6b7619a3855d562b8f98d89b1dd618fa9a1b9d0c539920768c5` | ESP Tool，地址 `0x0` |
 | S3 Device Monitor | `esp32s3-tirtc-device-monitor-ota-v1.8.0.bin` | `7,449,184` | `164cf034766d8fca0c4708f0e9d0ae6d74508abd661e3c09e47c5a0e96fe2c23` | OTA app，不写入 `0x0` |
 | P4 Device Monitor | `esp32p4-tirtc-device-monitor-full-v1.3.2.bin` | `16,777,216` | `87bfb67d1ba30d7f79663f63891e29f7f4f4367c80ff0d5cecb1b46f301d40e9` | ESP Tool，地址 `0x0` |
@@ -55,7 +55,7 @@
 7. 点击 `Program`。网页明确显示完成后，按开发板 `RESET`。
 
 完整镜像会覆盖目标项目声明的整片 Flash，也会清除 NVS 中原有的 Wi-Fi、绑定和本地设置。
-日志示例使用 4 MB 完整镜像，Device Monitor 使用 16 MB 完整镜像。
+最小系统例子使用 4 MB 完整镜像，Device Monitor 使用 16 MB 完整镜像。
 名称含 `ota` 的文件只是应用 OTA 镜像，不能作为完整镜像写入 `0x0`。
 
 浏览器看不到串口时，先确认 USB 线支持数据传输、串口没有被其他程序占用、驱动已经安装。

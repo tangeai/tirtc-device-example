@@ -1,23 +1,35 @@
 # 版本变更记录
 
-## 2026.08.13：ESP32-P4 日志示例 0.1.0
+## 2026.08.13：最小系统例子统一命名
 
-- 首次公开 P4 日志示例，提供精简中文 AT 指令、结构化脱敏日志和 ThingConnect 绑定流程。
+- 对外分类从原有名称统一为“最小系统例子”，目录迁移到 `minimal-system-examples/`。
+- S3 更新为 `0.8.0`，公开 Tag 为 `esp32-s3-minimal-system-v0.8.0`；补全 14 张经过
+  不可逆脱敏的操作截图，README 现在覆盖完整的 30 张流程图。
+- P4 更新为 `0.2.0`，公开 Tag 为 `esp32-p4-minimal-system-v0.2.0`。
+- 两个平台的功能代码、TiRTC SDK、预录媒体和板级配置保持不变；分别从最终公开 Tag 重新完成
+  一次 4 MB 正式干净构建，并重新生成 manifest 与 SHA256SUMS。
+- 原分类的 GitHub Release 和 Tag 在新 Release 下载校验完成后下线，不保留重复公开入口。
+
+## 2026.08.13：ESP32-P4 最小系统例子 0.2.0
+
+- P4 协议体验工程统一以“最小系统例子”身份发布，提供精简中文 AT 指令、结构化脱敏日志和
+  ThingConnect 绑定流程。
 - 同一份 P4 固件兼容 ESP32-C6 与 ESP32-C61 Wi-Fi 协处理器，使用 ESP-Hosted/SDIO 联网。
 - 提供网页远程查看、预录 H264/G711A 媒体、设备互呼与消息、联系人备注和 AI 对讲。
 - 采用 4 MB 完整镜像，统一使用 Espressif ESP Tool 从 `0x0` 烧录。
 - 开发源没有 Git 历史，公开 Release 用源码快照、公开 commit、逐文件哈希和正式构建记录建立
   可复核身份，不虚构开发 Tag。
-- 项目 Tag：`esp32-p4-logging-v0.1.0`；构建资产和校验值以 Release manifest 为准。
+- 项目 Tag：`esp32-p4-minimal-system-v0.2.0`；构建资产和校验值以 Release manifest 为准。
 
-## 2026.08.13：ESP32-S3 日志示例 0.7.0
+## 2026.08.13：ESP32-S3 最小系统例子 0.8.0
 
-- 面向无专用音视频开发板的用户，提供可直接烧录到 4 MB 或更大 Flash 的完整体验固件。
-- 用户交互收口为精简中文 AT 指令和中文日志，公开文档只保留一份按步骤操作的体验说明。
-- 增加开发者平台绑定、网页远程查看、预录 H264/G711A 循环媒体、双机呼叫和字符串消息。
-- 增加联系人备注、AI 故事/笑话/天气对讲，以及 AI 按“小李”等备注呼叫设备。
-- 公开快照移除内部 AT 回归脚本，并排除包含 Wi-Fi、设备 ID、MAC 或绑定身份的截图。
-- 项目 Tag：`esp32-s3-logging-v0.7.0`；构建资产和校验值以 Release 清单为准。
+- 延续面向无专用音视频开发板用户的完整体验固件，可直接烧录到 4 MB 或更大 Flash。
+- 用户交互保持精简中文 AT 指令和中文日志；本次把公开文档收口为一份按步骤操作的体验说明。
+- 保持开发者平台绑定、网页远程查看、预录 H264/G711A 循环媒体、双机呼叫和字符串消息。
+- 保持联系人备注、AI 故事/笑话/天气对讲，以及 AI 按“小李”等备注呼叫设备。
+- 公开快照移除内部 AT 回归脚本；新增截图中的 Wi-Fi、设备 ID、MAC 和联系人身份均已替换为
+  示例值，并清除可识别的图片元数据。
+- 项目 Tag：`esp32-s3-minimal-system-v0.8.0`；构建资产和校验值以 Release 清单为准。
 
 ## 2026.08.11：ESP32-P4 Device Monitor 1.3.2
 
@@ -34,16 +46,17 @@
 
 ## 2026.08.10：Release 按项目独立版本化
 
-- 七个项目改为“平台 + 项目 + 版本号”的独立 Tag；一个项目更新时，只发布该项目的新版本。
-- 该次迁移后的公开 Tag 为：
+- 八个项目使用“平台 + 项目 + 版本号”的独立 Tag；一个项目更新时，只发布该项目的新版本。
+- 该次迁移后，以下六个项目 Tag 保持有效：
   `esp32-s3-minimal-integration-v1.2.0`、
   `esp32-p4-minimal-integration-v1.1.1`、
   `g32s10x-minimal-integration-v0.8.3`、
-  `esp32-s3-logging-v0.3.0`、
   `esp32-s3-device-monitor-v1.8.0`、
   `esp32-p4-device-monitor-v1.3.1` 和
   `g32s10x-device-monitor-v0.1.1`。
-- 原日期型批次和旧分类 Release 已下线；公开文档、源码归档、manifest 与下载入口统一指向项目 Tag。
+- 两个 AT ThingConnect 项目后来在 2026.08.13 统一为“最小系统例子”，使用各自的新 Tag 和
+  Release；本节不再列出已下线的旧入口。
+- 原日期型批次 Release 已下线；公开文档、源码归档、manifest 与下载入口统一指向项目 Tag。
 - 固件资产保持原正式构建字节不变。本次只迁移发布身份并重建单项目 manifest 和校验清单，没有重新编译。
 
 ## 2026.08.02.1：ESP32-P4 Device App 1.3.1 完整镜像补充
@@ -81,16 +94,15 @@
 - 最终公开快照完成静态门禁和干净构建。运行时通话、重复切换与长稳验证单独记录，
   不用构建结果代替真机证据。
 
-## 2026.07.31：新增日志示例并更新 S3/P4 完整应用
+## 2026.07.31：新增 AT ThingConnect 协议体验并更新 S3/P4 完整应用
 
 ### 信息架构
 
-- 新增 `logging-examples/`，中文定位为“日志示例”。
-- 将原 ESP32-S3 AT ThingConnect 示例从最小集成分类迁移到
-  `logging-examples/esp32-s3/`，不保留重复源码。
-- 根目录继续只突出最小集成、日志示例、完整应用、文档和必要仓库文件。
+- 增加独立的 ESP32-S3 AT ThingConnect 协议体验入口，不与最小 TiRTC 调用链混在一起。
+- 该项目后来在 2026.08.13 迁入 `minimal-system-examples/esp32-s3/`，并统一使用“最小系统例子”名称。
+- 根目录现在只突出最小集成、最小系统例子、完整应用、文档和必要仓库文件。
 
-### ESP32-S3 日志示例 0.3.0
+### ESP32-S3 最小系统例子 0.3.0
 
 - 增加面向普通开发者的中文简洁日志、UTF-8 安全输出和串口 AT facade。
 - 增加五组 AI 语音提示、两秒音频与八秒 H264 测试素材，以及 AI prompt 生成入口。
@@ -117,13 +129,13 @@
 
 ### 发布
 
-- 当次涉及日志示例 `0.3.0`、S3 Device Monitor `1.8.0` 和 P4 Device App `1.3.0`；
-  当前公开项目 Tag 分别为 `esp32-s3-logging-v0.3.0`、`esp32-s3-device-monitor-v1.8.0`
-  和 `esp32-p4-device-monitor-v1.3.1`。
-- ESP32-S3 日志示例和 S3 Device Monitor 的正式构建资产只通过 GitHub Releases 分发。
+- 当次涉及最小系统例子 `0.3.0`、S3 Device Monitor `1.8.0` 和 P4 Device App `1.3.0`；
+  当前公开项目 Tag 分别为 `esp32-s3-minimal-system-v0.8.0`、`esp32-s3-device-monitor-v1.8.0`
+  和 `esp32-p4-device-monitor-v1.3.2`。
+- ESP32-S3 最小系统例子和 S3 Device Monitor 的正式构建资产只通过 GitHub Releases 分发。
 - ESP32-P4 Device App 不生成占位固件；其他平台和最小示例保持上一公开版本。
 
-## 0.2.0：ESP32-S3 AT ThingConnect 示例首次发布
+## 2026.07.30：ESP32-S3 AT ThingConnect 协议体验 0.2.0
 
 ### 新增
 
@@ -138,8 +150,8 @@
 ### 发布
 
 - 正式版本为 `0.2.0`，TiRTC SDK 为 `2.2.1`，ESP-IDF 为 `5.5.4`。
-- 该版本当时以 AT ThingConnect 示例身份发布；当前维护版本已归入日志示例，公开 Tag 为
-  `esp32-s3-logging-v0.3.0`。
+- 该版本当时以 AT ThingConnect 示例身份发布；当前维护版本已归入最小系统例子，公开 Tag 为
+  `esp32-s3-minimal-system-v0.8.0`。
 - 正式 `0x0` 完整镜像、manifest 和 SHA-256 只通过 GitHub Release 分发。
 - 工程不包含微信 VoIP、OTA、SoftAP 网页配网、UI 或板级音视频外设驱动。
 

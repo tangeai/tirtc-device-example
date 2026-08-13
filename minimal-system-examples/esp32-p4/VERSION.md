@@ -1,6 +1,6 @@
 # 版本信息
 
-- 日志示例：`0.1.0`
+- 最小系统例子：`0.2.0`
 - 发布阶段：正式发布
 - 目标芯片：ESP32-P4
 - Wi-Fi 协处理器：ESP32-C6 或 ESP32-C61，ESP-Hosted/SDIO
@@ -13,8 +13,11 @@
 - TiRTC P4 静态库 SHA-256：`b0a38061b0c63ad0c556f73bb2ecc47c6fd84823b7524f774fe09916f577b4c6`
 - ESP-Hosted：`2.12.11`
 - ESP-WiFi-Remote：`1.6.3`
-- 公开 Tag：`esp32-p4-logging-v0.1.0`
+- 公开 Tag：`esp32-p4-minimal-system-v0.2.0`
 
 本版本提供中文 AT 控制面、ThingConnect 配网与绑定、网页查看、预录 H264/G711A 媒体、
 设备互呼与消息、联系人备注、AI 对讲和 AI 呼叫设备。完整构建、烧录和真机运行属于不同证据层，
 以 Release 自带的 `release-manifest.json` 为准。
+
+`0.2.0` 统一了对外分类、目录、Tag 和固件名。功能代码、TiRTC SDK、ESP-Hosted 兼容补丁、
+媒体输入和板级配置相对上一公开版本保持不变。

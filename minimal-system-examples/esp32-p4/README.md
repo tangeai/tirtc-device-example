@@ -1,4 +1,4 @@
-# ESP32-P4 TiRTC 日志示例
+# ESP32-P4 TiRTC 最小系统例子
 
 这个示例面向需要观察 TiRTC、ThingConnect 和设备会话状态的开发者。它用串口 AT 指令完成
 配网、绑定、网页查看、AI 对讲和设备互呼，并把内部状态整理成简洁的中文日志。媒体输入来自
@@ -9,10 +9,10 @@ ESP-Hosted/SDIO 联网；两种板卡使用相同的数据线，固件会在启�
 
 ## 直接烧录
 
-从 [ESP32-P4 日志示例 v0.1.0](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-logging-v0.1.0)
+从 [ESP32-P4 最小系统例子 v0.2.0](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-minimal-system-v0.2.0)
 下载以下三个文件：
 
-- `esp32p4-tirtc-at-demo-full-v0.1.0.bin`
+- `esp32p4-tirtc-minimal-system-full-v0.2.0.bin`
 - `SHA256SUMS.txt`
 - `release-manifest.json`
 
@@ -89,7 +89,7 @@ AT+挂断
 
 ```powershell
 . C:\esp\v5.5.4\esp-idf\export.ps1
-idf.py -B build --no-ccache reconfigure build
+idf.py -B build --no-ccache -D "SDKCONFIG=build/sdkconfig" reconfigure build
 ```
 
 项目使用 4 MB 自定义分区：应用从 `0x10000` 开始，SPIFFS 测试媒体从 `0x210000` 开始。

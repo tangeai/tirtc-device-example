@@ -2,16 +2,18 @@
 
 ## 当前发布身份
 
-- 项目：TiRTC ESP32-P4 AT ThingConnect 日志示例
-- 版本：`0.1.0`
-- 公开路径：`logging-examples/esp32-p4`
-- 公开 Tag：`esp32-p4-logging-v0.1.0`
-- 公共仓基线：`3749f7dc19cd58439b56d2fe0c99dd6f5c5926a4`
+- 项目：TiRTC ESP32-P4 AT ThingConnect 最小系统例子
+- 版本：`0.2.0`
+- 公开路径：`minimal-system-examples/esp32-p4`
+- 公开 Tag：`esp32-p4-minimal-system-v0.2.0`
 
 ## 开发来源
 
 开发来源是独立源码目录，没有可公开引用的 Git commit 或 Tag。公开发布不虚构开发提交；
 `release-manifest.json` 会记录筛选前的开发快照 SHA-256、文件数量、公开 commit 和逐文件哈希。
+
+`0.2.0` 相对上一公开版本没有功能代码、SDK、媒体或板级配置变化；只统一对外项目身份、
+目录、Tag、Release 和固件文件名。
 
 公开整理只纳入：
 

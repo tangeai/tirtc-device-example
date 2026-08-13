@@ -10,18 +10,18 @@
 | 最小示例 | ESP32-S3 最小 TiRTC 集成示例 | `1.2.0` | `2.2.1` | `v1.2.0` / `44b24a5` | `esp32-s3-minimal-integration-v1.2.0` |
 | 最小示例 | ESP32-P4 最小 TiRTC 集成示例 | `1.1.1` | `2.2.1` | `v1.1.1` / `0f36ddb` | `esp32-p4-minimal-integration-v1.1.1` |
 | 最小示例 | G32S10X 最小 TiRTC 集成示例 | `0.8.3` | `2.2.1` | `v0.8.3` / `b2abc22` | `g32s10x-minimal-integration-v0.8.3` |
-| 日志示例 | ESP32-S3 日志示例 | `0.7.0` | `2.2.1` | 独立开发目录快照 | `esp32-s3-logging-v0.7.0` |
-| 日志示例 | ESP32-P4 日志示例 | `0.1.0` | `2.3.0` | 独立开发目录快照 | `esp32-p4-logging-v0.1.0` |
+| 最小系统例子 | ESP32-S3 最小系统例子 | `0.8.0` | `2.2.1` | 独立开发目录快照 | `esp32-s3-minimal-system-v0.8.0` |
+| 最小系统例子 | ESP32-P4 最小系统例子 | `0.2.0` | `2.3.0` | 独立开发目录快照 | `esp32-p4-minimal-system-v0.2.0` |
 | 完整应用 | ESP32-S3 Device Monitor | `1.8.0` | `2.2.0` | `v1.8.0` / `8211e3b` | `esp32-s3-device-monitor-v1.8.0` |
 | 完整应用 | ESP32-P4 Device Monitor | `1.3.2` | `2.3.0` 定制兼容快照 | `esp32-p4-device-app-v1.3.2` / `bc1ae8fbd9b64090503128985129a72e024c0551` | `esp32-p4-device-monitor-v1.3.2` |
 | 完整应用 | G32S10X Device Monitor | `0.1.1` | `2.2.1` | `v0.1.1` / `5630152` | `g32s10x-device-monitor-v0.1.1` |
 
-ESP32-S3 日志示例的开发目录没有可公开引用的 Git 历史。当前版本保留其 `88` 文件核心源码
+ESP32-S3 最小系统例子的开发目录没有可公开引用的 Git 历史。当前版本保留其 `88` 文件核心源码
 快照 SHA-256：
 `8cdcb658f6e7eddcc72c2b4f3b0259a5e2175276d4b766d5ca237e51018b5956`。
 该项目不虚构来源 Tag 或 commit；公开项目 Tag 是它正式、可复核的源码身份。
 
-ESP32-P4 日志示例同样来自独立开发目录。开发快照 SHA-256、文件清单、公开筛选边界和
+ESP32-P4 最小系统例子同样来自独立开发目录。开发快照 SHA-256、文件清单、公开筛选边界和
 C6/C61 兼容配置记录在项目 `SOURCE_PROVENANCE.md` 与 Release manifest 中；公开项目 Tag 是
 正式、可复核的源码身份。
 
@@ -32,15 +32,15 @@ C6/C61 兼容配置记录在项目 `SOURCE_PROVENANCE.md` 与 Release manifest �
 | S3 最小示例 `1.2.0` | 来源 Tag、SDK `2.2.1`、配置和凭据范围已核对 | ESP-IDF `5.5.4` 正式干净构建通过 | 源码与 `0x0` 完整镜像 |
 | P4 最小示例 `1.1.1` | 来源 Tag、SDK `2.2.1`、Hosted/SDIO 配置和凭据范围已核对 | ESP-IDF `5.5.4` 正式干净构建通过 | 源码与 `0x0` 完整镜像 |
 | G32S10X 最小示例 `0.8.3` | 来源 Tag、SDK `2.2.1`、君正覆盖层和凭据范围已核对 | 君正 SDK 正式构建通过 | 源码与主固件 |
-| S3 日志示例 `0.7.0` | 目录快照、SDK、媒体来源、凭据和公开路径已核对 | ESP-IDF `5.5.4` 的 4 MB 配置干净构建通过；app 大小见 Release manifest | 源码与 `0x0` 4 MB 完整镜像 |
-| P4 日志示例 `0.1.0` | 目录快照、SDK、C6/C61 Hosted 兼容配置、媒体和凭据已核对 | ESP-IDF `5.5.4` 的 4 MB 配置干净构建通过；app 大小见 Release manifest | 源码与 `0x0` 4 MB 完整镜像 |
+| S3 最小系统例子 `0.8.0` | 目录快照、SDK、媒体来源、图片脱敏、凭据和公开路径已核对 | ESP-IDF `5.5.4` 的 4 MB 配置干净构建通过；app 大小见 Release manifest | 源码与 `0x0` 4 MB 完整镜像 |
+| P4 最小系统例子 `0.2.0` | 目录快照、SDK、C6/C61 Hosted 兼容配置、媒体和凭据已核对 | ESP-IDF `5.5.4` 的 4 MB 配置干净构建通过；app 大小见 Release manifest | 源码与 `0x0` 4 MB 完整镜像 |
 | S3 Device Monitor `1.8.0` | 来源 Tag、SDK、源码增量、资源和凭据已核对 | ESP-IDF `5.5.4` 正式干净构建通过；app `7,449,184` 字节 | 源码、完整镜像与 OTA app |
 | P4 Device Monitor `1.3.2` | 来源 Tag、定制 SDK 快照、源码增量、媒体参数和凭据已核对 | ESP-IDF `5.5.4` 正式干净构建通过；app `6,927,360` 字节，SHA-256 `2df6d9d626a05f19a4fd1f15eb854c54119a32ccd475090f6713f2629afc90e2` | 源码与 `0x0` 完整镜像 |
 | G32S10X Device Monitor `0.1.1` | 来源 Tag、SDK、君正覆盖层、文件系统打包范围已核对 | 固件构建通过；文件系统在同一 SDK 树恢复打包，发布树与构建树为 `compile-input-equivalent` | 源码、主固件与两个 YAFFS 镜像 |
 
-本次项目级 Tag 规范化只调整公开文档、Release 身份和项目级 manifest，没有重新编译或改动
-任何固件字节。每个新 manifest 分别记录公开 Tag commit、原正式构建 commit、项目源码等价关系
-和原附件 SHA-256；不能把这次迁移写成一次新的构建或真机验证。
+本次最小系统项目改名没有改变功能代码、SDK、媒体或板级配置。S3 与 P4 仍分别从最终公开
+Tag 做一次正式干净构建，重新生成 4 MB 完整镜像、manifest 和 SHA256SUMS；构建结果不替代
+烧录、联网、音视频或长时间运行证据。
 
 G32S10X Device Monitor 的主固件构建与最终文件系统打包来自同一套编译输入，但不是同一个
 Git tree：最终打包树只增加 `.gitattributes`、data 占位文件和 `fs.mk` 三项打包资料，主固件没有

@@ -13,13 +13,13 @@ P4 静态库以 Nano baseline `aaad3da251bac90e0642b51b3279a1f40ca9fa9a` 为基�
 该快照的身份和逐文件 SHA-256 以项目 `components/tirtc_sdk/VERSION.md`、
 `SHA256SUMS.txt` 和 `SOURCE_PROVENANCE.md` 为准。
 
-ESP32-S3 日志示例的 `audio.g711a` 和 `video.h264` 测试输入来自
+ESP32-S3 最小系统例子的 `audio.g711a` 和 `video.h264` 测试输入来自
 [`tirtc-server-example/thing-connect/device-sim/assets`](https://github.com/tangeai/tirtc-server-example/tree/main/thing-connect/device-sim/assets)。
 五个 `ai_*.g711a` 短语音提示由 Windows 本地 `Microsoft Huihui Desktop` 语音合成，
 仅用于固定协议测试。这些来源说明不改变编解码器、语音组件或输出可能适用的条款；
 二次分发和商用前应结合使用环境核对相应许可。
 
-ESP32-P4 日志示例使用 TiRTC `2.3.0` 定制兼容快照、ESP-Hosted `2.12.11` 和
+ESP32-P4 最小系统例子使用 TiRTC `2.3.0` 定制兼容快照、ESP-Hosted `2.12.11` 和
 ESP-WiFi-Remote `1.6.3`。P4 固件复用同一组协议测试媒体，并保留 C6/C61 同包兼容所需的
 ESP-Hosted 源码与 Apache-2.0 许可证；各组件具体身份以项目 `VERSION.md`、
 `SOURCE_PROVENANCE.md` 和 Release manifest 为准。

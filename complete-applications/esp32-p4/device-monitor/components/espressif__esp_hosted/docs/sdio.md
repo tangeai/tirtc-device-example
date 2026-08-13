@@ -359,7 +359,7 @@ Now that ESP-IDF is set up, follow these steps to prepare the host:
 ###### 4. Disable native Wi-Fi if available
    If your host ESP chip already has native Wi-Fi support, disable it by editing the `components/soc/<soc>/include/soc/Kconfig.soc_caps.in` file and changing all `WIFI` related configs to `n`.
 
-    If you happen to have both, host and co-processor as same ESP chipset type (for example two ESP32-C2), note an [additional step](docs/troubleshooting/#1-esp-host-to-evaluate-already-has-native-wi-fi)
+    If you happen to have both, host and co-processor as same ESP chipset type (for example two ESP32-C2), note an [additional step](troubleshooting.md#1-esp-host-to-evaluate-already-has-native-wi-fi)
 
 
 ### 7.3 Menuconfig, Build and Flash Host
@@ -525,8 +525,8 @@ After flashing both the co-processor and host devices, follow these steps to con
    Note: Replace `<STA_IP>` with the IP address of the external STA, and `<HOST_IP>` with the IP address of the ESP-Hosted device.
 
 8. Troubleshooting:
-   - Consider using a lower clock speed or checking your [hardware setup](docs/sdio.md#7-hardware-setup) if you experience communication problems.
-   - ESP-Hosted-MCU troubleshooting guide: [docs/troubleshooting.md](docs/troubleshooting.md)
+   - Consider using a lower clock speed or checking your [hardware setup](sdio.md#7-hardware-setup) if you experience communication problems.
+   - ESP-Hosted-MCU troubleshooting guide: [troubleshooting.md](troubleshooting.md)
 
 9. Monitoring and debugging:
    - Use the serial monitor on both devices to observe the communication between the host and co-processor.

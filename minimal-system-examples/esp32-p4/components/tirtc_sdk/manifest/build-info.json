@@ -14,7 +14,7 @@
   "library": {
     "path": "lib/esp32p4/libTiRTC.a",
     "size": 3639634,
-    "md5": "13c36e22805776d0f437f16ddddda87ad",
+    "md5": "13c36e22805776d0f437f16dddda87ad",
     "sha256": "b0a38061b0c63ad0c556f73bb2ecc47c6fd84823b7524f774fe09916f577b4c6"
   }
 }
