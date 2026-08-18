@@ -38,7 +38,7 @@ ESP32 完整镜像会覆盖整片 Flash，并重置 NVS 中原有的 Wi-Fi、绑
 ```bash
 git clone https://github.com/tangeai/tirtc-device-example.git
 cd tirtc-device-example
-git checkout esp32-s3-device-monitor-v1.8.0
+git checkout esp32-s3-device-monitor-v1.8.1
 ```
 
 然后进入下表中的项目目录。每个项目 README 都给出依赖、配置、构建、烧录、成功现象和排障入口。
@@ -64,7 +64,7 @@ git checkout esp32-s3-device-monitor-v1.8.0
 
 | 平台 | 应用 | 版本 | TiRTC SDK | 来源版本 | 公开 Release |
 | --- | --- | --- | --- | --- | --- |
-| ESP32-S3 | [Device Monitor](complete-applications/esp32-s3/device-monitor/README.md) | `1.8.0` | `2.2.0` | Tag `v1.8.0` / commit `8211e3b` | [`esp32-s3-device-monitor-v1.8.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.8.0) |
+| ESP32-S3 | [Device Monitor](complete-applications/esp32-s3/device-monitor/README.md) | `1.8.1` | `2.2.0` | Tag `v1.8.1` / commit `9aff1ad` | [`esp32-s3-device-monitor-v1.8.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.8.1) |
 | ESP32-P4 | [Device App](complete-applications/esp32-p4/device-monitor/README.md) | `1.3.2` | `2.3.0` 定制兼容快照 | Tag `esp32-p4-device-app-v1.3.2` / commit `bc1ae8f` | [`esp32-p4-device-monitor-v1.3.2`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.2) |
 | G32S10X | [Device Monitor](complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | Tag `v0.1.1` / commit `5630152` | [`g32s10x-device-monitor-v0.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-device-monitor-v0.1.1) |
 

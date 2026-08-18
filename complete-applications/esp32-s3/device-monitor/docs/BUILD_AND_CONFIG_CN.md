@@ -4,7 +4,7 @@
 不改变正式 SDK 快照的前提下，从公开源码完成一次可解释的构建，并知道接下来该烧录哪些
 文件、从哪里看问题。
 
-如果只是体验设备，请使用 Release 中的 `esp32s3-tirtc-device-monitor-full-v1.8.0.bin`，
+如果只是体验设备，请使用 Release 中的 `esp32s3-tirtc-device-monitor-full-v1.8.1.bin`，
 不必安装 ESP-IDF。完整镜像的下载与烧录见 [烧录与 OTA](FLASH_AND_OTA_CN.md)。
 
 ## 1. 硬件和软件
@@ -36,7 +36,7 @@ Set-Location .\complete-applications\esp32-s3\device-monitor
 如果下载的是 GitHub 自动生成的源码归档，其中没有 `.git`，跳过前两条 Git 命令，并使用
 同一 Release 的 `release-manifest.json` 核对版本和文件哈希。
 
-当前项目版本应为 `1.8.0`，来源和依赖身份见 [版本信息](../VERSION.md) 与
+当前项目版本应为 `1.8.1`，来源和依赖身份见 [版本信息](../VERSION.md) 与
 [来源说明](../SOURCE_PROVENANCE.md)。TiRTC 静态库可以这样核对：
 
 ```powershell
@@ -60,7 +60,8 @@ Get-FileHash .\components\tirtc_sdk\lib\esp32s3\libTiRTC.a -Algorithm SHA256
 3. 屏幕显示 6 位验证码后，在 ThingConnect H5 完成绑定。
 4. `device_id/device_key` 写入 NVS，后续自动上线。
 
-关键默认值在 `main/application/app_config.h`：
+关键服务默认值在 `main/application/app_config.h`，微信主动呼叫版本类型在
+`main/services/wechat_voip/wechat_voip_config.h`：
 
 | 配置 | 默认值 | 什么时候需要改 |
 | --- | --- | --- |
@@ -69,7 +70,11 @@ Get-FileHash .\components\tirtc_sdk\lib\esp32s3\libTiRTC.a -Algorithm SHA256
 | `APP_CONFIG_DEVICE_BINDING_MQTT_URI` | `mqtts://mqtt-demo.tange-ai.com:8883` | 更换发现失败时的 MQTT 兜底入口 |
 | `APP_CONFIG_OTA_DEFAULT_URL` | `https://tirtc-device-ota.tange365.com` | 使用自己的 OTA 服务 |
 | `APP_CONFIG_WIFI_SSID/PASSWORD` | 空 | 通常保持为空，在设备屏幕上配置 |
+| `APP_CONFIG_WECHAT_VOIP_ACTIVE_CALL_VERSION_TYPE` | `WECHAT_VOIP_VERSION_TRIAL`（`2`） | 选择设备主动呼叫微信时使用的正式版 `0`、开发版 `1` 或体验版 `2` |
 | `CONFIG_APP_DEBUG_SCREEN_SERVER_ENABLE` | 关闭 | 仅局域网 UI 调试时临时开启 |
+
+这个版本类型只写入设备主动调用 `/v1/voip/device/call` 的请求。微信小程序呼叫设备的
+来电链路不读取它；修改后应重新构建，并从主动呼叫日志确认 `version_type` 的实际值。
 
 使用自建服务时，应成组核对服务发现、绑定、MQTT、OTA 和服务端设备身份，避免把测试环境的
 设备身份带到正式环境。真实 Wi-Fi、设备密钥、Token 和用户身份不要写入提交、截图或 Issue。
@@ -143,7 +148,7 @@ idf.py -p COMx monitor
 按这个顺序确认，每一步通过后再继续：
 
 1. 屏幕进入主页，触摸和翻页正常。
-2. 设置页显示版本 `1.8.0`。
+2. 设置页显示版本 `1.8.1`。
 3. 连接 2.4 GHz Wi-Fi，能看到 SSID、IP 和真实信号状态。
 4. 获取 6 位验证码，在 ThingConnect H5 绑定设备。
 5. H5 设备列表出现设备，进入实时查看后验证画面、声音和对讲。

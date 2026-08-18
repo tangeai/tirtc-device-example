@@ -1,5 +1,15 @@
 # 版本变更记录
 
+## 2026.08.18：ESP32-S3 Device Monitor 1.8.1
+
+- 设备主动呼叫微信联系人时，默认使用体验版 `wx_version_type=2`。
+- 为正式版、开发版和体验版增加具名常量，并在编译期拒绝 `0..2` 之外的取值。
+- 本补丁不改变微信来电链路、其他业务代码、板级配置、媒体参数或 TiRTC SDK。
+- 已从唯一公开代码提交完成 ESP-IDF `5.5.4` 正式干净构建；完整镜像和 OTA app 只通过
+  `esp32-s3-device-monitor-v1.8.1` Release 分发。
+- 构建、附件和源码一致性已经核对；目标板烧录、联网、微信响铃/接通、媒体和长稳验证仍按
+  独立证据记录。
+
 ## 2026.08.13：最小系统例子统一命名
 
 - 对外分类从原有名称统一为“最小系统例子”，目录迁移到 `minimal-system-examples/`。
@@ -130,7 +140,7 @@
 ### 发布
 
 - 当次涉及最小系统例子 `0.3.0`、S3 Device Monitor `1.8.0` 和 P4 Device App `1.3.0`；
-  当前公开项目 Tag 分别为 `esp32-s3-minimal-system-v0.8.0`、`esp32-s3-device-monitor-v1.8.0`
+  该批次对应的公开项目 Tag 分别为 `esp32-s3-minimal-system-v0.8.0`、`esp32-s3-device-monitor-v1.8.0`
   和 `esp32-p4-device-monitor-v1.3.2`。
 - ESP32-S3 最小系统例子和 S3 Device Monitor 的正式构建资产只通过 GitHub Releases 分发。
 - ESP32-P4 Device App 不生成占位固件；其他平台和最小示例保持上一公开版本。

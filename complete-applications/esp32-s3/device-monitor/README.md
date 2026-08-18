@@ -14,7 +14,7 @@
 本示例位于统一设备仓
 [tangeai/tirtc-device-example](https://github.com/tangeai/tirtc-device-example)
 的 `complete-applications/esp32-s3/device-monitor/`。源码 Git 不保存固件二进制；正式固件从
-[`esp32-s3-device-monitor-v1.8.0` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.8.0) 下载。
+[`esp32-s3-device-monitor-v1.8.1` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.8.1) 下载。
 
 ## 先选一条适合你的路线
 
@@ -24,7 +24,7 @@
 | 修改业务、UI 或板级代码 | 先读 [源码构建与配置](docs/BUILD_AND_CONFIG_CN.md)，再回到功能文档 |
 | 给已经运行本工程的设备升级 | 使用 OTA app，并先读 [烧录与 OTA](docs/FLASH_AND_OTA_CN.md) |
 
-三条路线使用的是同一份 `1.8.0` 源码。第一次接触项目时，建议先把完整体验链路跑通，
+三条路线使用的是同一份 `1.8.1` 源码。第一次接触项目时，建议先把完整体验链路跑通，
 再开始改代码；这样遇到问题时，更容易判断是环境、配置还是代码变化造成的。
 
 ---
@@ -56,10 +56,10 @@
 
 ### 步骤 1：下载当前固件
 
-打开 [`esp32-s3-device-monitor-v1.8.0` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.8.0)，下载：
+打开 [`esp32-s3-device-monitor-v1.8.1` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.8.1)，下载：
 
 ```text
-esp32s3-tirtc-device-monitor-full-v1.8.0.bin
+esp32s3-tirtc-device-monitor-full-v1.8.1.bin
 ```
 
 这是写入地址为 `0x0` 的完整镜像。普通体验者不需要分别选择 bootloader、
@@ -69,7 +69,7 @@ partition table、app 和 storage。
 > 会被清除；烧录后请按新设备重新连接 Wi-Fi、获取 6 位验证码并完成绑定。需要保留这些
 > 数据时，应走 OTA，不要烧录 `full` 镜像。
 
-**完成标志：** 文件名为 `esp32s3-tirtc-device-monitor-full-v1.8.0.bin`，并且
+**完成标志：** 文件名为 `esp32s3-tirtc-device-monitor-full-v1.8.1.bin`，并且
 SHA-256 与同一 Release 中的 `SHA256SUMS.txt` 一致。名称含 `ota` 的文件不能用于
 首次完整烧录。
 
@@ -87,7 +87,7 @@ SHA-256 与同一 Release 中的 `SHA256SUMS.txt` 一致。名称含 `ota` 的�
 更完整的说明见 [烧录与 OTA](docs/FLASH_AND_OTA_CN.md)。
 
 **完成标志：** ESP Tool 明确显示烧录完成；按 RESET 后设备进入主页，设置页显示
-固件版本 `1.8.0`。
+固件版本 `1.8.1`。
 
 ### 步骤 3：连接 Wi-Fi
 
@@ -127,7 +127,7 @@ TiRTC 常驻监听。普通体验者不需要手动输入设备 ID 或设备密�
 | 现象 | 先检查 |
 | --- | --- |
 | ESP Tool 没有串口 | USB 线是否支持数据、串口是否被其他工具占用、是否进入下载模式 |
-| 烧录后仍显示旧版本 | 是否选择 `full-v1.8.0.bin`、地址是否为 `0x0`、是否按 RESET |
+| 烧录后仍显示旧版本 | 是否选择 `full-v1.8.1.bin`、地址是否为 `0x0`、是否按 RESET |
 | Wi-Fi 无法连接 | 是否为 2.4 GHz、密码是否正确、路由器是否允许新设备接入 |
 | 没有 6 位验证码 | 是否拿到 IP、系统时间是否同步、设备是否已经绑定 |
 | H5 找不到设备 | 登录账号是否正确、绑定是否成功、设备是否保持在线 |
@@ -149,6 +149,9 @@ TiRTC 常驻监听。普通体验者不需要手动输入设备 ID 或设备密�
 | 微信 IoT VoIP | 小程序授权后可双向呼叫、接听、挂断、刷新联系人和更新备注；设备侧呼叫为语音 | [微信 VoIP 对讲设备接入](https://github.com/tangeai/tirtc-server-example/blob/main/thing-connect/device-voip.md) |
 | 设备间互呼 | 云端联系人可见，支持设备音频或视频呼叫，结束后释放房间 | [设备呼设备接入](https://github.com/tangeai/tirtc-server-example/blob/main/thing-connect/device-call.md) |
 
+`1.8.1` 中，设备主动呼叫微信联系人时发送体验版类型 `wx_version_type=2`。微信呼叫
+设备的来电链路不读取这个配置，授权、媒体参数和 TiRTC SDK 也没有随本补丁改变。
+
 多业务共用一套音频、摄像头和 TiRTC 连接资源。应用层负责会话仲裁，H5 可在用户接听
 来电时被抢占；小钛、微信 VoIP 和设备互呼互斥。小钛返回 `accepted` 只表示目标校验及
 应用切换请求已被设备接受，不表示对端已经响铃、接听或建立媒体。详细边界见
@@ -160,7 +163,7 @@ TiRTC 常驻监听。普通体验者不需要手动输入设备 ID 或设备密�
 
 | 项目 | 当前值 |
 | --- | --- |
-| 示例版本 | `1.8.0` |
+| 示例版本 | `1.8.1` |
 | 芯片 | ESP32-S3，16 MB Flash，8 MB PSRAM |
 | 开发板 | `LCKFB-SZPI-ESP32-S3-VA` |
 | ESP-IDF | `5.5.4` |

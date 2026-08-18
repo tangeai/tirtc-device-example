@@ -1,6 +1,6 @@
 # ESP32-S3 烧录与 OTA
 
-当前版本：`1.8.0`
+当前版本：`1.8.1`
 
 固件下载：
 [tirtc-device-example Releases](https://github.com/tangeai/tirtc-device-example/releases)
@@ -8,7 +8,7 @@
 ## 普通用户只下载这个文件
 
 ```text
-esp32s3-tirtc-device-monitor-full-v1.8.0.bin
+esp32s3-tirtc-device-monitor-full-v1.8.1.bin
 ```
 
 这是完整镜像，已经包含 bootloader、分区表、OTA 初始数据、应用和 storage。
@@ -32,7 +32,7 @@ esp32s3-tirtc-device-monitor-full-v1.8.0.bin
 
 1. 用支持数据传输的 USB 线连接开发板。
 2. 打开 ESP Tool，点击 `Connect` 并选择开发板对应串口。
-3. 点击 `Add File`，添加 `esp32s3-tirtc-device-monitor-full-v1.8.0.bin`。
+3. 点击 `Add File`，添加 `esp32s3-tirtc-device-monitor-full-v1.8.1.bin`。
 4. 在 `Flash Address` 中填写 `0x0`。
 5. 首次使用、版本跨度较大或设备状态不确定时，先擦除闪存。
 6. 点击 `Program`，等待网页明确显示完成。
@@ -57,15 +57,15 @@ esp32s3-tirtc-device-monitor-full-v1.8.0.bin
 
 | 文件 | 用途 |
 | --- | --- |
-| `esp32s3-tirtc-device-monitor-full-v1.8.0.bin` | 从 `0x0` 完整烧录；覆盖 16 MB Flash 并重置本地数据 |
-| `esp32s3-tirtc-device-monitor-ota-v1.8.0.bin` | OTA 服务端 app 固件；不写 `0x0`，正常升级保留 NVS 和 storage |
+| `esp32s3-tirtc-device-monitor-full-v1.8.1.bin` | 从 `0x0` 完整烧录；覆盖 16 MB Flash 并重置本地数据 |
+| `esp32s3-tirtc-device-monitor-ota-v1.8.1.bin` | OTA 服务端 app 固件；不写 `0x0`，正常升级保留 NVS 和 storage |
 | `SHA256SUMS.txt` | 下载后完整性校验 |
 | `release-manifest.json` | 版本、来源、Flash 参数和资产清单 |
 
 Windows 校验示例：
 
 ```powershell
-Get-FileHash .\esp32s3-tirtc-device-monitor-full-v1.8.0.bin -Algorithm SHA256
+Get-FileHash .\esp32s3-tirtc-device-monitor-full-v1.8.1.bin -Algorithm SHA256
 ```
 
 结果应与同一 Release 中 `SHA256SUMS.txt` 记录的值一致。完整镜像按 16 MB Flash
@@ -118,13 +118,13 @@ GET https://tirtc-device-ota.tange365.com/api/ota/manifest?device_id=<设备ID>&
 ```
 
 OTA 服务只保存 app 固件，不包含 NVS、storage、bootloader 或分区表。线上
-manifest 的 `version` 必须为 `1.8.0`，`size` 和 `sha256` 必须分别与同一
+manifest 的 `version` 必须为 `1.8.1`，`size` 和 `sha256` 必须分别与同一
 Release 的 `release-manifest.json`、`SHA256SUMS.txt` 中 OTA app 记录一致。
 
 正常 OTA 只切换 app 分区，不主动覆盖 NVS 和 storage，因此适合保留 Wi-Fi、设备身份和
 本地设置的版本升级。OTA app 不能当作完整镜像从 `0x0` 烧录。
 
-设备已经运行 `1.8.0` 时，服务端应返回 `update=false` 和 `reason=up_to_date`。
+设备已经运行 `1.8.1` 时，服务端应返回 `update=false` 和 `reason=up_to_date`。
 
 ## 发布边界
 
@@ -136,8 +136,8 @@ Release 的 `release-manifest.json`、`SHA256SUMS.txt` 中 OTA app 记录一致�
 
 每个版本的公开 Release 只提供以下资产：
 
-- `esp32s3-tirtc-device-monitor-full-v1.8.0.bin`
-- `esp32s3-tirtc-device-monitor-ota-v1.8.0.bin`
+- `esp32s3-tirtc-device-monitor-full-v1.8.1.bin`
+- `esp32s3-tirtc-device-monitor-ota-v1.8.1.bin`
 - `SHA256SUMS.txt`
 - `release-manifest.json`
 
