@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # OTA firmware version rule: see docs/release/OTA_VERSIONING_CN.md.
-set(PROJECT_VER "1.8.0")
+set(PROJECT_VER "1.8.1")
 project(sample_project)
 
 if(TARGET lvgl_port_lib)
