@@ -132,9 +132,6 @@ static const char *app_ai_normalize_call_type(const char *call_type)
         app_ai_type_is_wechat(call_type)) {
         return DEVICE_CALL_TYPE_AUDIO;
     }
-    if (app_ai_ascii_equal_ignore_case(call_type, "video")) {
-        return DEVICE_CALL_TYPE_VIDEO;
-    }
     return NULL;
 }
 
@@ -600,15 +597,6 @@ static esp_err_t app_ai_resolve_call_target(app_ai_contact_scope_t scope,
                           "微信呼叫服务正在连接，请稍后再试");
         return ESP_ERR_INVALID_STATE;
     }
-    if (selected.route == AI_CHAT_DEVICE_ACTION_ROUTE_WECHAT_VOIP &&
-        strcmp(call_type, DEVICE_CALL_TYPE_VIDEO) == 0) {
-        app_ai_set_result(result,
-                          false,
-                          "unsupported_call_type",
-                          "微信联系人当前只支持语音呼叫");
-        return ESP_ERR_NOT_SUPPORTED;
-    }
-
     result->ok = true;
     result->call_route = selected.route;
     strlcpy(result->call_type, call_type, sizeof(result->call_type));
@@ -638,11 +626,7 @@ static esp_err_t app_ai_resolve_call_target(app_ai_contact_scope_t scope,
         result->call_route = AI_CHAT_DEVICE_ACTION_ROUTE_NONE;
         return ESP_FAIL;
     }
-    strlcpy(result->message,
-            strcmp(call_type, DEVICE_CALL_TYPE_VIDEO) == 0 ?
-                "已受理视频呼叫" :
-                "已受理语音呼叫",
-            sizeof(result->message));
+    strlcpy(result->message, "已受理语音呼叫", sizeof(result->message));
     strlcat(result->message, result->matched_name, sizeof(result->message));
     return ESP_OK;
 }
@@ -693,7 +677,7 @@ esp_err_t app_ai_device_action_execute(const ai_chat_device_action_t *action,
         app_ai_set_result(result,
                           false,
                           "unsupported_call_type",
-                          "通话类型只支持 audio 或 video");
+                          "通话类型只支持 audio");
         return ESP_ERR_NOT_SUPPORTED;
     }
     esp_err_t scope_ret = app_ai_pick_contact_scope(action, &scope, result);

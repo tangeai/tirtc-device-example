@@ -10,7 +10,7 @@ static const char *TAG = "app_audio_config";
 #define APP_AUDIO_NVS_NAMESPACE        "audio_cfg"
 #define APP_AUDIO_NVS_KEY_SPEAKER_VOL  "spk_vol"
 #define APP_AUDIO_NVS_KEY_CAPTURE_GAIN "cap_gain"
-#define APP_AUDIO_DEFAULT_SPEAKER_PERCENT      50
+#define APP_AUDIO_DEFAULT_SPEAKER_PERCENT      100
 #define APP_AUDIO_DEFAULT_CAPTURE_GAIN_PERCENT 80
 
 static uint8_t app_audio_clamp_percent(uint8_t percent)

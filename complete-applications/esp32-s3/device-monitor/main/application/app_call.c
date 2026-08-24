@@ -134,8 +134,7 @@ esp_err_t app_call_contact_with_type(const char *device_id, const char *call_typ
     if (device_id == NULL ||
         strlen(device_id) != APP_CALL_CONTACT_DEVICE_ID_LENGTH ||
         call_type == NULL ||
-        (strcmp(call_type, DEVICE_CALL_TYPE_AUDIO) != 0 &&
-         strcmp(call_type, DEVICE_CALL_TYPE_VIDEO) != 0)) {
+        strcmp(call_type, DEVICE_CALL_TYPE_AUDIO) != 0) {
         ESP_LOGW(CALL_FLOW_TAG, "stage=app_call_rejected reason=invalid_request");
         return ESP_ERR_INVALID_ARG;
     }

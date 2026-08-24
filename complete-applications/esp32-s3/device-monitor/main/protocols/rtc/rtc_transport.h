@@ -14,6 +14,7 @@ typedef tirtc_session_media_ops_t rtc_transport_media_ops_t;
 typedef tirtc_session_hooks_t rtc_transport_hooks_t;
 typedef tirtc_session_control_ops_t rtc_transport_control_ops_t;
 typedef tirtc_session_observer_t rtc_transport_observer_t;
+typedef tirtc_session_builtin_audio_format_t rtc_transport_builtin_audio_format_t;
 
 #define RTC_TRANSPORT_MODE_LISTEN     TIRTC_SESSION_MODE_LISTEN
 #define RTC_TRANSPORT_MODE_CONNECT    TIRTC_SESSION_MODE_CONNECT
@@ -26,6 +27,8 @@ typedef tirtc_session_observer_t rtc_transport_observer_t;
 #define RTC_TRANSPORT_STATE_ERROR     TIRTC_SESSION_STATE_ERROR
 #define RTC_TRANSPORT_DEVICE_AUDIO_STREAM_ID TIRTC_SESSION_DEVICE_AUDIO_STREAM_ID
 #define RTC_TRANSPORT_H5_TALKBACK_STREAM_ID  TIRTC_SESSION_H5_TALKBACK_STREAM_ID
+#define RTC_TRANSPORT_BUILTIN_AUDIO_FORMAT_ALAW_8K TIRTC_SESSION_BUILTIN_AUDIO_FORMAT_ALAW_8K
+#define RTC_TRANSPORT_BUILTIN_AUDIO_FORMAT_PCM_16K TIRTC_SESSION_BUILTIN_AUDIO_FORMAT_PCM_16K
 #define RTC_TRANSPORT_CONNECT_TOKEN_MAX_LEN   TIRTC_SESSION_CONNECT_TOKEN_MAX_LEN
 #define RTC_TRANSPORT_COMMAND_RESPONSE_BIT          0x8000U
 #define RTC_TRANSPORT_COMMAND_DEVICE_CALL_CONNECTED 0x2000U
@@ -47,9 +50,11 @@ esp_err_t rtc_transport_connect_peer_with_token(const char *remote_device_id, co
 esp_err_t rtc_transport_send_command(uint32_t cmdw, const void *data, size_t data_len);
 void rtc_transport_set_next_connection_auto_media(bool enabled);
 void rtc_transport_set_next_connection_defer_media(bool enabled);
+esp_err_t rtc_transport_allow_deferred_call_media(tirtc_conn_t conn);
 esp_err_t rtc_transport_restart(void);
 esp_err_t rtc_transport_stop(void);
 esp_err_t rtc_transport_disconnect(void);
+bool rtc_transport_get_active_connection(tirtc_conn_t *conn);
 void rtc_transport_flush_remote_media(void);
 esp_err_t rtc_transport_accept_incoming_call(void);
 esp_err_t rtc_transport_reject_incoming_call(void);
@@ -58,6 +63,7 @@ void rtc_transport_on_network_state_changed(const rtc_transport_network_state_t 
 esp_err_t rtc_transport_set_local_video_send_enabled(bool enabled);
 esp_err_t rtc_transport_set_local_audio_send_enabled(bool enabled);
 esp_err_t rtc_transport_set_remote_audio_stream_id(uint8_t stream_id);
+esp_err_t rtc_transport_set_builtin_audio_format(rtc_transport_builtin_audio_format_t format);
 esp_err_t rtc_transport_use_builtin_media(void);
 esp_err_t rtc_transport_query_peer_state(void);
 bool rtc_transport_get_last_peer_state(rtc_transport_peer_state_t *state);

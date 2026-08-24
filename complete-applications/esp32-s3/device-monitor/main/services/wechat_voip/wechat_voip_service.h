@@ -30,10 +30,8 @@ esp_err_t wechat_voip_service_request_call(const char *open_id);
 esp_err_t wechat_voip_service_refresh_contacts_async(void);
 bool wechat_voip_service_is_enabled(void);
 bool wechat_voip_service_is_connected(void);
-/* Compatibility entry: verifies an existing mini-program authorization. */
+/* Verifies an existing mini-program authorization from the server cache. */
 esp_err_t wechat_voip_service_add_contact(const char *open_id);
-/* Returns ESP_ERR_NOT_SUPPORTED; revocation belongs to the user side. */
-esp_err_t wechat_voip_service_remove_contact(const char *open_id);
 esp_err_t wechat_voip_service_update_contact_remark(const char *open_id, const char *remark);
 bool wechat_voip_service_has_incoming_call(void);
 wechat_voip_call_state_t wechat_voip_service_get_call_state(void);

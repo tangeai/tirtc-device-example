@@ -16,7 +16,17 @@ static void tirtc_session_handle_network_changed(const tirtc_session_event_t *ev
                 ESP_LOGW(TAG, "rtc disconnect on network down failed: %s", esp_err_to_name(ret));
             }
         }
-        tirtc_session_mark_sdk_network_offline();
+        /* TiRtcStart owns listener threads and sockets. Merely clearing the
+         * application-side started flag lets the next network-up event call
+         * TiRtcStart again without the required TiRtcStop/TiRtcUninit pair,
+         * leaving the old runtime alive and eventually exhausting lwIP
+         * sockets. Reuse the existing deferred full-reset path so callbacks
+         * can drain outside the network callback and restart only after the
+         * link is usable again. */
+        if (!tirtc_session_schedule_deferred_full_reset()) {
+            ESP_LOGE(TAG, "rtc full reset schedule failed on network down");
+            tirtc_session_mark_sdk_network_offline();
+        }
     } else {
         tirtc_session_note_event("network up");
         (void)tirtc_session_prepare_sdk();
@@ -51,10 +61,12 @@ static void tirtc_session_handle_conn_accepted(const tirtc_session_event_t *even
             }
             tirtc_session_note_event("call req");
             ESP_LOGI(TAG, "rtc outgoing call request sent");
+            tirtc_session_notify_connection_accepted(event->payload.conn.conn);
             return;
         }
 
         tirtc_session_note_event("connected");
+        tirtc_session_notify_connection_accepted(event->payload.conn.conn);
         return;
     }
 
@@ -64,6 +76,7 @@ static void tirtc_session_handle_conn_accepted(const tirtc_session_event_t *even
         ESP_LOGI(TAG,
                  "rtc connection accepted: hconn=%p media deferred until device-call command",
                  event->payload.conn.conn);
+        tirtc_session_notify_connection_accepted(event->payload.conn.conn);
         return;
     }
 
@@ -81,6 +94,7 @@ static void tirtc_session_handle_conn_accepted(const tirtc_session_event_t *even
     if (!audio_test_only) {
         tirtc_session_start_time_stream_messages();
     }
+    tirtc_session_notify_connection_accepted(event->payload.conn.conn);
 }
 
 static void tirtc_session_handle_video_subscription(const tirtc_session_event_t *event, bool subscribed)

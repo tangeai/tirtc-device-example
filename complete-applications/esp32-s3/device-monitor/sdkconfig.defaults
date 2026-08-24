@@ -9,6 +9,7 @@ CONFIG_ESP32S3_INSTRUCTION_CACHE_16KB=y
 CONFIG_ESP32S3_DATA_CACHE_32KB=y
 CONFIG_ESP32S3_DATA_CACHE_LINE_32B=y
 CONFIG_ESP_SYSTEM_PANIC_PRINT_HALT=y
+CONFIG_ESP_TASK_WDT_PANIC=y
 # Global ESP_LOG timestamp uses wall-clock time with millisecond precision.
 # Before SNTP sync it starts at 00:00:xx.xxx; after sync it follows system time.
 # CONFIG_LOG_TIMESTAMP_SOURCE_RTOS is not set
@@ -48,6 +49,10 @@ CONFIG_LV_FONT_FMT_TXT_LARGE=y
 CONFIG_LV_USE_FONT_COMPRESSED=y
 CONFIG_LV_USE_QRCODE=y
 # CONFIG_ESP_WIFI_SOFTAP_SUPPORT is not set
+# app_init() owns the complete boot pipeline (Wi-Fi, services, drivers and UI).
+# Keep enough transient stack for that pipeline; app_main returns after init so
+# ESP-IDF deletes the main task and releases this internal-RAM stack.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 CONFIG_FREERTOS_HZ=1000
 # CONFIG_FREERTOS_USE_TRACE_FACILITY is not set
 # CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS is not set

@@ -19,7 +19,7 @@ typedef struct {
 } app_rtc_rate_state_t;
 
 static app_control_state_t s_control_state = {
-	.video_enabled = true,
+	.video_enabled = false,
 	.audio_enabled = true,
 };
 static bool s_last_call_active;
@@ -77,7 +77,7 @@ bool app_state_sync_call_media_defaults(bool call_active, app_control_state_t *c
 	taskENTER_CRITICAL(&s_control_lock);
 	if (s_last_call_active != call_active) {
 		s_last_call_active = call_active;
-		s_control_state.video_enabled = call_active;
+		s_control_state.video_enabled = false;
 		s_control_state.audio_enabled = call_active;
 		changed = true;
 	}

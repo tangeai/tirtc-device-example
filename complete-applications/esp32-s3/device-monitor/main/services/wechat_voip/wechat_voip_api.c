@@ -16,6 +16,7 @@ static const char *ACTIVE_CALL_ROOM_TYPE = "voice";
 enum {
     VOIP_HTTP_URL_MAX_LEN = 256,
     VOIP_HTTP_RESPONSE_MAX_LEN = 2048,
+    VOIP_CONTACTS_RESPONSE_MAX_LEN = 8192,
     VOIP_HTTP_BODY_MAX_LEN = 768,
     DEVICE_AUDIO_RATE = 8000,
     DEVICE_AUDIO_CHANNELS = 1,
@@ -171,7 +172,7 @@ esp_err_t wechat_voip_api_fetch_callers(const char *api_base,
                                         void *ctx,
                                         int *caller_count)
 {
-    char response[VOIP_HTTP_RESPONSE_MAX_LEN] = {0};
+    char response[VOIP_CONTACTS_RESPONSE_MAX_LEN] = {0};
     int status = 0;
 
     esp_err_t ret = voip_http_request(api_base,
@@ -226,9 +227,19 @@ esp_err_t wechat_voip_api_fetch_callers(const char *api_base,
                                   "wxa_user_openid"));
         copy_str(caller.model_id, sizeof(caller.model_id), json_string_any(item, "wx_model_id", "wxa_model_id"));
         copy_str(caller.app_id, sizeof(caller.app_id), json_string_any(item, "wx_app_id", "wxa_app_id"));
-        copy_str(caller.remark,
-                 sizeof(caller.remark),
-                 json_string_any4(item, "remark", "alias", "contact_name", "nickname"));
+        const char *remark = json_string_any4(item,
+                                              "remark",
+                                              "wx_user_remark",
+                                              "alias",
+                                              "contact_name");
+        if (remark == NULL || remark[0] == '\0') {
+            remark = json_string_any(item, "nickname", "wx_user_nickname");
+        }
+        if (wechat_voip_remark_is_valid(remark)) {
+            copy_str(caller.remark, sizeof(caller.remark), remark);
+        } else if (remark != NULL && remark[0] != '\0') {
+            ESP_LOGW(TAG, "ignore invalid contact remark from server");
+        }
         if (caller_cb != NULL) {
             caller_cb(&caller, ctx);
         }
@@ -332,7 +343,7 @@ esp_err_t wechat_voip_api_update_contact_remark(const char *api_base,
     if (api_base == NULL || api_base[0] == '\0' ||
         mqtt_token == NULL || mqtt_token[0] == '\0' ||
         peer_id == NULL || peer_id[0] == '\0' ||
-        remark == NULL || strlen(remark) >= WECHAT_VOIP_REMARK_MAX) {
+        !wechat_voip_remark_is_valid(remark)) {
         return ESP_ERR_INVALID_ARG;
     }
 

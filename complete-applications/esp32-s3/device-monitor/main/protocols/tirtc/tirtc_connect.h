@@ -21,6 +21,10 @@ esp_err_t tirtc_connect_start_with_token(const char *remote_device_id,
                                          void *user_data);
 bool tirtc_connect_is_connecting(void);
 void tirtc_connect_on_tirtc_started(void);
+/* Cancels the application intent without pretending an already submitted
+ * TiRtcConnect operation has finished. Returns true while the SDK operation
+ * is still in flight and must be drained by its result callback. */
+bool tirtc_connect_cancel_pending(void);
 void tirtc_connect_cancel(void);
 
 #ifdef __cplusplus

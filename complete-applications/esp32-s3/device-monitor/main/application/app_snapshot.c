@@ -18,8 +18,6 @@
 #include "sender_test.h"
 #include "wechat_voip_service.h"
 
-static const uint16_t APP_WIFI_CONNECT_FAIL_RETRY_THRESHOLD = 8;
-
 static app_call_state_t app_snapshot_call_state_from_service(device_call_state_t state)
 {
 	switch (state) {
@@ -67,6 +65,8 @@ static void app_snapshot_fill_network(app_network_snapshot_t *network_snapshot)
 	network_get_ping_status(&ping);
 
 	network_snapshot->connected = network.connected;
+	network_snapshot->associated = network.associated;
+	network_snapshot->phase = network.phase;
 	network_snapshot->rssi = network.rssi;
 	strlcpy(network_snapshot->ip_addr, network.ip_addr, sizeof(network_snapshot->ip_addr));
 	strlcpy(network_snapshot->ssid, network.ssid, sizeof(network_snapshot->ssid));
@@ -74,7 +74,8 @@ static void app_snapshot_fill_network(app_network_snapshot_t *network_snapshot)
 				 sizeof(network_snapshot->saved_ssid),
 				 network_snapshot->saved_password,
 				 sizeof(network_snapshot->saved_password));
-	network_snapshot->connect_failed = network.retry_count >= APP_WIFI_CONNECT_FAIL_RETRY_THRESHOLD;
+	network_snapshot->connect_failed = network.phase == NETWORK_CONNECTION_PHASE_FAILED;
+	network_snapshot->connect_failure = network.connect_failure;
 	network_snapshot->scan_in_progress = wifi_scan.in_progress;
 	scan_count = wifi_scan.count > APP_WIFI_SCAN_MAX ? APP_WIFI_SCAN_MAX : wifi_scan.count;
 	network_snapshot->scan_count = scan_count;
@@ -173,7 +174,6 @@ static void app_snapshot_fill_test(app_test_snapshot_t *test_snapshot)
 
 	sender_test_get_snapshot(&sender_test);
 	test_snapshot->sender_running = sender_test.running;
-	test_snapshot->sender_spiffs_ready = sender_test.spiffs_ready;
 	strlcpy(test_snapshot->sender_status,
 		sender_test.status,
 		sizeof(test_snapshot->sender_status));
@@ -214,6 +214,7 @@ static void app_snapshot_fill_ai_chat(app_ai_chat_snapshot_t *ai_snapshot)
 	ai_snapshot->active = ai->active;
 	ai_snapshot->listening = ai->listening;
 	ai_snapshot->cloud_speaking = ai->cloud_speaking;
+	ai_snapshot->output_playback_pending = ai->output_playback_pending;
 	ai_snapshot->tx_audio_frames = ai->tx_audio_frames;
 	ai_snapshot->rx_commands = ai->rx_commands;
 	ai_snapshot->last_error = ai->last_error;
@@ -307,6 +308,9 @@ static void app_snapshot_fill_wechat(app_wechat_snapshot_t *wechat_snapshot)
 	}
 
 	wechat_voip_service_get_contacts(&contacts);
+	wechat_snapshot->contacts_ready = contacts.ready;
+	wechat_snapshot->contacts_server_synced = contacts.server_synced;
+	wechat_snapshot->contacts_last_error = contacts.last_error;
 	wechat_snapshot->incoming_call_pending = wechat_voip_service_has_incoming_call();
 	wechat_snapshot->call_state =
 		app_snapshot_wechat_call_state_from_service(wechat_voip_service_get_call_state());

@@ -18,6 +18,7 @@
 
 #include "ai_chat_token.h"
 #include "audio_device.h"
+#include "media_sink.h"
 #include "platform/app_task_affinity.h"
 #include "platform_task_reaper.h"
 #include "system_time.h"
@@ -36,6 +37,10 @@ static const char *DIALOG_TAG = "ai_dialog";
 #define AI_CHAT_AUDIO_FRAME_MS        20U
 #define AI_CHAT_AUDIO_FRAME_SAMPLES   (AI_CHAT_AUDIO_SAMPLE_RATE / 50U)
 #define AI_CHAT_AUDIO_FRAME_BYTES     (AI_CHAT_AUDIO_FRAME_SAMPLES * sizeof(int16_t))
+#define AI_CHAT_SEND_BUFFER_BUDGET_MS 500U
+#define AI_CHAT_SEND_BUFFER_BUDGET_BYTES \
+    ((AI_CHAT_AUDIO_SAMPLE_RATE * AI_CHAT_AUDIO_CHANNELS * sizeof(int16_t) * \
+      AI_CHAT_SEND_BUFFER_BUDGET_MS) / 1000U)
 #define AI_CHAT_MEDIA_QUEUE_LEN       10
 #define AI_CHAT_MEDIA_TASK_STACK      (10 * 1024)
 #define AI_CHAT_MEDIA_TASK_PRIORITY   10
@@ -53,6 +58,10 @@ static const char *DIALOG_TAG = "ai_dialog";
 #define AI_CHAT_HEARTBEAT_TASK_PRIORITY 5
 #define AI_CHAT_DEVICE_ACTION_TASK_STACK (8 * 1024)
 #define AI_CHAT_DEVICE_ACTION_TASK_PRIORITY 5
+#define AI_CHAT_REST_CLOSE_TASK_STACK  (8 * 1024)
+#define AI_CHAT_REST_CLOSE_TASK_PRIORITY 5
+#define AI_CHAT_REST_CLOSE_TIMEOUT_MS  10000U
+#define AI_CHAT_REST_CLOSE_POLL_MS     20U
 #define AI_CHAT_DEVICE_ACTION_ERROR_UNSUPPORTED (-32010)
 #define AI_CHAT_DEVICE_ACTION_ERROR_BUSY        (-32011)
 #define AI_CHAT_DEVICE_ACTION_ERROR_TARGET      (-32012)
@@ -66,7 +75,6 @@ static const char *DIALOG_TAG = "ai_dialog";
 #define AI_CHAT_TIMEOUT_GUARD_POLL_MS 100U
 #define AI_CHAT_HEARTBEAT_INTERVAL_MS 30000U
 #define AI_CHAT_START_SESSION_RPC_ID  "start-session-001"
-#define AI_CHAT_SEND_BUFFER_SOFT_DROP_BYTES (128U * 1024U)
 #define AI_CHAT_TASK_REAPER_QUEUE_LEN 8
 #define AI_CHAT_TASK_REAPER_STACK     2048
 #define AI_CHAT_TASK_REAPER_PRIORITY  6
@@ -103,6 +111,11 @@ typedef struct {
     bool tx_started_logged;
     bool audio_prepared;
 } ai_chat_media_state_t;
+
+typedef struct {
+    tirtc_conn_t conn;
+    uint32_t generation;
+} ai_chat_rest_close_context_t;
 
 typedef struct {
     int caption_type;
@@ -220,6 +233,8 @@ static TaskHandle_t s_start_task;
 static TaskHandle_t s_session_task;
 static TaskHandle_t s_heartbeat_task;
 static uint32_t s_heartbeat_generation;
+static TaskHandle_t s_rest_close_task;
+static bool s_rest_close_pending;
 static QueueHandle_t s_task_reaper_queue;
 static TaskHandle_t s_task_reaper_task;
 static StaticQueue_t s_task_reaper_queue_buffer;
@@ -232,6 +247,7 @@ static portMUX_TYPE s_start_timeline_lock = portMUX_INITIALIZER_UNLOCKED;
 static void ai_chat_start_task(void *ctx);
 static void ai_chat_session_task(void *ctx);
 static void ai_chat_heartbeat_task(void *ctx);
+static void ai_chat_rest_close_task(void *ctx);
 static void ai_chat_media_task(void *ctx);
 static void ai_chat_task_reaper_task(void *ctx);
 static void ai_chat_media_capture_cb(const uint8_t *data,
@@ -420,6 +436,114 @@ static void ai_chat_delete_current_task_with_caps(void)
 
     ESP_LOGE(TAG, "AI Chat task reaper unavailable, deleting task directly");
     platform_task_reaper_delete_current_with_caps(TAG);
+}
+
+static bool ai_chat_rest_close_context_valid(const ai_chat_rest_close_context_t *close_ctx)
+{
+    bool valid = false;
+
+    if (close_ctx == NULL || s_lock == NULL) {
+        return false;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    valid = s_rest_close_pending &&
+            s_ai.generation == close_ctx->generation;
+    xSemaphoreGive(s_lock);
+    return valid;
+}
+
+static void ai_chat_rest_close_task(void *ctx)
+{
+    ai_chat_rest_close_context_t *close_ctx = ctx;
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    TickType_t started = xTaskGetTickCount();
+    media_sink_audio_drain_status_t drain = {0};
+    bool drained = false;
+
+    while (close_ctx != NULL && ai_chat_rest_close_context_valid(close_ctx)) {
+        drained = media_sink_remote_audio_is_drained(&drain);
+        if (drained ||
+            xTaskGetTickCount() - started >= pdMS_TO_TICKS(AI_CHAT_REST_CLOSE_TIMEOUT_MS)) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(AI_CHAT_REST_CLOSE_POLL_MS));
+    }
+
+    if (close_ctx != NULL && ai_chat_rest_close_context_valid(close_ctx)) {
+        uint32_t waited_ms = (uint32_t)((xTaskGetTickCount() - started) * portTICK_PERIOD_MS);
+        if (drained) {
+            ESP_LOGI(TAG,
+                     "AI Chat rest audio drained before close: waited_ms=%u",
+                     (unsigned)waited_ms);
+        } else {
+            ESP_LOGW(TAG,
+                     "AI Chat rest audio drain timeout: waited_ms=%u buffered_ms=%u queued=%u playback=%u quiet=%u",
+                     (unsigned)waited_ms,
+                     (unsigned)drain.buffered_ms,
+                     (unsigned)drain.queued_packets,
+                     drain.playback_active ? 1U : 0U,
+                     drain.source_quiet ? 1U : 0U);
+        }
+        (void)ai_chat_close();
+    }
+
+    if (s_lock != NULL) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (s_rest_close_task == self) {
+            s_rest_close_task = NULL;
+        }
+        s_rest_close_pending = false;
+        xSemaphoreGive(s_lock);
+    }
+    free(close_ctx);
+    ai_chat_delete_current_task_with_caps();
+}
+
+static esp_err_t ai_chat_schedule_rest_close(tirtc_conn_t conn)
+{
+    ESP_RETURN_ON_FALSE(conn != NULL && s_lock != NULL,
+                        ESP_ERR_INVALID_ARG,
+                        TAG,
+                        "rest close context is invalid");
+
+    ai_chat_rest_close_context_t *close_ctx = ai_chat_calloc_psram(1, sizeof(*close_ctx));
+    ESP_RETURN_ON_FALSE(close_ctx != NULL, ESP_ERR_NO_MEM, TAG, "allocate rest close context failed");
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_ai.conn != conn || s_ai.state != AI_CHAT_STATE_IN_SESSION) {
+        xSemaphoreGive(s_lock);
+        free(close_ctx);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_rest_close_pending) {
+        xSemaphoreGive(s_lock);
+        free(close_ctx);
+        return ESP_OK;
+    }
+
+    close_ctx->conn = conn;
+    close_ctx->generation = s_ai.generation;
+    s_rest_close_pending = true;
+    BaseType_t task_ret = xTaskCreatePinnedToCoreWithCaps(ai_chat_rest_close_task,
+                                                          "ai_rest_close",
+                                                          AI_CHAT_REST_CLOSE_TASK_STACK,
+                                                          close_ctx,
+                                                          AI_CHAT_REST_CLOSE_TASK_PRIORITY,
+                                                          &s_rest_close_task,
+                                                          AI_CHAT_CONTROL_TASK_CORE,
+                                                          AI_CHAT_TASK_ALLOC_CAPS);
+    if (task_ret != pdPASS) {
+        s_rest_close_pending = false;
+        s_rest_close_task = NULL;
+        xSemaphoreGive(s_lock);
+        free(close_ctx);
+        return ESP_ERR_NO_MEM;
+    }
+    xSemaphoreGive(s_lock);
+
+    ESP_LOGI(TAG, "AI Chat rest close waits for remote audio drain");
+    return ESP_OK;
 }
 
 static void ai_chat_trim_utf8_tail(char *text)
@@ -1369,17 +1493,18 @@ static void ai_chat_media_task(void *ctx)
         }
 
         size_t send_buffer_used = 0;
-        bool soft_drop = false;
         esp_err_t buffer_ret = tirtc_session_get_send_buffer_used(packet.conn, &send_buffer_used);
-        esp_err_t ret = ESP_OK;
-
-        if (buffer_ret == ESP_OK && send_buffer_used >= AI_CHAT_SEND_BUFFER_SOFT_DROP_BYTES) {
-            soft_drop = true;
-            ret = ESP_ERR_TIMEOUT;
-        } else {
-            ret = tirtc_session_send_audio_frame(packet.conn, &packet.frame, packet.data);
-        }
+        bool latency_budget_drop = buffer_ret == ESP_OK &&
+                                   send_buffer_used >= AI_CHAT_SEND_BUFFER_BUDGET_BYTES;
+        const TickType_t now_tick = xTaskGetTickCount();
         uint32_t peak_percent = ai_chat_pcm_peak_percent(packet.data, packet.frame.length);
+        esp_err_t ret = latency_budget_drop ?
+                            ESP_ERR_TIMEOUT :
+                            tirtc_session_send_audio_frame(packet.conn, &packet.frame, packet.data);
+        bool backpressure_drop = ret == ESP_ERR_TIMEOUT;
+        if (backpressure_drop && buffer_ret != ESP_OK) {
+            (void)tirtc_session_get_send_buffer_used(packet.conn, &send_buffer_used);
+        }
         bool log_tx_started = false;
         bool log_tx_window = false;
         uint32_t window_frames = 0;
@@ -1387,7 +1512,6 @@ static void ai_chat_media_task(void *ctx)
         uint32_t window_peak = 0;
         uint32_t total_failures = 0;
         uint32_t total_dropped = 0;
-        const TickType_t now_tick = xTaskGetTickCount();
         taskENTER_CRITICAL(&s_media_lock);
         if (ret == ESP_OK) {
             s_media.tx_frames++;
@@ -1415,8 +1539,9 @@ static void ai_chat_media_task(void *ctx)
                 s_media.tx_window_peak_percent = 0;
                 s_media.last_tx_window_log_tick = now_tick;
             }
-        } else if (soft_drop) {
+        } else if (backpressure_drop) {
             s_media.dropped_frames++;
+            total_dropped = s_media.dropped_frames;
         } else {
             s_media.tx_failures++;
         }
@@ -1451,9 +1576,10 @@ static void ai_chat_media_task(void *ctx)
 
             if (should_log) {
                 ESP_LOGW(TAG,
-                         "AI Chat uplink backpressure: send_buffer=%u soft_drop=%u",
+                         "AI Chat uplink backpressure: send_buffer=%u budget=%u dropped=%lu",
                          (unsigned)send_buffer_used,
-                         soft_drop ? 1U : 0U);
+                         (unsigned)AI_CHAT_SEND_BUFFER_BUDGET_BYTES,
+                         (unsigned long)total_dropped);
             }
         } else if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
             ESP_LOGW(TAG, "send AI audio failed: %s", esp_err_to_name(ret));
@@ -1519,6 +1645,7 @@ static esp_err_t ai_chat_media_start(tirtc_conn_t conn)
         return ESP_OK;
     }
 
+    tirtc_session_preserve_remote_media_on_disconnect(conn, false);
     ai_chat_log_heap("media start begin");
 
     ESP_RETURN_ON_ERROR(ai_chat_media_init(), TAG, "init AI media failed");
@@ -1594,6 +1721,7 @@ static void ai_chat_media_stop(tirtc_conn_t conn)
     taskEXIT_CRITICAL(&s_media_lock);
 
     if (should_stop) {
+        media_sink_set_remote_audio_talkspurt(false);
         (void)microphone_set_observer_enabled(ai_chat_media_capture_cb, NULL, false);
         if (s_media.queue != NULL) {
             xQueueReset(s_media.queue);
@@ -1607,6 +1735,33 @@ static void ai_chat_media_stop(tirtc_conn_t conn)
                  s_media.queue);
         ai_chat_log_heap("media stopped");
     }
+}
+
+static void ai_chat_media_stop_uplink_for_remote_drain(tirtc_conn_t conn)
+{
+    bool should_stop = false;
+
+    taskENTER_CRITICAL(&s_media_lock);
+    should_stop = conn == NULL || conn == s_media.conn;
+    if (should_stop) {
+        s_media.conn = NULL;
+        s_media.running = false;
+        s_media.uplink_enabled = false;
+        s_media.tx_started_logged = false;
+    }
+    taskEXIT_CRITICAL(&s_media_lock);
+
+    if (!should_stop) {
+        return;
+    }
+
+    media_sink_set_remote_audio_talkspurt(false);
+    (void)microphone_set_observer_enabled(ai_chat_media_capture_cb, NULL, false);
+    if (s_media.queue != NULL) {
+        xQueueReset(s_media.queue);
+    }
+    (void)microphone_set_enabled(false);
+    ESP_LOGI(TAG, "AI Chat uplink stopped; preserving remote audio tail");
 }
 
 static esp_err_t ai_chat_detach_rtc_and_stop_media(tirtc_conn_t conn, const char *reason)
@@ -1653,6 +1808,11 @@ static esp_err_t ai_chat_media_set_uplink_enabled(bool enabled)
         ESP_LOGW(TAG, "set AI capture observer failed: %s", esp_err_to_name(ret));
     } else {
         ESP_LOGI(TAG, "AI Chat microphone uplink %s", enabled ? "enabled" : "disabled");
+        if (enabled) {
+            /* Cloud ASR/VAD owns utterance boundaries. Dropping quiet PCM here
+             * creates timestamp holes and clips low-energy word onsets/tails. */
+            ESP_LOGI(TAG, "AI Chat uplink mode: continuous pcm, cloud vad");
+        }
     }
     return ret;
 }
@@ -2658,6 +2818,7 @@ static void ai_chat_handle_event(tirtc_conn_t conn, const ai_chat_event_t *event
         xSemaphoreGive(s_lock);
 
         ai_chat_start_heartbeat_once(heartbeat_generation);
+        media_sink_set_remote_audio_talkspurt(false);
         (void)ai_chat_media_set_uplink_enabled(listening);
         ai_chat_timeline_mark(heartbeat_generation, AI_CHAT_TIMELINE_START_OK);
         ai_chat_timeline_log(heartbeat_generation);
@@ -2691,6 +2852,12 @@ static void ai_chat_handle_event(tirtc_conn_t conn, const ai_chat_event_t *event
             ai_chat_set_state_locked(s_ai.state, "rest requested");
         }
         xSemaphoreGive(s_lock);
+        if (rest_hint) {
+            /* The service can close RTC before round_end reaches this worker.
+             * Preserve queued TTS PCM now so transport teardown cannot truncate
+             * the last syllable before the application drains the speaker. */
+            tirtc_session_preserve_remote_media_on_disconnect(conn, true);
+        }
         if (should_log_dialog) {
             ESP_LOGI(DIALOG_TAG,
                      "%s: %s",
@@ -2698,12 +2865,18 @@ static void ai_chat_handle_event(tirtc_conn_t conn, const ai_chat_event_t *event
                      dialog_text);
         }
         if (should_close_after_rest) {
-            ESP_LOGI(TAG, "AI Chat rest hint received, closing session");
-            (void)ai_chat_close();
+            esp_err_t close_ret = ai_chat_schedule_rest_close(conn);
+            if (close_ret != ESP_OK) {
+                ESP_LOGW(TAG,
+                         "schedule AI Chat rest close after caption failed: %s",
+                         esp_err_to_name(close_ret));
+                (void)ai_chat_close();
+            }
         }
         break;
     }
     case AI_CHAT_EVENT_ROUND_START:
+        media_sink_set_remote_audio_talkspurt(true);
         ESP_LOGI(TAG, "AI Chat round_start");
         xSemaphoreTake(s_lock, portMAX_DELAY);
         s_ai.cloud_speaking = true;
@@ -2714,22 +2887,29 @@ static void ai_chat_handle_event(tirtc_conn_t conn, const ai_chat_event_t *event
     {
         bool should_close_after_rest = false;
 
+        media_sink_set_remote_audio_talkspurt(false);
         ESP_LOGI(TAG, "AI Chat round_end");
         xSemaphoreTake(s_lock, portMAX_DELAY);
         s_ai.cloud_speaking = false;
         if (s_ai.resting_requested && s_ai.conn == conn) {
-            s_ai.resting_requested = false;
             should_close_after_rest = true;
         }
         ai_chat_set_state_locked(s_ai.state, "waiting input");
         xSemaphoreGive(s_lock);
         if (should_close_after_rest) {
-            ESP_LOGI(TAG, "AI Chat rest round ended, closing session");
-            (void)ai_chat_close();
+            esp_err_t close_ret = ai_chat_schedule_rest_close(conn);
+            if (close_ret != ESP_OK) {
+                ESP_LOGW(TAG,
+                         "schedule AI Chat rest close after round failed: %s",
+                         esp_err_to_name(close_ret));
+                (void)ai_chat_close();
+            }
         }
         break;
     }
     case AI_CHAT_EVENT_INTERRUPT:
+        tirtc_session_preserve_remote_media_on_disconnect(conn, false);
+        media_sink_set_remote_audio_talkspurt(false);
         tirtc_session_flush_remote_media();
         xSemaphoreTake(s_lock, portMAX_DELAY);
         s_ai.cloud_speaking = false;
@@ -2867,21 +3047,32 @@ static void ai_chat_on_connection_error(tirtc_conn_t conn, int error, void *ctx)
 {
     (void)ctx;
     bool mine = false;
+    bool preserve_remote_audio = false;
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     mine = conn != NULL && conn == s_ai.conn;
     if (mine) {
+        preserve_remote_audio = s_rest_close_pending || s_ai.resting_requested;
         s_ai.conn = NULL;
         s_ai.last_error = error;
         s_ai.listening = false;
-        s_ai.resting_requested = false;
-        ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "connection error");
+        s_ai.cloud_speaking = false;
+        if (preserve_remote_audio) {
+            ai_chat_set_state_locked(AI_CHAT_STATE_STOPPING, "draining remote audio");
+        } else {
+            s_ai.resting_requested = false;
+            ai_chat_set_state_locked(AI_CHAT_STATE_ERROR, "connection error");
+        }
     }
     xSemaphoreGive(s_lock);
 
     if (mine) {
-        ai_chat_media_stop(conn);
-        tirtc_session_flush_remote_media();
+        if (preserve_remote_audio) {
+            ai_chat_media_stop_uplink_for_remote_drain(conn);
+        } else {
+            ai_chat_media_stop(conn);
+            tirtc_session_flush_remote_media();
+        }
     }
 }
 
@@ -2889,21 +3080,31 @@ static void ai_chat_on_disconnected(tirtc_conn_t conn, void *ctx)
 {
     (void)ctx;
     bool mine = false;
+    bool preserve_remote_audio = false;
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     mine = conn != NULL && conn == s_ai.conn;
     if (mine) {
+        preserve_remote_audio = s_rest_close_pending || s_ai.resting_requested;
         s_ai.conn = NULL;
         s_ai.cloud_speaking = false;
         s_ai.listening = false;
-        s_ai.resting_requested = false;
-        ai_chat_set_state_locked(AI_CHAT_STATE_IDLE, "disconnected");
+        if (preserve_remote_audio) {
+            ai_chat_set_state_locked(AI_CHAT_STATE_STOPPING, "draining remote audio");
+        } else {
+            s_ai.resting_requested = false;
+            ai_chat_set_state_locked(AI_CHAT_STATE_IDLE, "disconnected");
+        }
     }
     xSemaphoreGive(s_lock);
 
     if (mine) {
-        ai_chat_media_stop(conn);
-        tirtc_session_flush_remote_media();
+        if (preserve_remote_audio) {
+            ai_chat_media_stop_uplink_for_remote_drain(conn);
+        } else {
+            ai_chat_media_stop(conn);
+            tirtc_session_flush_remote_media();
+        }
     }
 }
 
@@ -3070,6 +3271,7 @@ esp_err_t ai_chat_close(void)
     xSemaphoreGive(s_lock);
 
     if (conn != NULL) {
+        tirtc_session_preserve_remote_media_on_disconnect(conn, false);
         tirtc_session_suppress_remote_media(conn, true);
     }
 
@@ -3195,6 +3397,8 @@ void ai_chat_get_status(ai_chat_status_t *status)
 
 void ai_chat_get_snapshot(ai_chat_snapshot_t *snapshot)
 {
+    media_sink_audio_drain_status_t playback = {0};
+
     if (snapshot == NULL) {
         return;
     }
@@ -3207,12 +3411,18 @@ void ai_chat_get_snapshot(ai_chat_snapshot_t *snapshot)
     uint32_t tx_frames = 0;
     uint32_t tx_failures = 0;
     ai_chat_media_get_stats(&tx_frames, &tx_failures);
+    (void)media_sink_remote_audio_is_drained(&playback);
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     snapshot->state = s_ai.state;
     snapshot->active = s_ai.state == AI_CHAT_STATE_IN_SESSION;
     snapshot->listening = s_ai.state == AI_CHAT_STATE_IN_SESSION && s_ai.listening;
     snapshot->cloud_speaking = s_ai.cloud_speaking;
+    snapshot->output_playback_pending =
+        snapshot->state != AI_CHAT_STATE_IDLE &&
+        (playback.playback_active ||
+         playback.queued_packets > 0U ||
+         playback.buffered_ms > 0U);
     snapshot->tx_audio_frames = tx_frames;
     snapshot->tx_audio_failures = tx_failures;
     snapshot->rx_commands = s_ai.rx_commands;

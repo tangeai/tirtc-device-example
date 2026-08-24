@@ -161,6 +161,13 @@ def build_extra_assets(specs: list[dict], start_index: int, extra_dir: Path) -> 
             image = Image.open(image_path).convert("RGBA")
             width, height = image.size
             alpha = image.getchannel("A")
+            alpha_min, alpha_max = alpha.getextrema()
+            if alpha_min == alpha_max:
+                raise RuntimeError(
+                    f"extra text asset has no usable transparency: {image_path} "
+                    f"(alpha={alpha_min}); export the Figma text node directly, "
+                    "not a screenshot with the canvas background"
+                )
             if hasattr(alpha, "get_flattened_data"):
                 pixels = list(alpha.get_flattened_data())
             else:

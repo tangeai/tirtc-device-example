@@ -26,6 +26,13 @@ typedef enum {
 } tirtc_session_mode_t;
 
 typedef enum {
+    /* Browser IPC talkback keeps the deployed 8 kHz A-law wire contract. */
+    TIRTC_SESSION_BUILTIN_AUDIO_FORMAT_ALAW_8K = 0,
+    /* Device-to-device calls can preserve the native 16 kHz PCM capture. */
+    TIRTC_SESSION_BUILTIN_AUDIO_FORMAT_PCM_16K,
+} tirtc_session_builtin_audio_format_t;
+
+typedef enum {
     TIRTC_SESSION_STATE_STOPPED = 0,
     TIRTC_SESSION_STATE_STARTING,
     TIRTC_SESSION_STATE_READY,
@@ -34,6 +41,12 @@ typedef enum {
     TIRTC_SESSION_STATE_DISCONNECTING,
     TIRTC_SESSION_STATE_ERROR,
 } tirtc_session_state_t;
+
+typedef enum {
+    TIRTC_SESSION_LINK_MODE_DEFAULT = 0,
+    TIRTC_SESSION_LINK_MODE_DIRECT_ONLY = 1,
+    TIRTC_SESSION_LINK_MODE_RELAY_ONLY = 8,
+} tirtc_session_link_mode_t;
 
 typedef struct {
     bool connected;
@@ -62,6 +75,7 @@ typedef bool (*tirtc_session_message_cb_t)(tirtc_conn_t conn,
                                            uint32_t data_len,
                                            void *ctx);
 typedef void (*tirtc_session_connection_error_cb_t)(tirtc_conn_t conn, int error, void *ctx);
+typedef void (*tirtc_session_connection_accepted_cb_t)(tirtc_conn_t conn, void *ctx);
 typedef void (*tirtc_session_disconnected_cb_t)(tirtc_conn_t conn, void *ctx);
 typedef void (*tirtc_session_start_error_cb_t)(int error,
                                                const char *device_id,
@@ -71,6 +85,7 @@ typedef void (*tirtc_session_start_error_cb_t)(int error,
 typedef struct {
     tirtc_session_command_cb_t on_command;
     tirtc_session_message_cb_t on_message;
+    tirtc_session_connection_accepted_cb_t on_connection_accepted;
     tirtc_session_connection_error_cb_t on_connection_error;
     tirtc_session_disconnected_cb_t on_disconnected;
     tirtc_session_start_error_cb_t on_start_error;
@@ -83,6 +98,7 @@ typedef struct {
     esp_err_t (*prepare_playback_path)(void *ctx);
     esp_err_t (*submit_remote_audio)(uint8_t media,
                                      uint8_t flags,
+                                     uint32_t source_timestamp_ms,
                                      const uint8_t *data,
                                      size_t data_len,
                                      size_t *playback_data_len,
@@ -137,6 +153,16 @@ typedef struct {
     uint32_t tx_failures;
     uint32_t tx_video_frames;
     uint32_t tx_audio_frames;
+    uint32_t tx_audio_queue_depth_packets;
+    uint32_t tx_audio_queue_high_water_packets;
+    uint32_t tx_audio_queue_pressure_drops;
+    uint32_t tx_audio_queue_stale_drops;
+    uint32_t tx_audio_queue_generation_drops;
+    uint32_t tx_audio_sdk_lock_failures;
+    uint32_t tx_audio_sdk_lock_wait_last_us;
+    uint32_t tx_audio_sdk_lock_wait_max_us;
+    uint32_t tx_audio_sdk_send_last_us;
+    uint32_t tx_audio_sdk_send_max_us;
     uint32_t rx_video_frames;
     uint32_t rx_audio_frames;
     uint32_t rx_message_frames;
@@ -190,6 +216,7 @@ esp_err_t tirtc_session_connect_peer_with_token(const char *remote_device_id,
 esp_err_t tirtc_session_restart(void);
 esp_err_t tirtc_session_stop(void);
 esp_err_t tirtc_session_disconnect(void);
+bool tirtc_session_get_active_connection(tirtc_conn_t *conn);
 int tirtc_session_disconnect_connection(tirtc_conn_t conn);
 esp_err_t tirtc_session_accept_incoming_call(void);
 esp_err_t tirtc_session_reject_incoming_call(void);
@@ -198,8 +225,10 @@ void tirtc_session_on_network_state_changed(const tirtc_session_network_state_t 
 esp_err_t tirtc_session_set_local_video_send_enabled(bool enabled);
 esp_err_t tirtc_session_set_local_audio_send_enabled(bool enabled);
 esp_err_t tirtc_session_set_remote_audio_stream_id(uint8_t stream_id);
+esp_err_t tirtc_session_set_builtin_audio_format(tirtc_session_builtin_audio_format_t format);
 void tirtc_session_set_next_connection_auto_media(bool enabled);
 void tirtc_session_set_next_connection_defer_media(bool enabled);
+esp_err_t tirtc_session_allow_deferred_call_media(tirtc_conn_t conn);
 esp_err_t tirtc_session_track_external_connection(tirtc_conn_t conn, bool auto_media);
 esp_err_t tirtc_session_send_command_raw(tirtc_conn_t conn,
                                          uint32_t cmdw,
@@ -215,9 +244,15 @@ esp_err_t tirtc_session_subscribe_audio(tirtc_conn_t conn, uint8_t stream_id);
 esp_err_t tirtc_session_unsubscribe_audio(tirtc_conn_t conn, uint8_t stream_id);
 void tirtc_session_flush_remote_media(void);
 void tirtc_session_suppress_remote_media(tirtc_conn_t conn, bool suppress);
+void tirtc_session_preserve_remote_media_on_disconnect(tirtc_conn_t conn, bool preserve);
 esp_err_t tirtc_session_send_stream_message(const void *data, size_t data_len);
 esp_err_t tirtc_session_send_audio_frame(tirtc_conn_t conn, const TIRTCFRAMEINFO *frame_info, const void *data);
 esp_err_t tirtc_session_get_send_buffer_used(tirtc_conn_t conn, size_t *used);
+esp_err_t tirtc_session_get_active_send_buffer_used(size_t *used);
+esp_err_t tirtc_session_set_sdk_log_level(int level);
+int tirtc_session_get_sdk_log_level(void);
+esp_err_t tirtc_session_set_link_mode(tirtc_session_link_mode_t mode);
+tirtc_session_link_mode_t tirtc_session_get_link_mode(void);
 esp_err_t tirtc_session_send_captured_audio_frame(tirtc_conn_t conn,
                                                   const uint8_t *data,
                                                   size_t data_len,
@@ -228,6 +263,10 @@ esp_err_t tirtc_session_send_test_audio_pcm_frame(const uint8_t *data,
                                                   size_t data_len,
                                                   const tirtc_session_audio_format_t *format,
                                                   uint64_t pts_us);
+esp_err_t tirtc_session_send_test_audio_alaw_frame(const uint8_t *data,
+                                                   size_t data_len,
+                                                   const tirtc_session_audio_format_t *format,
+                                                   uint64_t pts_us);
 esp_err_t tirtc_session_set_external_audio_call_active(tirtc_conn_t conn, bool active);
 esp_err_t tirtc_session_use_builtin_media(void);
 esp_err_t tirtc_session_set_session_mode(tirtc_session_mode_t session_mode);

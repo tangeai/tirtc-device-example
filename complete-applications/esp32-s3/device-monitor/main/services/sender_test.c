@@ -1,4 +1,4 @@
-﻿#include "sender_test.h"
+#include "sender_test.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -8,15 +8,13 @@
 
 #include "esp_log.h"
 #include "esp_rom_sys.h"
-#include "esp_spiffs.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
 
-#include "device_video_esp32s3.h"
 #include "virtual_audio_source.h"
-#include "virtual_video_source.h"
 #include "network.h"
 #include "platform_task_reaper.h"
 #include "tirtc_session.h"
@@ -34,10 +32,60 @@ static const char *TAG = "sender_test";
 #define SENDER_TEST_AUDIO_WAIT_LOG_US     2000000ULL
 #define SENDER_TEST_AUDIO_CATCH_UP_BURST  12U
 #define SENDER_TEST_AUDIO_JANK_THRESHOLD_US 30000ULL
+#define SENDER_TEST_OK                    VIRTUAL_AUDIO_OK
+#define SENDER_TEST_ERR_INVALID_ARG       VIRTUAL_AUDIO_ERR_INVALID_ARG
+#define SENDER_TEST_ERR_IO                VIRTUAL_AUDIO_ERR_IO
+
+#define SENDER_TEST_STAGE_LEN 64
+
+typedef struct {
+    uint64_t started_at_ms;
+    uint64_t ended_at_ms;
+    uint64_t bytes_sent;
+    uint64_t frames_sent;
+    uint64_t send_failures;
+    int last_error_code;
+    char last_error_stage[SENDER_TEST_STAGE_LEN];
+} sender_test_stats_t;
+
+static uint64_t sender_test_now_ms(void)
+{
+    return (uint64_t)(esp_timer_get_time() / 1000LL);
+}
+
+static void sender_test_sleep_ms(int ms)
+{
+    if (ms <= 0) {
+        return;
+    }
+
+    TickType_t ticks = pdMS_TO_TICKS((uint32_t)ms);
+    vTaskDelay(ticks > 0 ? ticks : 1);
+}
+
+static void sender_test_stats_init(sender_test_stats_t *stats)
+{
+    if (stats == NULL) {
+        return;
+    }
+
+    memset(stats, 0, sizeof(*stats));
+    stats->started_at_ms = sender_test_now_ms();
+}
+
+static void sender_test_stats_mark_error(sender_test_stats_t *stats, int code, const char *stage)
+{
+    if (stats == NULL) {
+        return;
+    }
+
+    stats->last_error_code = code;
+    strlcpy(stats->last_error_stage, stage != NULL ? stage : "", sizeof(stats->last_error_stage));
+}
 
 typedef struct {
     virtual_audio_source_t source;
-    device_video_sender_stats_t stats;
+    sender_test_stats_t stats;
     uint64_t next_send_at_us;
     uint64_t media_pts_us;
     uint64_t last_sent_media_pts_us;
@@ -57,13 +105,15 @@ static portMUX_TYPE s_sender_test_lock = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t s_sender_test_task;
 static bool s_sender_test_initialized;
 static bool s_sender_test_running;
-static bool s_sender_test_spiffs_ready;
 static bool s_sender_test_restart_requested;
 static bool s_sender_test_stop_requested;
-static bool s_sender_test_force_video_restart;
 static bool s_sender_test_force_audio_restart;
+static bool s_sender_test_use_alaw;
 static sender_test_mode_t s_sender_test_requested_mode = SENDER_TEST_MODE_NONE;
 static char s_sender_test_status[SENDER_TEST_STATUS_MAX] = "Idle";
+static EXT_RAM_BSS_ATTR sender_test_stats_t s_sender_test_live_stats;
+static EXT_RAM_BSS_ATTR uint32_t s_sender_test_last_sequence;
+static EXT_RAM_BSS_ATTR bool s_sender_test_last_sequence_valid;
 
 static void sender_test_task_entry(void *ctx);
 
@@ -151,24 +201,7 @@ static BaseType_t sender_test_create_task(TaskHandle_t *task_handle)
 
 static const char *sender_test_mode_label(sender_test_mode_t mode)
 {
-    switch (mode) {
-    case SENDER_TEST_MODE_AUDIO:
-        return "Audio";
-    case SENDER_TEST_MODE_VIDEO:
-        return "Video";
-    default:
-        return "Sender";
-    }
-}
-
-static const char *sender_test_mode_input_path(sender_test_mode_t mode)
-{
-    switch (mode) {
-    case SENDER_TEST_MODE_VIDEO:
-        return VIRTUAL_VIDEO_SOURCE_DEFAULT_PATH;
-    default:
-        return "";
-    }
+    return mode == SENDER_TEST_MODE_AUDIO ? "Audio" : "Sender";
 }
 
 static uint64_t sender_test_now_us(void)
@@ -255,17 +288,6 @@ static bool sender_test_restart_pending(void)
     return restart_requested;
 }
 
-static bool sender_test_consume_video_restart_request(void)
-{
-    bool restart_requested = false;
-
-    taskENTER_CRITICAL(&s_sender_test_lock);
-    restart_requested = s_sender_test_force_video_restart;
-    s_sender_test_force_video_restart = false;
-    taskEXIT_CRITICAL(&s_sender_test_lock);
-    return restart_requested;
-}
-
 static bool sender_test_consume_audio_restart_request(void)
 {
     bool restart_requested = false;
@@ -277,73 +299,9 @@ static bool sender_test_consume_audio_restart_request(void)
     return restart_requested;
 }
 
-static bool sender_test_input_exists(const char *path)
-{
-    FILE *file = NULL;
-
-    if (path == NULL || path[0] == '\0') {
-        return false;
-    }
-
-    file = fopen(path, "rb");
-    if (file == NULL) {
-        return false;
-    }
-
-    fclose(file);
-    return true;
-}
-
-static void sender_test_update_ready_status_locked(bool has_video, bool has_audio)
-{
-    if (has_video && has_audio) {
-        sender_test_set_status_locked("Ready: /spiffs/send_video.h264 + virtual audio");
-    } else if (!has_video) {
-        sender_test_set_status_locked("Missing: /spiffs/send_video.h264");
-    } else {
-        sender_test_set_status_locked("Virtual audio unavailable");
-    }
-}
-
-static esp_err_t sender_test_mount_spiffs(void)
-{
-    bool has_video = false;
-    bool has_audio = false;
-    esp_vfs_spiffs_conf_t conf = {
-        .base_path = "/spiffs",
-        .partition_label = "storage",
-        .max_files = 4,
-        .format_if_mount_failed = false,
-    };
-    esp_err_t ret = esp_vfs_spiffs_register(&conf);
-
-    if (ret == ESP_ERR_INVALID_STATE) {
-        ret = ESP_OK;
-    }
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "mount spiffs failed: %s", esp_err_to_name(ret));
-        taskENTER_CRITICAL(&s_sender_test_lock);
-        s_sender_test_spiffs_ready = false;
-        sender_test_set_status_locked("SPIFFS mount failed");
-        taskEXIT_CRITICAL(&s_sender_test_lock);
-        return ret;
-    }
-
-    has_video = sender_test_input_exists(VIRTUAL_VIDEO_SOURCE_DEFAULT_PATH);
-    has_audio = true;
-
-    taskENTER_CRITICAL(&s_sender_test_lock);
-    s_sender_test_spiffs_ready = true;
-    sender_test_update_ready_status_locked(has_video, has_audio);
-    taskEXIT_CRITICAL(&s_sender_test_lock);
-    return ESP_OK;
-}
-
 static esp_err_t sender_test_validate_mode(sender_test_mode_t mode)
 {
-    const char *input_path = sender_test_mode_input_path(mode);
-
-    if (mode != SENDER_TEST_MODE_VIDEO && mode != SENDER_TEST_MODE_AUDIO) {
+    if (mode != SENDER_TEST_MODE_AUDIO) {
         sender_test_set_status("Invalid test mode");
         return ESP_ERR_INVALID_ARG;
     }
@@ -353,19 +311,20 @@ static esp_err_t sender_test_validate_mode(sender_test_mode_t mode)
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (!s_sender_test_spiffs_ready) {
-        esp_err_t mount_ret = sender_test_mount_spiffs();
-        if (mount_ret != ESP_OK) {
-            return mount_ret;
-        }
-    }
-
-    if (mode == SENDER_TEST_MODE_VIDEO && !sender_test_input_exists(input_path)) {
-        sender_test_set_status("Missing: %s", input_path);
-        return ESP_ERR_NOT_FOUND;
-    }
-
     return ESP_OK;
+}
+
+static void sender_test_publish_audio_progress(const sender_test_audio_session_t *session)
+{
+    if (session == NULL) {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_sender_test_lock);
+    s_sender_test_live_stats = session->stats;
+    s_sender_test_last_sequence = session->source.last_sequence;
+    s_sender_test_last_sequence_valid = session->source.last_sequence_valid;
+    taskEXIT_CRITICAL(&s_sender_test_lock);
 }
 
 static void sender_test_audio_reset_source(sender_test_audio_session_t *session)
@@ -383,157 +342,21 @@ static void sender_test_audio_reset_source(sender_test_audio_session_t *session)
 static int sender_test_audio_reopen_source(sender_test_audio_session_t *session)
 {
     if (session == NULL) {
-        return DEVICE_VIDEO_ERR_INVALID_ARG;
+        return SENDER_TEST_ERR_INVALID_ARG;
     }
 
     virtual_audio_source_close(&session->source);
 
     int rc = virtual_audio_source_open(&session->source);
-    if (rc != DEVICE_VIDEO_OK) {
-        device_video_stats_mark_error(&session->stats, rc, "audio_reopen_virtual");
+    if (rc != SENDER_TEST_OK) {
+        sender_test_stats_mark_error(&session->stats, rc, "audio_reopen_virtual");
         return rc;
     }
 
     session->packet_pending = 0;
     session->pending_packet_duration_us = 0U;
     sender_test_audio_reset_timing(session);
-    return DEVICE_VIDEO_OK;
-}
-
-static int sender_test_run_video(device_video_sender_stats_t *stats)
-{
-    device_video_config_t config = {0};
-    device_video_h264_file_t source = {0};
-    bool restart_from_head = false;
-    uint64_t next_frame_at_us = 0U;
-    int rc = DEVICE_VIDEO_OK;
-
-    if (stats == NULL) {
-        return DEVICE_VIDEO_ERR_INVALID_ARG;
-    }
-
-    device_video_stats_init(stats);
-    virtual_video_source_prepare_config(&config);
-
-    rc = device_video_source_file_open(config.input_path, &source);
-    if (rc != DEVICE_VIDEO_OK) {
-        device_video_stats_mark_error(stats, rc, "video_open_file");
-        return rc;
-    }
-
-    ESP_LOGI(TAG,
-             "sender test video feeder started: input=%s fps=%d interval_us=%u loop=%d",
-             config.input_path,
-             config.fps,
-             (unsigned)config.frame_interval_us,
-             config.loop);
-
-    while (!sender_test_restart_pending()) {
-        tirtc_session_stats_t rtc_stats = {0};
-        const uint8_t *data_ptr = NULL;
-        size_t data_len = 0U;
-        int is_key_frame = 0;
-        uint64_t now_us = sender_test_now_us();
-
-        tirtc_session_get_stats(&rtc_stats);
-        if (!rtc_stats.sdk_started) {
-            sender_test_set_status("Video ready, waiting RTC");
-            restart_from_head = true;
-            next_frame_at_us = 0U;
-            device_video_sleep_ms(SENDER_TEST_WAIT_POLL_MS);
-            continue;
-        }
-        if (!rtc_stats.active_connection || !rtc_stats.call_active) {
-            sender_test_set_status("Video ready, waiting connection");
-            restart_from_head = true;
-            next_frame_at_us = 0U;
-            device_video_sleep_ms(SENDER_TEST_WAIT_POLL_MS);
-            continue;
-        }
-        if (!rtc_stats.local_video_send_enabled) {
-            sender_test_set_status("Video ready, waiting video enable");
-            restart_from_head = true;
-            next_frame_at_us = 0U;
-            device_video_sleep_ms(SENDER_TEST_WAIT_POLL_MS);
-            continue;
-        }
-
-        if (sender_test_consume_video_restart_request()) {
-            restart_from_head = true;
-            next_frame_at_us = 0U;
-        }
-
-        if (restart_from_head) {
-            device_video_source_file_reset(&source);
-            next_frame_at_us = 0U;
-            restart_from_head = false;
-        }
-
-        if (config.frame_interval_us > 0U) {
-            if (next_frame_at_us == 0U) {
-                next_frame_at_us = now_us;
-            }
-            if (now_us < next_frame_at_us) {
-                uint64_t wait_us = next_frame_at_us - now_us;
-                device_video_sleep_ms((int)((wait_us + 999U) / 1000U));
-                continue;
-            }
-        }
-
-        rc = device_video_source_file_next_frame(&source, &data_ptr, &data_len, &is_key_frame);
-        if (rc == DEVICE_VIDEO_ERR_EOF && config.loop) {
-            device_video_source_file_reset(&source);
-            next_frame_at_us = 0U;
-            continue;
-        }
-        if (rc != DEVICE_VIDEO_OK) {
-            device_video_stats_mark_error(stats, rc, "video_next_frame");
-            break;
-        }
-
-        uint64_t frame_pts_us = next_frame_at_us != 0U ? next_frame_at_us : now_us;
-
-        TIRTCFRAMEINFO frame_info = {
-            .stream_id = 0,
-            .media = TIRTC_VIDEO_H264,
-            .flags = is_key_frame ? TIRTC_FRAME_FLAG_KEY_FRAME : 0,
-            .reserved = 0,
-            .ts = (uint32_t)(frame_pts_us / 1000ULL),
-            .length = (uint32_t)data_len,
-        };
-        esp_err_t send_ret = tirtc_session_send_test_video_frame(&frame_info, data_ptr);
-        if (send_ret == ESP_ERR_INVALID_STATE) {
-            sender_test_set_status("Video ready, waiting RTC gate");
-            restart_from_head = true;
-            next_frame_at_us = 0U;
-            device_video_sleep_ms(SENDER_TEST_WAIT_POLL_MS);
-            continue;
-        }
-        if (send_ret == ESP_ERR_TIMEOUT) {
-            device_video_sleep_ms(SENDER_TEST_WAIT_POLL_MS);
-            continue;
-        }
-        if (send_ret != ESP_OK) {
-            stats->send_failures++;
-            device_video_sleep_ms(SENDER_TEST_WAIT_POLL_MS);
-            continue;
-        }
-
-        if (stats->frames_sent == 0U) {
-            sender_test_set_status("Video uploading...");
-        }
-        stats->frames_sent++;
-        stats->bytes_sent += data_len;
-        if (config.frame_interval_us > 0U) {
-            next_frame_at_us = frame_pts_us + (uint64_t)config.frame_interval_us;
-        } else {
-            next_frame_at_us = 0U;
-        }
-    }
-
-    stats->ended_at_ms = device_video_now_ms();
-    device_video_source_file_close(&source);
-    return rc;
+    return SENDER_TEST_OK;
 }
 
 static int sender_test_audio_send_one_packet(sender_test_audio_session_t *session)
@@ -543,11 +366,11 @@ static int sender_test_audio_send_one_packet(sender_test_audio_session_t *sessio
     const tirtc_session_audio_format_t *format = NULL;
     uint64_t now_us = 0U;
     uint64_t scheduled_send_at_us = 0U;
-    int rc = DEVICE_VIDEO_OK;
+    int rc = SENDER_TEST_OK;
     tirtc_session_stats_t rtc_stats = {0};
 
     if (session == NULL) {
-        return DEVICE_VIDEO_ERR_INVALID_ARG;
+        return SENDER_TEST_ERR_INVALID_ARG;
     }
 
     now_us = sender_test_now_us();
@@ -565,7 +388,7 @@ static int sender_test_audio_send_one_packet(sender_test_audio_session_t *sessio
     }
 
     if (session->packet_pending && now_us < session->next_send_at_us) {
-        return DEVICE_VIDEO_OK;
+        return SENDER_TEST_OK;
     }
 
     if (!session->packet_pending) {
@@ -574,14 +397,14 @@ static int sender_test_audio_send_one_packet(sender_test_audio_session_t *sessio
                                               &data_len,
                                               &format,
                                               &session->pending_packet_duration_us);
-        if (rc == DEVICE_VIDEO_ERR_IO) {
+        if (rc == SENDER_TEST_ERR_IO) {
             if (sender_test_should_log_audio_wait(session, now_us)) {
                 ESP_LOGW(TAG, "sender test virtual audio source error: reopen and retry");
             }
             return sender_test_audio_reopen_source(session);
         }
-        if (rc != DEVICE_VIDEO_OK) {
-            device_video_stats_mark_error(&session->stats, rc, "audio_next_packet");
+        if (rc != SENDER_TEST_OK) {
+            sender_test_stats_mark_error(&session->stats, rc, "audio_next_packet");
             return rc;
         }
         session->first_packet_read_logged = 1;
@@ -595,7 +418,7 @@ static int sender_test_audio_send_one_packet(sender_test_audio_session_t *sessio
     }
 
     if (now_us < session->next_send_at_us) {
-        return DEVICE_VIDEO_OK;
+        return SENDER_TEST_OK;
     }
 
     scheduled_send_at_us = session->next_send_at_us;
@@ -603,10 +426,19 @@ static int sender_test_audio_send_one_packet(sender_test_audio_session_t *sessio
     data_len = session->source.packet_length;
     format = format != NULL ? format : &session->source.format;
 
-    esp_err_t send_ret = tirtc_session_send_test_audio_pcm_frame(data_ptr,
-                                                                 data_len,
-                                                                 format,
-                                                                 session->media_pts_us);
+    bool use_alaw = false;
+    taskENTER_CRITICAL(&s_sender_test_lock);
+    use_alaw = s_sender_test_use_alaw;
+    taskEXIT_CRITICAL(&s_sender_test_lock);
+    esp_err_t send_ret = use_alaw ?
+        tirtc_session_send_test_audio_alaw_frame(data_ptr,
+                                                 data_len,
+                                                 format,
+                                                 session->media_pts_us) :
+        tirtc_session_send_test_audio_pcm_frame(data_ptr,
+                                                data_len,
+                                                format,
+                                                session->media_pts_us);
     if (send_ret == ESP_ERR_INVALID_STATE) {
         tirtc_session_get_stats(&rtc_stats);
         if (sender_test_should_log_audio_wait(session, now_us)) {
@@ -639,7 +471,7 @@ static int sender_test_audio_send_one_packet(sender_test_audio_session_t *sessio
                 session->next_send_at_us = scheduled_send_at_us;
             }
         }
-        return DEVICE_VIDEO_OK;
+        return SENDER_TEST_OK;
     }
     if (send_ret == ESP_ERR_TIMEOUT) {
         if (sender_test_should_log_audio_wait(session, now_us)) {
@@ -654,7 +486,7 @@ static int sender_test_audio_send_one_packet(sender_test_audio_session_t *sessio
         } else {
             session->next_send_at_us = scheduled_send_at_us;
         }
-        return DEVICE_VIDEO_OK;
+        return SENDER_TEST_OK;
     }
     if (send_ret != ESP_OK) {
         if (sender_test_should_log_audio_wait(session, now_us)) {
@@ -673,7 +505,7 @@ static int sender_test_audio_send_one_packet(sender_test_audio_session_t *sessio
         } else {
             session->next_send_at_us = scheduled_send_at_us;
         }
-        return DEVICE_VIDEO_OK;
+        return SENDER_TEST_OK;
     }
     if (!session->first_packet_sent_logged) {
         session->first_packet_sent_logged = 1;
@@ -691,27 +523,28 @@ static int sender_test_audio_send_one_packet(sender_test_audio_session_t *sessio
 
     session->stats.frames_sent++;
     session->stats.bytes_sent += data_len;
+    sender_test_publish_audio_progress(session);
     session->packet_pending = 0;
     session->packet_enqueued = 0;
     session->pending_send_failures = 0;
     session->next_send_at_us = scheduled_send_at_us + session->pending_packet_duration_us;
     session->media_pts_us += session->pending_packet_duration_us;
-    return DEVICE_VIDEO_OK;
+    return SENDER_TEST_OK;
 }
 
-static int sender_test_run_audio(device_video_sender_stats_t *stats)
+static int sender_test_run_audio(sender_test_stats_t *stats)
 {
     sender_test_audio_session_t session = {0};
-    int rc = DEVICE_VIDEO_OK;
+    int rc = SENDER_TEST_OK;
 
     if (stats == NULL) {
-        return DEVICE_VIDEO_ERR_INVALID_ARG;
+        return SENDER_TEST_ERR_INVALID_ARG;
     }
 
-    device_video_stats_init(&session.stats);
+    sender_test_stats_init(&session.stats);
     rc = virtual_audio_source_open(&session.source);
-    if (rc != DEVICE_VIDEO_OK) {
-        device_video_stats_mark_error(&session.stats, rc, "audio_open_virtual");
+    if (rc != SENDER_TEST_OK) {
+        sender_test_stats_mark_error(&session.stats, rc, "audio_open_virtual");
         *stats = session.stats;
         return rc;
     }
@@ -728,14 +561,14 @@ static int sender_test_run_audio(device_video_sender_stats_t *stats)
             sender_test_log_audio_jank_summary(&session, "rtc-stopped");
             sender_test_set_status("Audio ready, waiting RTC");
             sender_test_audio_reset_timing(&session);
-            device_video_sleep_ms(SENDER_TEST_WAIT_POLL_MS);
+            sender_test_sleep_ms(SENDER_TEST_WAIT_POLL_MS);
             continue;
         }
         if (!rtc_stats.active_connection || !rtc_stats.call_active) {
             sender_test_log_audio_jank_summary(&session, "disconnect");
             sender_test_set_status("Audio ready, waiting connection");
             sender_test_audio_reset_timing(&session);
-            device_video_sleep_ms(SENDER_TEST_WAIT_POLL_MS);
+            sender_test_sleep_ms(SENDER_TEST_WAIT_POLL_MS);
             continue;
         }
 
@@ -743,9 +576,9 @@ static int sender_test_run_audio(device_video_sender_stats_t *stats)
             uint32_t frames_before = session.stats.frames_sent;
 
             rc = sender_test_audio_send_one_packet(&session);
-            if (rc != DEVICE_VIDEO_OK) {
+            if (rc != SENDER_TEST_OK) {
                 if (session.stats.last_error_code == 0) {
-                    device_video_stats_mark_error(&session.stats, rc, "audio_session_run");
+                    sender_test_stats_mark_error(&session.stats, rc, "audio_session_run");
                 }
                 break;
             }
@@ -761,21 +594,22 @@ static int sender_test_run_audio(device_video_sender_stats_t *stats)
                  session.next_send_at_us != 0U &&
                  sender_test_now_us() >= session.next_send_at_us);
 
-        if (rc != DEVICE_VIDEO_OK) {
+        if (rc != SENDER_TEST_OK) {
             break;
         }
 
         if (packet_sent) {
             int wait_ms = sender_test_audio_sleep_until(session.next_send_at_us);
             if (wait_ms > 0) {
-                device_video_sleep_ms(wait_ms);
+                sender_test_sleep_ms(wait_ms);
             }
         } else {
-            device_video_sleep_ms(SENDER_TEST_WAIT_POLL_MS);
+            sender_test_sleep_ms(SENDER_TEST_WAIT_POLL_MS);
         }
     }
 
-    session.stats.ended_at_ms = device_video_now_ms();
+    session.stats.ended_at_ms = sender_test_now_ms();
+    sender_test_publish_audio_progress(&session);
     virtual_audio_source_close(&session.source);
     sender_test_log_audio_jank_summary(&session, "exit");
     *stats = session.stats;
@@ -784,7 +618,7 @@ static int sender_test_run_audio(device_video_sender_stats_t *stats)
 
 static void sender_test_finalize_run(sender_test_mode_t mode,
                                               int rc,
-                                              const device_video_sender_stats_t *stats,
+                                              const sender_test_stats_t *stats,
                                               bool restart_requested,
                                               bool stop_requested)
 {
@@ -799,8 +633,8 @@ static void sender_test_finalize_run(sender_test_mode_t mode,
         refresh_policy = true;
         if (stop_requested) {
             sender_test_set_status_locked("Stopped");
-        } else if (rc == DEVICE_VIDEO_OK) {
-            sender_test_set_status_locked(mode == SENDER_TEST_MODE_AUDIO ? "Audio exited" : "Video exited");
+        } else if (rc == SENDER_TEST_OK) {
+            sender_test_set_status_locked("Audio exited");
         } else if (stats != NULL) {
             snprintf(s_sender_test_status,
                      sizeof(s_sender_test_status),
@@ -823,15 +657,14 @@ static void sender_test_task_entry(void *ctx)
 
     while (true) {
         sender_test_mode_t mode = SENDER_TEST_MODE_NONE;
-        device_video_sender_stats_t stats = {0};
-        int rc = DEVICE_VIDEO_OK;
+        sender_test_stats_t stats = {0};
+        int rc = SENDER_TEST_OK;
         bool restart_requested = false;
         bool stop_requested = false;
 
         taskENTER_CRITICAL(&s_sender_test_lock);
         mode = s_sender_test_requested_mode;
         s_sender_test_restart_requested = false;
-        s_sender_test_force_video_restart = false;
         s_sender_test_force_audio_restart = false;
         taskEXIT_CRITICAL(&s_sender_test_lock);
 
@@ -839,23 +672,18 @@ static void sender_test_task_entry(void *ctx)
             esp_err_t init_ret = sender_test_init();
             if (init_ret != ESP_OK) {
                 sender_test_set_status("Sender init failed (%s)", esp_err_to_name(init_ret));
-                sender_test_finalize_run(mode, DEVICE_VIDEO_ERR_IO, &stats, false, false);
+                sender_test_finalize_run(mode, SENDER_TEST_ERR_IO, &stats, false, false);
                 break;
             }
         }
 
         if (sender_test_validate_mode(mode) != ESP_OK) {
-            sender_test_finalize_run(mode, DEVICE_VIDEO_ERR_INVALID_ARG, &stats, false, false);
+            sender_test_finalize_run(mode, SENDER_TEST_ERR_INVALID_ARG, &stats, false, false);
             break;
         }
 
-        if (mode == SENDER_TEST_MODE_VIDEO) {
-            sender_test_set_status("Video ready, waiting connection");
-            rc = sender_test_run_video(&stats);
-        } else {
-            sender_test_set_status("Audio ready, waiting connection");
-            rc = sender_test_run_audio(&stats);
-        }
+        sender_test_set_status("Audio ready, waiting connection");
+        rc = sender_test_run_audio(&stats);
 
         taskENTER_CRITICAL(&s_sender_test_lock);
         restart_requested = s_sender_test_restart_requested;
@@ -879,11 +707,7 @@ esp_err_t sender_test_init(void)
         return ESP_OK;
     }
 
-    esp_err_t ret = sender_test_mount_spiffs();
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
+    sender_test_set_status("Virtual audio ready");
     s_sender_test_initialized = true;
     return ESP_OK;
 }
@@ -893,7 +717,7 @@ esp_err_t sender_test_start(sender_test_mode_t mode)
     BaseType_t task_ok = pdFAIL;
     bool should_restart = false;
 
-    if (mode != SENDER_TEST_MODE_VIDEO && mode != SENDER_TEST_MODE_AUDIO) {
+    if (mode != SENDER_TEST_MODE_AUDIO) {
         sender_test_set_status("Invalid test mode");
         return ESP_ERR_INVALID_ARG;
     }
@@ -901,13 +725,14 @@ esp_err_t sender_test_start(sender_test_mode_t mode)
     taskENTER_CRITICAL(&s_sender_test_lock);
     s_sender_test_requested_mode = mode;
     s_sender_test_stop_requested = false;
+    memset(&s_sender_test_live_stats, 0, sizeof(s_sender_test_live_stats));
+    s_sender_test_last_sequence = 0U;
+    s_sender_test_last_sequence_valid = false;
     if (s_sender_test_task != NULL) {
         s_sender_test_running = true;
         s_sender_test_restart_requested = true;
         should_restart = true;
-        sender_test_set_status_locked(mode == SENDER_TEST_MODE_AUDIO
-                                               ? "Restarting audio source..."
-                                               : "Restarting video source...");
+        sender_test_set_status_locked("Restarting audio source...");
     } else {
         s_sender_test_running = true;
         s_sender_test_restart_requested = false;
@@ -935,6 +760,13 @@ esp_err_t sender_test_start(sender_test_mode_t mode)
     return ESP_OK;
 }
 
+void sender_test_set_audio_alaw(bool enabled)
+{
+    taskENTER_CRITICAL(&s_sender_test_lock);
+    s_sender_test_use_alaw = enabled;
+    taskEXIT_CRITICAL(&s_sender_test_lock);
+}
+
 void sender_test_stop(void)
 {
     bool refresh_policy = false;
@@ -943,7 +775,6 @@ void sender_test_stop(void)
     if (s_sender_test_task != NULL || s_sender_test_running) {
         s_sender_test_stop_requested = true;
         s_sender_test_restart_requested = false;
-        s_sender_test_force_video_restart = false;
         s_sender_test_force_audio_restart = false;
         s_sender_test_running = false;
         s_sender_test_requested_mode = SENDER_TEST_MODE_NONE;
@@ -971,15 +802,6 @@ bool sender_test_is_mode_active(sender_test_mode_t mode)
     return active;
 }
 
-void sender_test_request_video_restart(void)
-{
-    taskENTER_CRITICAL(&s_sender_test_lock);
-    if (s_sender_test_running && s_sender_test_requested_mode == SENDER_TEST_MODE_VIDEO) {
-        s_sender_test_force_video_restart = true;
-    }
-    taskEXIT_CRITICAL(&s_sender_test_lock);
-}
-
 void sender_test_request_audio_restart(void)
 {
     taskENTER_CRITICAL(&s_sender_test_lock);
@@ -999,7 +821,12 @@ void sender_test_get_snapshot(sender_test_snapshot_t *snapshot)
 
     taskENTER_CRITICAL(&s_sender_test_lock);
     snapshot->running = s_sender_test_running;
-    snapshot->spiffs_ready = s_sender_test_spiffs_ready;
+    snapshot->use_alaw = s_sender_test_use_alaw;
+    snapshot->frames_sent = s_sender_test_live_stats.frames_sent;
+    snapshot->bytes_sent = s_sender_test_live_stats.bytes_sent;
+    snapshot->send_failures = s_sender_test_live_stats.send_failures;
+    snapshot->last_sequence = s_sender_test_last_sequence;
+    snapshot->last_sequence_valid = s_sender_test_last_sequence_valid;
     strlcpy(snapshot->status, s_sender_test_status, sizeof(snapshot->status));
     taskEXIT_CRITICAL(&s_sender_test_lock);
 }

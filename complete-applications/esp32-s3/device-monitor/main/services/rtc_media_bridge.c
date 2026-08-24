@@ -2,8 +2,10 @@
 
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "esp_check.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
@@ -12,6 +14,7 @@
 #include "audio_device.h"
 #include "media_sink.h"
 #include "tiRTC.h"
+#include "virtual_audio_source.h"
 
 static const char *TAG = "rtc_media_bridge";
 
@@ -24,6 +27,44 @@ static bool s_remote_audio_first_logged;
 static bool s_remote_audio_unsupported_logged;
 static bool s_remote_audio_submit_failed_logged;
 static bool s_remote_audio_bad_length_logged;
+static EXT_RAM_BSS_ATTR rtc_media_bridge_audio_integrity_stats_t s_audio_integrity;
+
+static void rtc_media_bridge_note_audio_integrity(const uint8_t *data, size_t data_len)
+{
+    virtual_audio_packet_info_t info = {0};
+    int parse_ret = virtual_audio_source_parse_packet(data, data_len, &info);
+
+    if (parse_ret == VIRTUAL_AUDIO_ERR_NOT_TEST) {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_bridge_lock);
+    if (parse_ret != VIRTUAL_AUDIO_OK) {
+        s_audio_integrity.checksum_failures++;
+        taskEXIT_CRITICAL(&s_bridge_lock);
+        return;
+    }
+
+    if (!s_audio_integrity.sequence_valid) {
+        s_audio_integrity.sequence_valid = true;
+        s_audio_integrity.first_sequence = info.sequence;
+        s_audio_integrity.last_sequence = info.sequence;
+    } else {
+        int32_t delta = (int32_t)(info.sequence - s_audio_integrity.last_sequence);
+        if (delta == 0) {
+            s_audio_integrity.duplicate_frames++;
+        } else if (delta < 0) {
+            s_audio_integrity.reordered_frames++;
+        } else {
+            if (delta > 1) {
+                s_audio_integrity.missing_frames += (uint32_t)(delta - 1);
+            }
+            s_audio_integrity.last_sequence = info.sequence;
+        }
+    }
+    s_audio_integrity.valid_frames++;
+    taskEXIT_CRITICAL(&s_bridge_lock);
+}
 
 static const char *rtc_media_bridge_audio_media_name(uint8_t media)
 {
@@ -138,6 +179,7 @@ static bool rtc_media_bridge_map_tirtc_audio_format(uint8_t flags, audio_format_
 
 static esp_err_t rtc_media_bridge_submit_remote_audio(uint8_t media,
                                                       uint8_t flags,
+                                                      uint32_t source_timestamp_ms,
                                                       const uint8_t *data,
                                                       size_t data_len,
                                                       size_t *playback_data_len,
@@ -163,6 +205,8 @@ static esp_err_t rtc_media_bridge_submit_remote_audio(uint8_t media,
         }
         return ESP_ERR_INVALID_SIZE;
     }
+
+    rtc_media_bridge_note_audio_integrity(data, data_len);
 
     if (media == TIRTC_AUDIO_ALAW) {
         if (!rtc_media_bridge_map_tirtc_audio_format(flags, &format)) {
@@ -213,12 +257,18 @@ static esp_err_t rtc_media_bridge_submit_remote_audio(uint8_t media,
     }
 
     if (decoded_data != NULL) {
-        submit_ret = media_sink_submit_remote_audio_owned(decoded_data, pcm_data_len, &format);
+        submit_ret = media_sink_submit_remote_audio_owned(decoded_data,
+                                                          pcm_data_len,
+                                                          &format,
+                                                          source_timestamp_ms);
         if (submit_ret == ESP_OK) {
             decoded_data = NULL;
         }
     } else {
-        submit_ret = media_sink_submit_remote_audio(data, data_len, &format);
+        submit_ret = media_sink_submit_remote_audio(data,
+                                                    data_len,
+                                                    &format,
+                                                    source_timestamp_ms);
     }
 
     if (submit_ret == ESP_OK) {
@@ -249,13 +299,6 @@ static esp_err_t rtc_media_bridge_submit_remote_audio(uint8_t media,
     return submit_ret;
 }
 
-static esp_err_t rtc_media_bridge_submit_remote_video_jpeg(const uint8_t *data, size_t data_len, void *ctx)
-{
-    (void)ctx;
-
-    return media_sink_submit_remote_video_jpeg(data, data_len);
-}
-
 static void rtc_media_bridge_flush(void *ctx)
 {
     (void)ctx;
@@ -275,7 +318,7 @@ static const tirtc_session_media_ops_t s_rtc_media_bridge_ops = {
     .set_capture_enabled = rtc_media_bridge_set_capture_enabled,
     .prepare_playback_path = rtc_media_bridge_prepare_playback_path,
     .submit_remote_audio = rtc_media_bridge_submit_remote_audio,
-    .submit_remote_video_jpeg = rtc_media_bridge_submit_remote_video_jpeg,
+    .submit_remote_video_jpeg = NULL,
     .flush = rtc_media_bridge_flush,
 };
 
@@ -287,4 +330,23 @@ const tirtc_session_media_ops_t *rtc_media_bridge_get_ops(void)
 void *rtc_media_bridge_get_context(void)
 {
     return NULL;
+}
+
+void rtc_media_bridge_reset_audio_integrity_stats(void)
+{
+    taskENTER_CRITICAL(&s_bridge_lock);
+    memset(&s_audio_integrity, 0, sizeof(s_audio_integrity));
+    taskEXIT_CRITICAL(&s_bridge_lock);
+}
+
+void rtc_media_bridge_get_audio_integrity_stats(
+    rtc_media_bridge_audio_integrity_stats_t *stats)
+{
+    if (stats == NULL) {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_bridge_lock);
+    *stats = s_audio_integrity;
+    taskEXIT_CRITICAL(&s_bridge_lock);
 }

@@ -2,7 +2,6 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -35,6 +34,7 @@ enum {
     VOIP_REFRESH_TASK_STACK = 24 * 1024,
     VOIP_CALL_TASK_STACK = 24 * 1024,
     VOIP_TASK_PRIORITY = 5,
+    VOIP_CONTACT_REFRESH_INITIAL_CAPACITY = 8,
     DEVICE_CALLING_TIMEOUT_SEC = 30,
     ACTIVE_CALL_JOIN_WAIT_MS = (DEVICE_CALLING_TIMEOUT_SEC + 5) * 1000,
     ACTIVE_CALL_REQUEST_GUARD_MS = 12000,
@@ -183,25 +183,6 @@ static const char *json_string_any(cJSON *root, const char *name1, const char *n
     return value;
 }
 
-static const char *json_string_any4(cJSON *root,
-                                    const char *name1,
-                                    const char *name2,
-                                    const char *name3,
-                                    const char *name4)
-{
-    const char *names[] = {name1, name2, name3, name4};
-    if (root == NULL) {
-        return NULL;
-    }
-    for (size_t index = 0; index < sizeof(names) / sizeof(names[0]); ++index) {
-        const char *value = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, names[index]));
-        if (value != NULL && value[0] != '\0') {
-            return value;
-        }
-    }
-    return NULL;
-}
-
 static bool msg_type_is(const char *type,
                         const char *name1,
                         const char *name2,
@@ -213,28 +194,6 @@ static bool msg_type_is(const char *type,
     return (name1 != NULL && strcmp(type, name1) == 0) ||
            (name2 != NULL && strcmp(type, name2) == 0) ||
            (name3 != NULL && strcmp(type, name3) == 0);
-}
-
-static void extract_query_param(const char *url, const char *key, char *out, size_t out_size)
-{
-    if (url == NULL || key == NULL || out == NULL || out_size == 0) {
-        return;
-    }
-    out[0] = '\0';
-
-    char search[64];
-    snprintf(search, sizeof(search), "%s=", key);
-    const char *p = strstr(url, search);
-    if (p == NULL) {
-        return;
-    }
-    p += strlen(search);
-
-    size_t index = 0;
-    while (*p != '\0' && *p != '&' && index < out_size - 1) {
-        out[index++] = *p++;
-    }
-    out[index] = '\0';
 }
 
 static void get_runtime_device_id(char *device_id, size_t device_id_size)
@@ -288,31 +247,11 @@ static void get_runtime_mqtt_token(char *token, size_t token_size)
     token[0] = '\0';
 }
 
-static void remember_auth_user(const char *openid,
-                               const char *model_id,
-                               const char *wx_app_id,
-                               const char *source)
-{
-    char device_id[TIRTC_SESSION_DEVICE_ID_MAX_LEN] = {0};
-    uint32_t identity_generation = 0;
-    wechat_voip_auth_user_t user = {0};
-
-    xSemaphoreTake(s_voip.lock, portMAX_DELAY);
-    copy_str(device_id, sizeof(device_id), s_voip.device_id);
-    identity_generation = s_voip.channel_generation;
-    xSemaphoreGive(s_voip.lock);
-    copy_str(user.openid, sizeof(user.openid), openid);
-    copy_str(user.model_id, sizeof(user.model_id), model_id);
-    copy_str(user.app_id, sizeof(user.app_id), wx_app_id);
-    (void)wechat_voip_contacts_remember_for_device(device_id,
-                                                   identity_generation,
-                                                   &user,
-                                                   source);
-}
-
 typedef struct {
-    wechat_voip_auth_user_t callers[WECHAT_VOIP_CONTACT_MAX];
+    wechat_voip_auth_user_t *callers;
     size_t count;
+    size_t capacity;
+    esp_err_t error;
 } caller_refresh_ctx_t;
 
 static void caller_refresh_cb(const wechat_voip_auth_user_t *caller, void *ctx)
@@ -320,8 +259,24 @@ static void caller_refresh_cb(const wechat_voip_auth_user_t *caller, void *ctx)
     caller_refresh_ctx_t *refresh = (caller_refresh_ctx_t *)ctx;
     if (refresh == NULL || caller == NULL ||
         caller->openid[0] == '\0' || caller->model_id[0] == '\0' ||
-        refresh->count >= WECHAT_VOIP_CONTACT_MAX) {
+        refresh->error != ESP_OK) {
         return;
+    }
+
+    if (refresh->count == refresh->capacity) {
+        size_t next_capacity = refresh->capacity == 0U ?
+                               VOIP_CONTACT_REFRESH_INITIAL_CAPACITY :
+                               refresh->capacity * 2U;
+        wechat_voip_auth_user_t *next = heap_caps_realloc(
+            refresh->callers,
+            next_capacity * sizeof(*next),
+            WECHAT_VOIP_THING_PAYLOAD_CAPS);
+        if (next == NULL) {
+            refresh->error = ESP_ERR_NO_MEM;
+            return;
+        }
+        refresh->callers = next;
+        refresh->capacity = next_capacity;
     }
     refresh->callers[refresh->count++] = *caller;
 }
@@ -342,6 +297,7 @@ static esp_err_t refresh_callers(void)
     char device_id[TIRTC_SESSION_DEVICE_ID_MAX_LEN] = {0};
     uint32_t channel_generation = 0;
     caller_refresh_ctx_t refresh = {0};
+    esp_err_t ret = ESP_OK;
 
     /* Always go through device_online so a seven-day token expiry refreshes
      * once at the shared cache owner instead of reusing this service's copy. */
@@ -356,13 +312,17 @@ static esp_err_t refresh_callers(void)
     }
 
     int server_count = 0;
-    esp_err_t ret = wechat_voip_api_fetch_callers(thing_service_registry_voip_api_base(),
-                                                  token,
-                                                  caller_refresh_cb,
-                                                  &refresh,
-                                                  &server_count);
+    ret = wechat_voip_api_fetch_callers(thing_service_registry_voip_api_base(),
+                                        token,
+                                        caller_refresh_cb,
+                                        &refresh,
+                                        &server_count);
     if (ret != ESP_OK) {
-        return ret;
+        goto done;
+    }
+    if (refresh.error != ESP_OK) {
+        ret = refresh.error;
+        goto done;
     }
 
     xSemaphoreTake(s_voip.lock, portMAX_DELAY);
@@ -372,7 +332,8 @@ static esp_err_t refresh_callers(void)
     xSemaphoreGive(s_voip.lock);
     if (!current_channel) {
         ESP_LOGI(TAG, "drop stale caller refresh after identity/channel change");
-        return ESP_ERR_INVALID_STATE;
+        ret = ESP_ERR_INVALID_STATE;
+        goto done;
     }
 
     ret = wechat_voip_contacts_replace_for_device(device_id,
@@ -381,15 +342,23 @@ static esp_err_t refresh_callers(void)
                                                    refresh.count,
                                                    "callers");
     if (ret != ESP_OK) {
-        return ret;
+        goto done;
     }
     if ((size_t)server_count > refresh.count) {
         ESP_LOGW(TAG,
-                 "authorized caller list truncated for UI/cache: server=%d kept=%u",
+                 "authorized caller response contained unusable entries: server=%d valid=%u",
                  server_count,
                  (unsigned)refresh.count);
     }
-    return ESP_OK;
+
+done:
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        wechat_voip_contacts_note_sync_error_for_device(device_id,
+                                                         channel_generation,
+                                                         ret);
+    }
+    free(refresh.callers);
+    return ret;
 }
 
 static bool take_contact_remark_job(contact_remark_job_t *job)
@@ -738,32 +707,12 @@ static void handle_call_incoming(cJSON *payload)
                  esp_err_to_name(reject_ret));
         return;
     }
-    const char *peer_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(payload, "peer_id"));
-    const char *openid = json_string_any4(payload,
-                                          "wx_user_openid",
-                                          "wxa_user_openid",
-                                          "wx_open_id",
-                                          "wxa_open_id");
-    const char *model_id = json_string_any(payload, "wx_model_id", "wxa_model_id");
-    const char *app_id = json_string_any(payload, "wx_app_id", "wxa_app_id");
-    char model_from_peer[WECHAT_VOIP_MODEL_ID_MAX] = {0};
-    char app_from_peer[WECHAT_VOIP_APP_ID_MAX] = {0};
-    if ((model_id == NULL || model_id[0] == '\0') && peer_id != NULL) {
-        extract_query_param(peer_id, "x_wx_model_id", model_from_peer, sizeof(model_from_peer));
-        model_id = model_from_peer;
-    }
-    if ((app_id == NULL || app_id[0] == '\0') && peer_id != NULL) {
-        extract_query_param(peer_id, "x_wx_app_id", app_from_peer, sizeof(app_from_peer));
-        app_id = app_from_peer;
-    }
-
     ESP_LOGI(TAG, "%s", auto_answer ? "active call join received, submit WHIP immediately" : "incoming WeChat call");
     esp_err_t ret = wechat_voip_session_handle_join_room(payload, auto_answer);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "call_incoming rejected locally: %s", esp_err_to_name(ret));
         return;
     }
-    remember_auth_user(openid, model_id, app_id, "call_incoming");
 }
 
 static void handle_call_cancel(cJSON *payload, cJSON *root)
@@ -1028,10 +977,6 @@ esp_err_t wechat_voip_thing_start(void)
         goto done;
     }
 
-    /*
-     * Contact NVS loading is routed through platform_nvs_async, so this path
-     * no longer requires its caller to own an internal-RAM stack.
-     */
     uint32_t start_generation = 0;
     xSemaphoreTake(s_voip.lock, portMAX_DELAY);
     start_generation = advance_channel_generation_locked();
@@ -1039,7 +984,6 @@ esp_err_t wechat_voip_thing_start(void)
     copy_str(s_voip.device_key, sizeof(s_voip.device_key), credentials.device_key);
     xSemaphoreGive(s_voip.lock);
     wechat_voip_contacts_reset_for_device(credentials.device_id, start_generation);
-    wechat_voip_contacts_load(credentials.device_id, start_generation);
 
     ret = ensure_message_worker();
     if (ret != ESP_OK) {
@@ -1089,7 +1033,8 @@ void wechat_voip_thing_stop(void)
     if (listener >= 0) {
         thing_mqtt_client_remove_listener(listener);
     }
-    wechat_voip_contacts_clear_identity_cache(stopped_generation);
+    /* Contacts are server-owned; leaving the app only releases the runtime cache. */
+    wechat_voip_contacts_reset_for_device("", stopped_generation);
     xSemaphoreGive(s_voip.lifecycle_lock);
 }
 
@@ -1155,8 +1100,10 @@ esp_err_t wechat_voip_thing_update_contact_remark_async(const char *open_id,
     if (open_id == NULL || open_id[0] == '\0' || remark == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (strlen(open_id) >= WECHAT_VOIP_OPEN_ID_MAX ||
-        strlen(remark) >= WECHAT_VOIP_REMARK_MAX) {
+    if (strlen(open_id) >= WECHAT_VOIP_OPEN_ID_MAX) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (!wechat_voip_remark_is_valid(remark)) {
         return ESP_ERR_INVALID_SIZE;
     }
     ESP_RETURN_ON_ERROR(ensure_runtime(), TAG, "runtime init failed");
@@ -1200,28 +1147,17 @@ esp_err_t wechat_voip_thing_add_contact(const char *open_id)
     }
     ESP_RETURN_ON_ERROR(ensure_runtime(), TAG, "runtime init failed");
 
-    wechat_voip_auth_user_t contact = {0};
-    wechat_voip_contacts_find(open_id, &contact);
-    if (contact.openid[0] != '\0' && contact.model_id[0] != '\0') {
-        ESP_LOGI(TAG, "authorized WeChat contact found locally");
-        return ESP_OK;
+    esp_err_t ret = wechat_voip_contacts_check_authorized(open_id);
+    if (ret == ESP_ERR_NOT_FOUND || ret == ESP_ERR_INVALID_STATE) {
+        request_caller_refresh();
     }
-
-    ESP_LOGW(TAG,
-             "WeChat contact is not authorized; complete authorization in the mini program first");
-    return ESP_ERR_NOT_FOUND;
-}
-
-esp_err_t wechat_voip_thing_remove_contact(const char *open_id)
-{
-    if (open_id == NULL || open_id[0] == '\0') {
-        return ESP_ERR_INVALID_ARG;
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "WeChat contact authorization verified");
+    } else if (ret == ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(TAG,
+                 "WeChat contact is not authorized; complete authorization in the mini program first");
     }
-    ESP_RETURN_ON_ERROR(ensure_runtime(), TAG, "runtime init failed");
-
-    ESP_LOGW(TAG,
-             "WeChat authorization removal is user-side only; use the mini program to revoke it");
-    return ESP_ERR_NOT_SUPPORTED;
+    return ret;
 }
 
 bool wechat_voip_thing_request_call_busy(void)

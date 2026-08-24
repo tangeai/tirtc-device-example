@@ -41,12 +41,39 @@ typedef struct {
     char summary[NETWORK_PING_SUMMARY_MAX];
 } network_ping_status_t;
 
+typedef enum {
+    NETWORK_CONNECT_FAILURE_NONE = 0,
+    NETWORK_CONNECT_FAILURE_TIMEOUT,
+    NETWORK_CONNECT_FAILURE_AP_NOT_FOUND,
+    NETWORK_CONNECT_FAILURE_AUTHENTICATION,
+    NETWORK_CONNECT_FAILURE_ASSOCIATION,
+    NETWORK_CONNECT_FAILURE_OTHER,
+} network_connect_failure_t;
+
+typedef enum {
+    NETWORK_CONNECTION_PHASE_STOPPED = 0,
+    NETWORK_CONNECTION_PHASE_NO_CREDENTIALS,
+    NETWORK_CONNECTION_PHASE_IDLE,
+    NETWORK_CONNECTION_PHASE_ASSOCIATING,
+    NETWORK_CONNECTION_PHASE_WAITING_IP,
+    NETWORK_CONNECTION_PHASE_IP_READY,
+    NETWORK_CONNECTION_PHASE_RETRY_WAIT,
+    NETWORK_CONNECTION_PHASE_FAILED,
+} network_connection_phase_t;
+
 typedef struct {
     bool configured;
     bool started;
+    bool associated;
     bool connected;
+    network_connection_phase_t phase;
+    uint32_t attempt_id;
+    uint32_t phase_elapsed_ms;
+    uint32_t association_time_ms;
+    uint32_t dhcp_time_ms;
     uint8_t retry_count;
     uint8_t disconnect_reason;
+    network_connect_failure_t connect_failure;
     int8_t rssi;
     char ssid[33];
     char ip_addr[16];
@@ -59,11 +86,13 @@ typedef struct {
     bool auto_connect;
     const char *default_ssid;
     const char *default_password;
+    const char *fallback_dns_ipv4;
 } network_config_t;
 
 esp_err_t network_prepare(const network_config_t *config);
 void network_release(void);
 esp_err_t network_connect(const char *ssid, const char *password);
+esp_err_t network_retry_connection(void);
 esp_err_t network_request_scan(void);
 void network_get_scan_results(network_scan_snapshot_t *snapshot);
 esp_err_t network_start_ping(const char *target_host);

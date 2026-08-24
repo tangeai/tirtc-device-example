@@ -26,6 +26,7 @@ bool thing_service_registry_is_ready(void);
 bool thing_service_registry_is_discovered(void);
 
 /* Returned pointers remain stable for the process lifetime. */
+const char *thing_service_registry_discovery_url(void);
 const char *thing_service_registry_device_api_base(void);
 const char *thing_service_registry_voip_api_base(void);
 const char *thing_service_registry_ai_api_base(void);

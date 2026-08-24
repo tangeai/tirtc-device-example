@@ -20,18 +20,27 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
 static const char *TAG = "audio";
 
 #define AUDIO_INPUT_LEVEL_DISPLAY_SCALE  10U
-#define AUDIO_CAPTURE_CODEC_GAIN_MAX_PERCENT 50U
+#define AUDIO_CAPTURE_CODEC_GAIN_MAX_PERCENT 80U
 #define AUDIO_CAPTURE_UPLOAD_GAIN_MAX_Q8     384U
 #define AUDIO_CAPTURE_AUTO_GAIN_TARGET_PEAK 4096U
+#define AUDIO_CAPTURE_NEAR_END_AUTO_GAIN_TARGET_PEAK 8192U
 #define AUDIO_CAPTURE_AUTO_GAIN_NOISE_FLOOR_PEAK 80U
+#define AUDIO_CAPTURE_CALL_AUTO_GAIN_NOISE_FLOOR_PEAK 160U
 #define AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT 200U
-#define AUDIO_CAPTURE_AUTO_GAIN_LIMIT_PERCENT 250U
+/*
+ * This is a policy ceiling, not a fixed gain. The frame peak controller still
+ * targets -12 dBFS and immediately backs gain down for normal/strong speech.
+ * A larger ceiling is needed only for distant near-end speech after AEC; the
+ * call profile keeps echo-only frames on its separate 200% far-end guard.
+ */
+#define AUDIO_CAPTURE_AUTO_GAIN_LIMIT_PERCENT 1600U
 #define AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8   256U
 #define AUDIO_CAPTURE_AUTO_GAIN_ATTACK_DIV 2U
 #define AUDIO_MAX_CAPTURE_GAIN_DB        36.0f
@@ -40,6 +49,9 @@ static const char *TAG = "audio";
 #define AUDIO_CAPTURE_NOISE_GATE_ATTENUATION_PERCENT 20U
 #define AUDIO_CAPTURE_LEVEL_LOG_INTERVAL_MS 1000U
 #define AUDIO_CAPTURE_LEVEL_DBFS_FLOOR_X10 (-960)
+#define AUDIO_AEC_REFERENCE_CLIP_PEAK       30000U
+#define AUDIO_ES7210_MIC1_GAIN_REG           0x43
+#define AUDIO_ES7210_MIC3_GAIN_REG           0x45
 #define AUDIO_CAPTURE_PRIMARY_CHANNEL HARDWARE_BOARD_AUDIO_ADC_PRIMARY_CHANNEL
 #define AUDIO_DEFAULT_CAPTURE_GAIN_PERCENT \
     ((uint8_t)(((HARDWARE_BOARD_AUDIO_DEFAULT_ADC_GAIN_DB) * 100.0f / AUDIO_MAX_CAPTURE_GAIN_DB) + 0.5f))
@@ -52,9 +64,13 @@ static const char *TAG = "audio";
 #define AUDIO_I2S_DMA_FRAME_NUM          64
 #define AUDIO_PLAYBACK_SAMPLE_RATE_HZ    HARDWARE_BOARD_AUDIO_SAMPLE_RATE_HZ
 #define AUDIO_PLAYBACK_OUTPUT_CHANNELS   HARDWARE_BOARD_AUDIO_CHANNELS
-#define AUDIO_CAPTURE_TASK_STACK         (6 * 1024)
-#define AUDIO_CAPTURE_TASK_PRIORITY      12
-#define AUDIO_CAPTURE_TASK_CORE          APP_TASK_CORE_AUDIO
+#define AUDIO_CAPTURE_READER_TASK_STACK    (4 * 1024)
+#define AUDIO_CAPTURE_READER_TASK_PRIORITY 14
+#define AUDIO_CAPTURE_READER_TASK_CORE     APP_TASK_CORE_NETWORK
+#define AUDIO_CAPTURE_PROCESS_TASK_STACK    (8 * 1024)
+#define AUDIO_CAPTURE_PROCESS_TASK_PRIORITY 12
+#define AUDIO_CAPTURE_PROCESS_TASK_CORE     APP_TASK_CORE_AUDIO
+#define AUDIO_CAPTURE_PIPELINE_DEPTH         6U
 #define AUDIO_CAPTURE_OBSERVER_MAX       4
 #define AUDIO_CAPTURE_TASK_STOP_WAIT_MS  300
 /*
@@ -67,7 +83,10 @@ static const char *TAG = "audio";
 #define AUDIO_CAPTURE_HW_INPUT_CHANNELS     HARDWARE_BOARD_AUDIO_ADC_CHANNELS
 #define AUDIO_CAPTURE_HW_TOTAL_CHANNELS     HARDWARE_BOARD_AUDIO_ADC_TDM_CHANNELS
 #define AUDIO_CAPTURE_HW_CHANNEL_MASK       HARDWARE_BOARD_AUDIO_ADC_CHANNEL_MASK
-#define AUDIO_CAPTURE_REFERENCE_CHANNEL     HARDWARE_BOARD_AUDIO_ADC_REFERENCE_CHANNEL
+#define AUDIO_CAPTURE_REFERENCE_TDM_SLOT    HARDWARE_BOARD_AUDIO_ADC_REFERENCE_TDM_SLOT
+#define AUDIO_CAPTURE_REFERENCE_DMA_CHANNEL HARDWARE_BOARD_AUDIO_ADC_REFERENCE_DMA_CHANNEL
+#define AUDIO_CAPTURE_REFERENCE_CODEC_CHANNEL HARDWARE_BOARD_AUDIO_ADC_REFERENCE_CODEC_CHANNEL
+#define AUDIO_CAPTURE_REFERENCE_DIGITAL_GAIN_Q8 HARDWARE_BOARD_AUDIO_ADC_REFERENCE_DIGITAL_GAIN_Q8
 #define AUDIO_CAPTURE_REFERENCE_ENABLED     HARDWARE_BOARD_AUDIO_ADC_REFERENCE_ENABLED
 #define AUDIO_CAPTURE_OUTPUT_CHANNELS    1
 #define AUDIO_CAPTURE_DOWNSAMPLE_RATIO \
@@ -81,8 +100,21 @@ static const char *TAG = "audio";
 #error "audio capture primary channel must be within hardware input channels"
 #endif
 
-#if AUDIO_CAPTURE_REFERENCE_ENABLED && (AUDIO_CAPTURE_REFERENCE_CHANNEL >= AUDIO_CAPTURE_HW_INPUT_CHANNELS)
-#error "audio capture reference channel must be within hardware input channels"
+#if AUDIO_CAPTURE_REFERENCE_ENABLED && (AUDIO_CAPTURE_REFERENCE_TDM_SLOT >= AUDIO_CAPTURE_HW_TOTAL_CHANNELS)
+#error "audio capture reference TDM slot must be within the hardware TDM frame"
+#endif
+
+#if AUDIO_CAPTURE_REFERENCE_ENABLED && (AUDIO_CAPTURE_REFERENCE_DMA_CHANNEL >= AUDIO_CAPTURE_HW_INPUT_CHANNELS)
+#error "audio capture reference DMA channel must be within packed input channels"
+#endif
+
+#if AUDIO_CAPTURE_REFERENCE_ENABLED && \
+    (AUDIO_CAPTURE_REFERENCE_CODEC_CHANNEL >= HARDWARE_BOARD_AUDIO_ADC_CODEC_CHANNELS)
+#error "audio capture reference codec channel must be within ES7210 inputs"
+#endif
+
+#if AUDIO_CAPTURE_REFERENCE_ENABLED && (AUDIO_CAPTURE_REFERENCE_DIGITAL_GAIN_Q8 == 0U)
+#error "audio capture reference digital gain must be positive"
 #endif
 
 static const audio_format_t s_capture_format = {
@@ -103,11 +135,18 @@ typedef struct {
     bool enabled;
 } audio_capture_observer_t;
 
+typedef struct {
+    int16_t *raw_samples;
+    int64_t frame_start_us;
+    uint32_t read_us;
+} audio_capture_pipeline_slot_t;
+
 static audio_capture_frame_cb_t s_capture_cb;
 static void *s_capture_cb_ctx;
 static bool s_capture_primary_enabled;
 static audio_capture_observer_t s_capture_observers[AUDIO_CAPTURE_OBSERVER_MAX];
 static TaskHandle_t s_capture_task;
+static TaskHandle_t s_capture_process_task;
 static TaskHandle_t s_tone_task;
 static bool s_capture_task_stop_requested;
 static bool s_audio_ready;
@@ -125,6 +164,9 @@ static audio_stats_t s_audio_stats = {
     .capture_codec_gain_percent = AUDIO_CAPTURE_CODEC_GAIN_MAX_PERCENT,
     .capture_upload_gain_percent = AUDIO_DEFAULT_CAPTURE_GAIN_PERCENT,
     .capture_auto_gain_max_percent = AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT,
+    .echo_suppression = AUDIO_ECHO_SUPPRESSION_BALANCED,
+    .far_end_upload_gain_percent = AUDIO_DEFAULT_CAPTURE_GAIN_PERCENT,
+    .far_end_auto_gain_max_percent = AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT,
     .capture_noise_gate_enabled = true,
 };
 static esp_err_t s_audio_output_prepare_last_err = ESP_OK;
@@ -138,6 +180,13 @@ static audio_capture_processing_config_t s_capture_processing_config = {
     .codec_gain_percent = AUDIO_CAPTURE_CODEC_GAIN_MAX_PERCENT,
     .upload_gain_percent = AUDIO_DEFAULT_CAPTURE_GAIN_PERCENT,
     .auto_gain_max_percent = AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT,
+    .echo_continuous_processing = false,
+    .echo_near_end_protection_enabled = false,
+    .far_end_gain_guard_enabled = false,
+    .far_end_upload_gain_percent = AUDIO_DEFAULT_CAPTURE_GAIN_PERCENT,
+    .far_end_auto_gain_max_percent = AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT,
+    .echo_suppression = AUDIO_ECHO_SUPPRESSION_BALANCED,
+    .echo_diagnostics_enabled = false,
     .noise_gate_enabled = true,
     .noise_gate_open_peak = AUDIO_CAPTURE_NOISE_GATE_OPEN_PEAK,
     .noise_gate_close_peak = AUDIO_CAPTURE_NOISE_GATE_CLOSE_PEAK,
@@ -165,7 +214,9 @@ static const audio_codec_data_if_t *s_i2s_data_if;
 
 static uint8_t *s_playback_scratch;
 static size_t s_playback_scratch_size;
-static int16_t *s_capture_raw_buffer;
+static QueueHandle_t s_capture_free_queue;
+static QueueHandle_t s_capture_ready_queue;
+static audio_capture_pipeline_slot_t s_capture_pipeline[AUDIO_CAPTURE_PIPELINE_DEPTH];
 static int16_t *s_capture_mono_buffer;
 static int16_t *s_capture_ref_buffer;
 static audio_playback_timing_t s_last_playback_timing;
@@ -174,6 +225,8 @@ static bool s_playback_path_ready_logged;
 static esp_codec_dev_handle_t audio_new_speaker(void);
 static esp_codec_dev_handle_t audio_new_microphone(void);
 static void audio_capture_task(void *ctx);
+static void audio_capture_process_task(void *ctx);
+static void audio_release_capture_buffers(void);
 
 static esp_err_t audio_ensure_playback_mutex(void)
 {
@@ -323,6 +376,13 @@ static audio_capture_processing_config_t audio_capture_make_default_processing_c
                               AUDIO_CAPTURE_CODEC_GAIN_MAX_PERCENT : percent,
         .upload_gain_percent = percent,
         .auto_gain_max_percent = AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT,
+        .echo_continuous_processing = false,
+        .echo_near_end_protection_enabled = false,
+        .far_end_gain_guard_enabled = false,
+        .far_end_upload_gain_percent = percent,
+        .far_end_auto_gain_max_percent = AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT,
+        .echo_suppression = AUDIO_ECHO_SUPPRESSION_BALANCED,
+        .echo_diagnostics_enabled = false,
         .noise_gate_enabled = true,
         .noise_gate_open_peak = AUDIO_CAPTURE_NOISE_GATE_OPEN_PEAK,
         .noise_gate_close_peak = AUDIO_CAPTURE_NOISE_GATE_CLOSE_PEAK,
@@ -344,6 +404,18 @@ static void audio_capture_sanitize_processing_config(audio_capture_processing_co
     }
     config->upload_gain_percent = audio_clamp_percent(config->upload_gain_percent);
     config->auto_gain_max_percent = audio_clamp_auto_gain_percent(config->auto_gain_max_percent);
+    config->far_end_upload_gain_percent = audio_clamp_percent(config->far_end_upload_gain_percent);
+    if (config->far_end_upload_gain_percent > config->upload_gain_percent) {
+        config->far_end_upload_gain_percent = config->upload_gain_percent;
+    }
+    config->far_end_auto_gain_max_percent =
+        audio_clamp_auto_gain_percent(config->far_end_auto_gain_max_percent);
+    if (config->far_end_auto_gain_max_percent > config->auto_gain_max_percent) {
+        config->far_end_auto_gain_max_percent = config->auto_gain_max_percent;
+    }
+    if (config->echo_suppression != AUDIO_ECHO_SUPPRESSION_STRONG) {
+        config->echo_suppression = AUDIO_ECHO_SUPPRESSION_BALANCED;
+    }
     config->noise_gate_attenuation_percent = audio_clamp_percent(config->noise_gate_attenuation_percent);
 
     if (config->noise_gate_open_peak == 0U) {
@@ -373,23 +445,32 @@ static uint32_t audio_capture_auto_gain_max_q8(uint16_t percent)
 }
 
 static uint32_t audio_capture_auto_gain_target_q8(uint32_t pre_peak,
+                                                  uint32_t target_peak,
                                                   uint32_t base_gain_q8,
-                                                  uint32_t auto_gain_max_q8)
+                                                  uint32_t auto_gain_max_q8,
+                                                  uint32_t noise_floor_peak)
 {
-    if (pre_peak < AUDIO_CAPTURE_AUTO_GAIN_NOISE_FLOOR_PEAK || base_gain_q8 == 0U) {
+    if (noise_floor_peak == 0U) {
+        noise_floor_peak = AUDIO_CAPTURE_AUTO_GAIN_NOISE_FLOOR_PEAK;
+    }
+    if (pre_peak < noise_floor_peak || base_gain_q8 == 0U) {
         return AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8;
     }
     if (auto_gain_max_q8 < AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8) {
         auto_gain_max_q8 = AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8;
     }
 
+    if (target_peak == 0U) {
+        target_peak = AUDIO_CAPTURE_AUTO_GAIN_TARGET_PEAK;
+    }
+
     uint32_t base_peak = (uint32_t)(((uint64_t)pre_peak * base_gain_q8) / 256ULL);
-    if (base_peak == 0U || base_peak >= AUDIO_CAPTURE_AUTO_GAIN_TARGET_PEAK) {
+    if (base_peak == 0U || base_peak >= target_peak) {
         return AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8;
     }
 
     uint32_t target_q8 =
-        (uint32_t)(((uint64_t)AUDIO_CAPTURE_AUTO_GAIN_TARGET_PEAK * 256ULL) / base_peak);
+        (uint32_t)(((uint64_t)target_peak * 256ULL) / base_peak);
     if (target_q8 < AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8) {
         target_q8 = AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8;
     }
@@ -465,21 +546,6 @@ static int16_t audio_apply_capture_upload_gain(int32_t sample, uint32_t base_gai
     int64_t amplified = (int64_t)sample * (int64_t)base_gain_q8 * (int64_t)auto_gain_q8;
     amplified /= (256LL * 256LL);
     return audio_clip_i16((int32_t)amplified);
-}
-
-static void audio_apply_speaker_volume(int16_t *samples, size_t sample_count, uint8_t volume_percent)
-{
-    if (samples == NULL || sample_count == 0 || volume_percent >= 100U) {
-        return;
-    }
-    if (volume_percent == 0U) {
-        memset(samples, 0, sample_count * sizeof(int16_t));
-        return;
-    }
-
-    for (size_t index = 0; index < sample_count; ++index) {
-        samples[index] = audio_clip_i16(((int32_t)samples[index] * volume_percent) / 100);
-    }
 }
 
 static void audio_mute_playback_path_no_mutex(void)
@@ -588,56 +654,75 @@ static esp_err_t audio_ensure_capture_buffers(void)
     const size_t samples_per_frame = AUDIO_CAPTURE_UPLOAD_SAMPLE_RATE_HZ / 50;
     const size_t raw_samples_per_frame = samples_per_frame * AUDIO_CAPTURE_DOWNSAMPLE_RATIO *
                                          AUDIO_CAPTURE_HW_INPUT_CHANNELS;
-    int16_t *raw_buffer = s_capture_raw_buffer;
-    int16_t *mono_buffer = s_capture_mono_buffer;
-    int16_t *ref_buffer = s_capture_ref_buffer;
 
-    if (raw_buffer == NULL) {
-        raw_buffer = audio_calloc_prefer_psram(raw_samples_per_frame, sizeof(int16_t));
-        if (raw_buffer == NULL) {
-            return ESP_ERR_NO_MEM;
-        }
-    }
-
-    if (mono_buffer == NULL) {
-        mono_buffer = audio_calloc_prefer_psram(samples_per_frame, sizeof(int16_t));
-        if (mono_buffer == NULL) {
-            if (s_capture_raw_buffer == NULL) {
-                free(raw_buffer);
-            }
-            return ESP_ERR_NO_MEM;
-        }
-    }
-
+    bool complete = s_capture_free_queue != NULL && s_capture_ready_queue != NULL &&
+                    s_capture_mono_buffer != NULL;
 #if AUDIO_CAPTURE_REFERENCE_ENABLED
-    if (ref_buffer == NULL) {
-        ref_buffer = audio_calloc_prefer_psram(samples_per_frame, sizeof(int16_t));
-        if (ref_buffer == NULL) {
-            if (s_capture_raw_buffer == NULL) {
-                free(raw_buffer);
-            }
-            if (s_capture_mono_buffer == NULL) {
-                free(mono_buffer);
-            }
-            return ESP_ERR_NO_MEM;
-        }
-    }
+    complete = complete && s_capture_ref_buffer != NULL;
 #endif
+    for (size_t index = 0; index < AUDIO_CAPTURE_PIPELINE_DEPTH; ++index) {
+        complete = complete && s_capture_pipeline[index].raw_samples != NULL;
+    }
+    if (complete) {
+        return ESP_OK;
+    }
 
-    s_capture_raw_buffer = raw_buffer;
-    s_capture_mono_buffer = mono_buffer;
+    /* Capture tasks are not running while this function repairs a partial setup. */
+    audio_release_capture_buffers();
+
+    s_capture_free_queue = xQueueCreateWithCaps(AUDIO_CAPTURE_PIPELINE_DEPTH,
+                                                sizeof(uint8_t),
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_capture_ready_queue = xQueueCreateWithCaps(AUDIO_CAPTURE_PIPELINE_DEPTH,
+                                                 sizeof(uint8_t),
+                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_capture_free_queue == NULL || s_capture_ready_queue == NULL) {
+        audio_release_capture_buffers();
+        return ESP_ERR_NO_MEM;
+    }
+
+    for (uint8_t index = 0; index < AUDIO_CAPTURE_PIPELINE_DEPTH; ++index) {
+        s_capture_pipeline[index].raw_samples =
+            audio_calloc_prefer_psram(raw_samples_per_frame, sizeof(int16_t));
+        if (s_capture_pipeline[index].raw_samples == NULL ||
+            xQueueSend(s_capture_free_queue, &index, 0) != pdTRUE) {
+            audio_release_capture_buffers();
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    s_capture_mono_buffer = audio_calloc_prefer_psram(samples_per_frame, sizeof(int16_t));
+    if (s_capture_mono_buffer == NULL) {
+        audio_release_capture_buffers();
+        return ESP_ERR_NO_MEM;
+    }
+
 #if AUDIO_CAPTURE_REFERENCE_ENABLED
-    s_capture_ref_buffer = ref_buffer;
+    s_capture_ref_buffer = audio_calloc_prefer_psram(samples_per_frame, sizeof(int16_t));
+    if (s_capture_ref_buffer == NULL) {
+        audio_release_capture_buffers();
+        return ESP_ERR_NO_MEM;
+    }
 #endif
     return ESP_OK;
 }
 
 static void audio_release_capture_buffers(void)
 {
-    free(s_capture_raw_buffer);
+    if (s_capture_free_queue != NULL) {
+        vQueueDeleteWithCaps(s_capture_free_queue);
+        s_capture_free_queue = NULL;
+    }
+    if (s_capture_ready_queue != NULL) {
+        vQueueDeleteWithCaps(s_capture_ready_queue);
+        s_capture_ready_queue = NULL;
+    }
+    for (size_t index = 0; index < AUDIO_CAPTURE_PIPELINE_DEPTH; ++index) {
+        free(s_capture_pipeline[index].raw_samples);
+        memset(&s_capture_pipeline[index], 0, sizeof(s_capture_pipeline[index]));
+    }
     free(s_capture_mono_buffer);
     free(s_capture_ref_buffer);
-    s_capture_raw_buffer = NULL;
     s_capture_mono_buffer = NULL;
     s_capture_ref_buffer = NULL;
 }
@@ -794,34 +879,68 @@ static esp_err_t audio_open_speaker(uint32_t sample_rate_hz, uint32_t bits_per_s
     return esp_codec_dev_open(s_play_dev_handle, &sample_info);
 }
 
-static esp_err_t audio_apply_microphone_gain(uint8_t percent)
+static esp_err_t audio_apply_primary_microphone_gain(uint8_t percent)
 {
     const hardware_audio_config_t *audio_config = hardware_board_get_audio_config();
     float db = audio_capture_gain_percent_to_db(percent);
 
     ESP_RETURN_ON_FALSE(s_record_dev_handle != NULL, ESP_ERR_INVALID_STATE, TAG, "mic codec handle missing");
 
+    if (audio_config != NULL && audio_config->microphone_codec == HARDWARE_AUDIO_CODEC_ES7210) {
+        return esp_codec_dev_set_in_channel_gain(
+            s_record_dev_handle,
+            ESP_CODEC_DEV_MAKE_CHANNEL_MASK(AUDIO_CAPTURE_PRIMARY_CHANNEL),
+            db);
+    }
+
+    return esp_codec_dev_set_in_gain(s_record_dev_handle, db);
+}
+
+static esp_err_t audio_configure_microphone_gains(uint8_t primary_percent)
+{
+    const hardware_audio_config_t *audio_config = hardware_board_get_audio_config();
+
+    ESP_RETURN_ON_ERROR(audio_apply_primary_microphone_gain(primary_percent),
+                        TAG,
+                        "set primary mic gain failed");
+
 #if AUDIO_CAPTURE_REFERENCE_ENABLED
     if (audio_config != NULL && audio_config->microphone_codec == HARDWARE_AUDIO_CODEC_ES7210) {
         /*
-         * ES7210 slot 1 is used as the AEC reference. Keep user microphone gain
-         * on the primary mic only; otherwise the reference path clips at 0 dBFS
-         * and ESP-SR receives a distorted far-end signal.
+         * DMA channel indexes are not ES7210 physical input indexes. The I2S
+         * driver packs wire slots 0 and 1 as MIC1 and physical MIC3. User gain
+         * owns only MIC1; MIC3 is an electrical playback reference and is
+         * calibrated once when the codec opens. Runtime volume changes must not
+         * rewrite or read the reference channel while I2S capture is active.
          */
         ESP_RETURN_ON_ERROR(esp_codec_dev_set_in_channel_gain(
                                 s_record_dev_handle,
-                                ESP_CODEC_DEV_MAKE_CHANNEL_MASK(AUDIO_CAPTURE_PRIMARY_CHANNEL),
-                                db),
+                                ESP_CODEC_DEV_MAKE_CHANNEL_MASK(AUDIO_CAPTURE_REFERENCE_CODEC_CHANNEL),
+                                HARDWARE_BOARD_AUDIO_ADC_REFERENCE_GAIN_DB),
                             TAG,
-                            "set primary mic gain failed");
-        return esp_codec_dev_set_in_channel_gain(
-            s_record_dev_handle,
-            ESP_CODEC_DEV_MAKE_CHANNEL_MASK(AUDIO_CAPTURE_REFERENCE_CHANNEL),
-            0.0f);
-    }
-#endif
+                            "set AEC reference gain failed");
 
-    return esp_codec_dev_set_in_gain(s_record_dev_handle, db);
+        int primary_gain_reg = 0;
+        int reference_gain_reg = 0;
+        ESP_RETURN_ON_ERROR(esp_codec_dev_read_reg(s_record_dev_handle,
+                                                    AUDIO_ES7210_MIC1_GAIN_REG,
+                                                    &primary_gain_reg),
+                            TAG,
+                            "read primary mic gain failed");
+        ESP_RETURN_ON_ERROR(esp_codec_dev_read_reg(s_record_dev_handle,
+                                                    AUDIO_ES7210_MIC3_GAIN_REG,
+                                                    &reference_gain_reg),
+                            TAG,
+                            "read AEC reference gain failed");
+        ESP_LOGD(TAG,
+                 "ES7210 gain verified: mic1_reg=0x%02x mic3_ref_reg=0x%02x",
+                 primary_gain_reg & 0xff,
+                 reference_gain_reg & 0xff);
+    }
+#else
+    (void)audio_config;
+#endif
+    return ESP_OK;
 }
 
 static esp_err_t audio_open_microphone(uint32_t sample_rate_hz, uint32_t bits_per_sample, uint32_t channels)
@@ -840,7 +959,7 @@ static esp_err_t audio_open_microphone(uint32_t sample_rate_hz, uint32_t bits_pe
 
     ESP_RETURN_ON_FALSE(s_record_dev_handle != NULL, ESP_ERR_INVALID_STATE, TAG, "mic codec handle missing");
     ESP_RETURN_ON_ERROR(esp_codec_dev_open(s_record_dev_handle, &sample_info), TAG, "open mic codec failed");
-    return audio_apply_microphone_gain(s_capture_processing_config.codec_gain_percent);
+    return audio_configure_microphone_gains(s_capture_processing_config.codec_gain_percent);
 }
 
 static esp_err_t audio_bus_init(void)
@@ -1012,16 +1131,37 @@ static esp_err_t audio_do_prepare_input(void)
         return ret;
     }
 
+    if (s_capture_process_task == NULL) {
+        BaseType_t task_ok = xTaskCreatePinnedToCoreWithCaps(audio_capture_process_task,
+                                                             "audio_process",
+                                                             AUDIO_CAPTURE_PROCESS_TASK_STACK,
+                                                             NULL,
+                                                             AUDIO_CAPTURE_PROCESS_TASK_PRIORITY,
+                                                             &s_capture_process_task,
+                                                             AUDIO_CAPTURE_PROCESS_TASK_CORE,
+                                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (task_ok != pdPASS) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
     if (s_capture_task == NULL) {
         BaseType_t task_ok = xTaskCreatePinnedToCoreWithCaps(audio_capture_task,
                                                              "audio_capture",
-                                                             AUDIO_CAPTURE_TASK_STACK,
+                                                             AUDIO_CAPTURE_READER_TASK_STACK,
                                                              NULL,
-                                                             AUDIO_CAPTURE_TASK_PRIORITY,
+                                                             AUDIO_CAPTURE_READER_TASK_PRIORITY,
                                                              &s_capture_task,
-                                                             AUDIO_CAPTURE_TASK_CORE,
+                                                             AUDIO_CAPTURE_READER_TASK_CORE,
                                                              MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (task_ok != pdPASS) {
+            taskENTER_CRITICAL(&s_audio_lock);
+            s_capture_task_stop_requested = true;
+            taskEXIT_CRITICAL(&s_audio_lock);
+            TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(AUDIO_CAPTURE_TASK_STOP_WAIT_MS);
+            while (s_capture_process_task != NULL && xTaskGetTickCount() < deadline) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
             return ESP_ERR_NO_MEM;
         }
     }
@@ -1258,19 +1398,162 @@ static void audio_capture_task(void *ctx)
     const size_t raw_samples_per_frame = samples_per_frame * AUDIO_CAPTURE_DOWNSAMPLE_RATIO *
                                          AUDIO_CAPTURE_HW_INPUT_CHANNELS;
     const size_t raw_frame_bytes = raw_samples_per_frame * sizeof(int16_t);
-    int16_t *raw_buffer = s_capture_raw_buffer;
+    int64_t last_frame_start_us = 0;
+    uint64_t timing_interval_sum_us = 0;
+    uint64_t timing_read_sum_us = 0;
+    uint32_t timing_interval_max_us = 0;
+    uint32_t timing_interval_count = 0;
+    uint32_t timing_window_frames = 0;
+
+    while (true) {
+        bool stop_requested = false;
+        bool capture_enabled = false;
+
+        taskENTER_CRITICAL(&s_audio_lock);
+        stop_requested = s_capture_task_stop_requested;
+        capture_enabled = audio_capture_has_active_consumer_locked();
+        taskEXIT_CRITICAL(&s_audio_lock);
+
+        if (stop_requested) {
+            taskENTER_CRITICAL(&s_audio_lock);
+            s_capture_task = NULL;
+            s_audio_input_ready = false;
+            s_capture_primary_enabled = false;
+            s_audio_stats.capture_enabled = false;
+            s_audio_stats.input_level = 0;
+            if (s_capture_process_task == NULL) {
+                s_capture_task_stop_requested = false;
+            }
+            taskEXIT_CRITICAL(&s_audio_lock);
+            audio_update_ready_state();
+            platform_task_reaper_delete_current_with_caps(TAG);
+            return;
+        }
+
+        if (!capture_enabled) {
+            last_frame_start_us = 0;
+            timing_interval_sum_us = 0;
+            timing_read_sum_us = 0;
+            timing_interval_max_us = 0;
+            timing_interval_count = 0;
+            timing_window_frames = 0;
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        uint8_t slot_index = 0;
+        if (xQueueReceive(s_capture_free_queue, &slot_index, pdMS_TO_TICKS(20)) != pdTRUE ||
+            slot_index >= AUDIO_CAPTURE_PIPELINE_DEPTH ||
+            s_capture_pipeline[slot_index].raw_samples == NULL) {
+            taskENTER_CRITICAL(&s_audio_lock);
+            s_audio_stats.capture_pipeline_overruns++;
+            taskEXIT_CRITICAL(&s_audio_lock);
+            continue;
+        }
+
+        int64_t frame_start_us = esp_timer_get_time();
+        esp_err_t ret = esp_codec_dev_read(s_record_dev_handle,
+                                           s_capture_pipeline[slot_index].raw_samples,
+                                           raw_frame_bytes);
+        int64_t read_done_us = esp_timer_get_time();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "audio capture read failed: %s", esp_err_to_name(ret));
+            taskENTER_CRITICAL(&s_audio_lock);
+            s_audio_stats.capture_read_errors++;
+            taskEXIT_CRITICAL(&s_audio_lock);
+            (void)xQueueSend(s_capture_free_queue, &slot_index, 0);
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        taskENTER_CRITICAL(&s_audio_lock);
+        capture_enabled = audio_capture_has_active_consumer_locked();
+        taskEXIT_CRITICAL(&s_audio_lock);
+        if (!capture_enabled) {
+            (void)xQueueSend(s_capture_free_queue, &slot_index, 0);
+            continue;
+        }
+
+        s_capture_pipeline[slot_index].frame_start_us = frame_start_us;
+        s_capture_pipeline[slot_index].read_us = (uint32_t)(read_done_us - frame_start_us);
+        if (xQueueSend(s_capture_ready_queue, &slot_index, 0) != pdTRUE) {
+            taskENTER_CRITICAL(&s_audio_lock);
+            s_audio_stats.capture_pipeline_overruns++;
+            taskEXIT_CRITICAL(&s_audio_lock);
+            (void)xQueueSend(s_capture_free_queue, &slot_index, 0);
+            continue;
+        }
+
+        UBaseType_t ready_depth = uxQueueMessagesWaiting(s_capture_ready_queue);
+        taskENTER_CRITICAL(&s_audio_lock);
+        if (ready_depth > s_audio_stats.capture_pipeline_high_water) {
+            s_audio_stats.capture_pipeline_high_water = ready_depth;
+        }
+        taskEXIT_CRITICAL(&s_audio_lock);
+
+        uint32_t interval_us = 0;
+        if (last_frame_start_us > 0 && frame_start_us > last_frame_start_us) {
+            interval_us = (uint32_t)(frame_start_us - last_frame_start_us);
+            timing_interval_sum_us += interval_us;
+            timing_interval_count++;
+            if (interval_us > timing_interval_max_us) {
+                timing_interval_max_us = interval_us;
+            }
+        }
+        last_frame_start_us = frame_start_us;
+        timing_read_sum_us += (uint32_t)(read_done_us - frame_start_us);
+        timing_window_frames++;
+        if (timing_window_frames >= 50U) {
+            taskENTER_CRITICAL(&s_audio_lock);
+            s_audio_stats.capture_interval_us = timing_interval_count > 0U ?
+                (uint32_t)(timing_interval_sum_us / timing_interval_count) : 0U;
+            s_audio_stats.capture_interval_max_us = timing_interval_max_us;
+            s_audio_stats.capture_read_us = (uint32_t)(timing_read_sum_us / timing_window_frames);
+            taskEXIT_CRITICAL(&s_audio_lock);
+            timing_interval_sum_us = 0;
+            timing_read_sum_us = 0;
+            timing_interval_max_us = 0;
+            timing_interval_count = 0;
+            timing_window_frames = 0;
+        }
+    }
+}
+
+static void audio_capture_process_task(void *ctx)
+{
+    (void)ctx;
+    const size_t samples_per_frame = AUDIO_CAPTURE_UPLOAD_SAMPLE_RATE_HZ / 50;
     int16_t *mono_buffer = s_capture_mono_buffer;
     int16_t *ref_buffer = s_capture_ref_buffer;
     TickType_t last_level_log_tick = 0;
     bool reference_path_logged = false;
     uint32_t log_raw_channel_peak[AUDIO_CAPTURE_HW_INPUT_CHANNELS] = {0};
+    uint32_t log_scaled_reference_peak = 0;
     uint32_t log_pre_gain_peak = 0;
     uint32_t log_post_gain_peak = 0;
     uint64_t log_pre_gain_square_sum = 0;
     uint64_t log_post_gain_square_sum = 0;
     uint32_t log_echo_ref_peak = 0;
+    uint32_t log_echo_mic_peak = 0;
     uint32_t log_echo_out_peak = 0;
+    uint32_t log_echo_reference_frames = 0;
     uint32_t log_echo_active_frames = 0;
+    uint32_t log_echo_bypass_frames = 0;
+    uint32_t log_echo_warmup_frames = 0;
+    uint32_t log_echo_warmup_passthrough_frames = 0;
+    uint32_t log_echo_near_end_detected_frames = 0;
+    uint32_t log_echo_near_end_frames = 0;
+    uint32_t log_echo_near_last_sequence = 0;
+    uint32_t log_echo_near_decisions = 0;
+    uint32_t log_echo_near_reject_low_peak = 0;
+    uint32_t log_echo_near_reject_low_retained = 0;
+    uint32_t log_echo_near_reject_low_nlp = 0;
+    uint32_t log_echo_near_reject_high_coherence = 0;
+    uint8_t log_echo_near_retained_energy_percent = 0;
+    uint8_t log_echo_near_nlp_reduction_percent = 0;
+    uint8_t log_echo_near_reference_coherence_percent = 0;
+    uint32_t log_echo_linear_peak = 0;
+    uint32_t log_far_end_guard_frames = 0;
     uint32_t log_echo_suppress_percent = 0;
     uint32_t log_noise_gate_closed_frames = 0;
     uint32_t log_sample_count = 0;
@@ -1278,19 +1561,22 @@ static void audio_capture_task(void *ctx)
     uint32_t log_auto_gain_q8 = AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8;
     uint32_t auto_gain_q8 = AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8;
     bool noise_gate_open = false;
+    uint64_t timing_process_sum_us = 0;
+    uint64_t timing_dispatch_sum_us = 0;
+    uint64_t timing_pipeline_wait_sum_us = 0;
+    uint32_t timing_pipeline_wait_max_us = 0;
+    uint32_t timing_window_frames = 0;
 
-    if (raw_buffer == NULL || mono_buffer == NULL
+    if (mono_buffer == NULL
 #if AUDIO_CAPTURE_REFERENCE_ENABLED
         || ref_buffer == NULL
 #endif
     ) {
         ESP_LOGE(TAG, "audio capture buffers alloc failed");
         taskENTER_CRITICAL(&s_audio_lock);
-        s_capture_task = NULL;
-        s_audio_input_ready = false;
-        s_capture_primary_enabled = false;
+        s_capture_process_task = NULL;
+        s_capture_task_stop_requested = true;
         taskEXIT_CRITICAL(&s_audio_lock);
-        audio_update_ready_state();
         platform_task_reaper_delete_current_with_caps(TAG);
         return;
     }
@@ -1306,18 +1592,37 @@ static void audio_capture_task(void *ctx)
 
         taskENTER_CRITICAL(&s_audio_lock);
         stop_requested = s_capture_task_stop_requested;
+        taskEXIT_CRITICAL(&s_audio_lock);
         if (stop_requested) {
-            s_capture_task = NULL;
-            s_capture_task_stop_requested = false;
-            s_audio_input_ready = false;
-            s_capture_primary_enabled = false;
-            s_audio_stats.capture_enabled = false;
-            s_audio_stats.input_level = 0;
+            taskENTER_CRITICAL(&s_audio_lock);
+            s_capture_process_task = NULL;
+            if (s_capture_task == NULL) {
+                s_capture_task_stop_requested = false;
+            }
             taskEXIT_CRITICAL(&s_audio_lock);
-            audio_update_ready_state();
             platform_task_reaper_delete_current_with_caps(TAG);
             return;
         }
+
+        uint8_t slot_index = 0;
+        if (xQueueReceive(s_capture_ready_queue, &slot_index, pdMS_TO_TICKS(20)) != pdTRUE) {
+            continue;
+        }
+        if (slot_index >= AUDIO_CAPTURE_PIPELINE_DEPTH ||
+            s_capture_pipeline[slot_index].raw_samples == NULL) {
+            continue;
+        }
+
+        int16_t *raw_buffer = s_capture_pipeline[slot_index].raw_samples;
+        int64_t frame_start_us = s_capture_pipeline[slot_index].frame_start_us;
+        int64_t process_start_us = esp_timer_get_time();
+        uint32_t pipeline_wait_us = 0;
+        int64_t read_done_us = frame_start_us + s_capture_pipeline[slot_index].read_us;
+        if (process_start_us > read_done_us) {
+            pipeline_wait_us = (uint32_t)(process_start_us - read_done_us);
+        }
+
+        taskENTER_CRITICAL(&s_audio_lock);
         capture_primary_enabled = s_capture_primary_enabled && s_capture_cb != NULL;
         capture_cb = s_capture_cb;
         capture_cb_ctx = s_capture_cb_ctx;
@@ -1333,22 +1638,8 @@ static void audio_capture_task(void *ctx)
         taskEXIT_CRITICAL(&s_audio_lock);
 
         if (!capture_enabled) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
-        }
-
-        esp_err_t ret = esp_codec_dev_read(s_record_dev_handle, raw_buffer, raw_frame_bytes);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "audio capture read failed: %s", esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
-        }
-
-        taskENTER_CRITICAL(&s_audio_lock);
-        capture_enabled = audio_capture_has_active_consumer_locked();
-        taskEXIT_CRITICAL(&s_audio_lock);
-        if (!capture_enabled) {
             audio_echo_cancel_reset();
+            (void)xQueueSend(s_capture_free_queue, &slot_index, 0);
             continue;
         }
 
@@ -1357,6 +1648,8 @@ static void audio_capture_task(void *ctx)
         uint32_t pre_frame_peak = 0;
         uint32_t base_gain_q8 = 0;
         uint32_t auto_gain_max_q8 = AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8;
+        bool far_end_guard_active = false;
+        uint32_t reference_gain_q8 = AUDIO_CAPTURE_REFERENCE_DIGITAL_GAIN_Q8;
         audio_capture_processing_config_t processing_config = {0};
         audio_echo_cancel_metrics_t echo_metrics = {0};
 
@@ -1366,7 +1659,6 @@ static void audio_capture_task(void *ctx)
         taskEXIT_CRITICAL(&s_audio_lock);
         base_gain_q8 = audio_capture_base_gain_q8(processing_config.upload_gain_percent);
         auto_gain_max_q8 = audio_capture_auto_gain_max_q8(processing_config.auto_gain_max_percent);
-
         for (size_t frame_index = 0; frame_index < samples_per_frame; ++frame_index) {
             int32_t primary_sum = 0;
             size_t primary_sample_count = 0;
@@ -1396,13 +1688,26 @@ static void audio_capture_task(void *ctx)
             for (size_t downsample_index = 0; downsample_index < AUDIO_CAPTURE_DOWNSAMPLE_RATIO; ++downsample_index) {
                 size_t raw_base_index = (frame_index * AUDIO_CAPTURE_DOWNSAMPLE_RATIO + downsample_index) *
                                         AUDIO_CAPTURE_HW_INPUT_CHANNELS;
-                reference_sum += raw_buffer[raw_base_index + AUDIO_CAPTURE_REFERENCE_CHANNEL];
+                reference_sum += raw_buffer[raw_base_index + AUDIO_CAPTURE_REFERENCE_DMA_CHANNEL];
                 reference_sample_count++;
             }
             if (reference_sample_count > 0) {
                 reference_sum /= (int32_t)reference_sample_count;
             }
-            ref_buffer[frame_index] = (int16_t)reference_sum;
+            /*
+             * MIC3 is a dedicated analog speaker loopback, not user audio.
+             * Keep this electrical reference linear. Gain belongs to the codec
+             * calibration above; application-specific digital boosts would
+             * distort the reference-to-echo relationship seen by the adaptive
+             * filter and can make double-talk suppression unstable.
+             */
+            int16_t scaled_reference = audio_clip_i16(
+                (reference_sum * (int32_t)reference_gain_q8) / 256);
+            uint32_t scaled_reference_abs = audio_abs_i16(scaled_reference);
+            if (scaled_reference_abs > log_scaled_reference_peak) {
+                log_scaled_reference_peak = scaled_reference_abs;
+            }
+            ref_buffer[frame_index] = scaled_reference;
 #endif
         }
 
@@ -1410,25 +1715,101 @@ static void audio_capture_task(void *ctx)
         if (!reference_path_logged) {
             reference_path_logged = true;
             ESP_LOGI(TAG,
-                     "audio AEC uses ES7210 hardware reference: mic_ch=%u ref_ch=%u input_mask=0x%x tdm_channels=%u",
+                     "audio AEC hardware reference: mic_dma=%u ref_dma=%u ref_tdm_slot=%u ref_codec_ch=%u input_mask=0x%x tdm_channels=%u",
                      AUDIO_CAPTURE_PRIMARY_CHANNEL,
-                     AUDIO_CAPTURE_REFERENCE_CHANNEL,
+                     AUDIO_CAPTURE_REFERENCE_DMA_CHANNEL,
+                     AUDIO_CAPTURE_REFERENCE_TDM_SLOT,
+                     AUDIO_CAPTURE_REFERENCE_CODEC_CHANNEL,
                      AUDIO_CAPTURE_HW_CHANNEL_MASK,
                      AUDIO_CAPTURE_HW_TOTAL_CHANNELS);
         }
-        audio_echo_cancel_process_capture_with_reference(mono_buffer, ref_buffer, samples_per_frame, &echo_metrics);
+        audio_echo_cancel_process_capture_with_reference(
+            mono_buffer,
+            ref_buffer,
+            samples_per_frame,
+            processing_config.echo_continuous_processing,
+            processing_config.echo_near_end_protection_enabled,
+            &echo_metrics);
 #else
         audio_echo_cancel_process_capture(mono_buffer, samples_per_frame, &echo_metrics);
 #endif
-        if (echo_metrics.active) {
-            log_echo_active_frames++;
+        /*
+         * Keep the conservative gain cap while the microphone contains only
+         * far-end playback. Once AEC has positively identified near-end
+         * speech, retaining that cap attenuates consecutive words even though
+         * the echo path is already being protected by the AEC near-end blend.
+         */
+        far_end_guard_active = processing_config.far_end_gain_guard_enabled &&
+                               echo_metrics.reference_active &&
+                               !echo_metrics.near_end_detected;
+        if (far_end_guard_active) {
+            base_gain_q8 = audio_capture_base_gain_q8(
+                processing_config.far_end_upload_gain_percent);
+            auto_gain_max_q8 = audio_capture_auto_gain_max_q8(
+                processing_config.far_end_auto_gain_max_percent);
+            log_far_end_guard_frames++;
+        }
+        if (echo_metrics.reference_active) {
+            log_echo_reference_frames++;
             if (echo_metrics.ref_peak > log_echo_ref_peak) {
                 log_echo_ref_peak = echo_metrics.ref_peak;
+            }
+        }
+        if (echo_metrics.active) {
+            log_echo_active_frames++;
+            if (echo_metrics.mic_peak > log_echo_mic_peak) {
+                log_echo_mic_peak = echo_metrics.mic_peak;
             }
             if (echo_metrics.out_peak > log_echo_out_peak) {
                 log_echo_out_peak = echo_metrics.out_peak;
             }
             log_echo_suppress_percent = echo_metrics.suppress_percent;
+        }
+        if (echo_metrics.output_bypassed) {
+            log_echo_bypass_frames++;
+        }
+        if (echo_metrics.warming_up) {
+            log_echo_warmup_frames++;
+            if (echo_metrics.warmup_near_end_passthrough) {
+                log_echo_warmup_passthrough_frames++;
+            }
+        }
+        if (echo_metrics.near_end_protected) {
+            log_echo_near_end_frames++;
+        }
+        if (echo_metrics.near_end_detected) {
+            log_echo_near_end_detected_frames++;
+        }
+        if (echo_metrics.near_decision_sequence != 0U &&
+            echo_metrics.near_decision_sequence != log_echo_near_last_sequence) {
+            log_echo_near_last_sequence = echo_metrics.near_decision_sequence;
+            log_echo_near_decisions++;
+            log_echo_near_retained_energy_percent =
+                echo_metrics.near_retained_energy_percent;
+            log_echo_near_nlp_reduction_percent =
+                echo_metrics.near_nlp_reduction_percent;
+            log_echo_near_reference_coherence_percent =
+                echo_metrics.near_reference_coherence_percent;
+            switch (echo_metrics.near_reject_reason) {
+            case AUDIO_ECHO_NEAR_REJECT_LOW_LINEAR_PEAK:
+                log_echo_near_reject_low_peak++;
+                break;
+            case AUDIO_ECHO_NEAR_REJECT_LOW_RETAINED_ENERGY:
+                log_echo_near_reject_low_retained++;
+                break;
+            case AUDIO_ECHO_NEAR_REJECT_LOW_NLP_REDUCTION:
+                log_echo_near_reject_low_nlp++;
+                break;
+            case AUDIO_ECHO_NEAR_REJECT_HIGH_REFERENCE_COHERENCE:
+                log_echo_near_reject_high_coherence++;
+                break;
+            case AUDIO_ECHO_NEAR_REJECT_NONE:
+            default:
+                break;
+            }
+        }
+        if (echo_metrics.linear_peak > log_echo_linear_peak) {
+            log_echo_linear_peak = echo_metrics.linear_peak;
         }
 
         uint32_t noise_gate_input_peak = 0;
@@ -1458,8 +1839,33 @@ static void audio_capture_task(void *ctx)
                                                   (int64_t)mono_buffer[frame_index]);
         }
 
-        uint32_t target_auto_gain_q8 =
-            audio_capture_auto_gain_target_q8(pre_frame_peak, base_gain_q8, auto_gain_max_q8);
+        /*
+         * Device-call capture keeps AEC on continuously. With no active
+         * playback reference there is no echo to guard, so local speech must
+         * use the near-end target as well. Tying this only to the AEC
+         * double-talk detector left single-talk speech at the conservative
+         * -18 dBFS target and made a distant talker unnecessarily quiet.
+         */
+        bool call_near_gain_active = processing_config.echo_continuous_processing &&
+                                     !far_end_guard_active;
+        uint32_t target_peak = call_near_gain_active ?
+            AUDIO_CAPTURE_NEAR_END_AUTO_GAIN_TARGET_PEAK :
+            AUDIO_CAPTURE_AUTO_GAIN_TARGET_PEAK;
+        /*
+         * Continuous full-duplex calls use a higher AGC floor than the generic
+         * capture path. This keeps the measured AEC idle residue out of the
+         * gain loop while still lifting a quiet, distant talker.
+         */
+        uint32_t auto_gain_noise_floor_peak =
+            processing_config.echo_continuous_processing ?
+                AUDIO_CAPTURE_CALL_AUTO_GAIN_NOISE_FLOOR_PEAK :
+                AUDIO_CAPTURE_AUTO_GAIN_NOISE_FLOOR_PEAK;
+        uint32_t target_auto_gain_q8 = audio_capture_auto_gain_target_q8(
+            pre_frame_peak,
+            target_peak,
+            base_gain_q8,
+            auto_gain_max_q8,
+            auto_gain_noise_floor_peak);
         auto_gain_q8 = audio_capture_smooth_auto_gain_q8(auto_gain_q8, target_auto_gain_q8);
         log_auto_gain_q8 = auto_gain_q8;
 
@@ -1483,6 +1889,7 @@ static void audio_capture_task(void *ctx)
         s_audio_stats.input_level = audio_capture_peak_to_meter_percent(peak);
         taskEXIT_CRITICAL(&s_audio_lock);
 
+        int64_t process_done_us = esp_timer_get_time();
         if (capture_primary_enabled) {
             capture_cb((const uint8_t *)mono_buffer,
                        samples_per_frame * sizeof(int16_t),
@@ -1494,6 +1901,32 @@ static void audio_capture_task(void *ctx)
                                 samples_per_frame * sizeof(int16_t),
                                 &s_capture_format,
                                 observers[index].ctx);
+        }
+        int64_t dispatch_done_us = esp_timer_get_time();
+        (void)xQueueSend(s_capture_free_queue, &slot_index, 0);
+
+        timing_process_sum_us += (uint32_t)(process_done_us - process_start_us);
+        timing_dispatch_sum_us += (uint32_t)(dispatch_done_us - process_done_us);
+        timing_pipeline_wait_sum_us += pipeline_wait_us;
+        if (pipeline_wait_us > timing_pipeline_wait_max_us) {
+            timing_pipeline_wait_max_us = pipeline_wait_us;
+        }
+        timing_window_frames++;
+        if (timing_window_frames >= 50U) {
+            taskENTER_CRITICAL(&s_audio_lock);
+            s_audio_stats.capture_process_us =
+                (uint32_t)(timing_process_sum_us / timing_window_frames);
+            s_audio_stats.capture_dispatch_us =
+                (uint32_t)(timing_dispatch_sum_us / timing_window_frames);
+            s_audio_stats.capture_pipeline_wait_us =
+                (uint32_t)(timing_pipeline_wait_sum_us / timing_window_frames);
+            s_audio_stats.capture_pipeline_wait_max_us = timing_pipeline_wait_max_us;
+            taskEXIT_CRITICAL(&s_audio_lock);
+            timing_process_sum_us = 0;
+            timing_dispatch_sum_us = 0;
+            timing_pipeline_wait_sum_us = 0;
+            timing_pipeline_wait_max_us = 0;
+            timing_window_frames = 0;
         }
 
         log_frame_count++;
@@ -1510,26 +1943,106 @@ static void audio_capture_task(void *ctx)
                 (int)(audio_capture_gain_percent_to_db(processing_config.codec_gain_percent) * 10.0f + 0.5f);
             uint32_t sw_gain_x10 = (base_gain_q8 * 10U) / 256U;
             uint32_t auto_gain_x10 = (log_auto_gain_q8 * 10U) / 256U;
+            int raw_ch0_dbfs_x10 = audio_peak_dbfs_x10(log_raw_channel_peak[0]);
+            int raw_ch1_dbfs_x10 = audio_peak_dbfs_x10(
+                AUDIO_CAPTURE_HW_INPUT_CHANNELS > 1U ? log_raw_channel_peak[1] : 0U);
+            int pre_peak_dbfs_x10 = audio_peak_dbfs_x10(log_pre_gain_peak);
+            int pre_rms_dbfs_x10 = audio_rms_dbfs_x10(log_pre_gain_square_sum, log_sample_count);
+            int post_peak_dbfs_x10 = audio_peak_dbfs_x10(log_post_gain_peak);
+            int post_rms_dbfs_x10 = audio_rms_dbfs_x10(log_post_gain_square_sum, log_sample_count);
 
-            audio_format_dbfs_x10(audio_peak_dbfs_x10(log_pre_gain_peak),
+            taskENTER_CRITICAL(&s_audio_lock);
+            s_audio_stats.capture_window_valid = true;
+            s_audio_stats.capture_window_updated_ms =
+                (uint32_t)(esp_timer_get_time() / 1000ULL);
+            s_audio_stats.capture_raw_ch0_dbfs_x10 = raw_ch0_dbfs_x10;
+            s_audio_stats.capture_raw_ch1_dbfs_x10 = raw_ch1_dbfs_x10;
+            s_audio_stats.capture_pre_peak_dbfs_x10 = pre_peak_dbfs_x10;
+            s_audio_stats.capture_pre_rms_dbfs_x10 = pre_rms_dbfs_x10;
+            s_audio_stats.capture_post_peak_dbfs_x10 = post_peak_dbfs_x10;
+            s_audio_stats.capture_post_rms_dbfs_x10 = post_rms_dbfs_x10;
+            s_audio_stats.capture_base_gain_q8 = (uint16_t)base_gain_q8;
+            s_audio_stats.capture_auto_gain_q8 = (uint16_t)log_auto_gain_q8;
+            s_audio_stats.capture_auto_gain_target_peak = (uint16_t)target_peak;
+            s_audio_stats.capture_effective_auto_gain_max_percent =
+                (uint16_t)((auto_gain_max_q8 * 100U) / 256U);
+            s_audio_stats.echo_reference_frames = log_echo_reference_frames;
+            s_audio_stats.echo_active_frames = log_echo_active_frames;
+            s_audio_stats.echo_bypass_frames = log_echo_bypass_frames;
+            s_audio_stats.echo_warmup_frames = log_echo_warmup_frames;
+            s_audio_stats.echo_warmup_passthrough_frames = log_echo_warmup_passthrough_frames;
+            s_audio_stats.echo_near_end_detected_frames = log_echo_near_end_detected_frames;
+            s_audio_stats.echo_near_end_frames = log_echo_near_end_frames;
+            s_audio_stats.echo_near_decisions = log_echo_near_decisions;
+            s_audio_stats.echo_near_reject_low_peak = log_echo_near_reject_low_peak;
+            s_audio_stats.echo_near_reject_low_retained = log_echo_near_reject_low_retained;
+            s_audio_stats.echo_near_reject_low_nlp = log_echo_near_reject_low_nlp;
+            s_audio_stats.echo_near_reject_high_coherence =
+                log_echo_near_reject_high_coherence;
+            s_audio_stats.echo_near_retained_energy_percent =
+                log_echo_near_retained_energy_percent;
+            s_audio_stats.echo_near_nlp_reduction_percent =
+                log_echo_near_nlp_reduction_percent;
+            s_audio_stats.echo_near_reference_coherence_percent =
+                log_echo_near_reference_coherence_percent;
+            s_audio_stats.echo_far_end_guard_frames = log_far_end_guard_frames;
+            s_audio_stats.echo_ref_peak = log_echo_ref_peak;
+            s_audio_stats.echo_mic_peak = log_echo_mic_peak;
+            s_audio_stats.echo_linear_peak = log_echo_linear_peak;
+            s_audio_stats.echo_out_peak = log_echo_out_peak;
+            s_audio_stats.echo_suppress_percent = (uint8_t)log_echo_suppress_percent;
+            taskEXIT_CRITICAL(&s_audio_lock);
+
+            audio_format_dbfs_x10(pre_peak_dbfs_x10,
                                   pre_peak_db,
                                   sizeof(pre_peak_db));
-            audio_format_dbfs_x10(audio_rms_dbfs_x10(log_pre_gain_square_sum, log_sample_count),
+            audio_format_dbfs_x10(pre_rms_dbfs_x10,
                                   pre_rms_db,
                                   sizeof(pre_rms_db));
-            audio_format_dbfs_x10(audio_peak_dbfs_x10(log_post_gain_peak),
+            audio_format_dbfs_x10(post_peak_dbfs_x10,
                                   post_peak_db,
                                   sizeof(post_peak_db));
-            audio_format_dbfs_x10(audio_rms_dbfs_x10(log_post_gain_square_sum, log_sample_count),
+            audio_format_dbfs_x10(post_rms_dbfs_x10,
                                   post_rms_db,
                                   sizeof(post_rms_db));
-            audio_format_dbfs_x10(audio_peak_dbfs_x10(log_raw_channel_peak[0]),
+            audio_format_dbfs_x10(raw_ch0_dbfs_x10,
                                   ch0_peak_db,
                                   sizeof(ch0_peak_db));
-            audio_format_dbfs_x10(audio_peak_dbfs_x10(
-                                      AUDIO_CAPTURE_HW_INPUT_CHANNELS > 1U ? log_raw_channel_peak[1] : 0U),
+            audio_format_dbfs_x10(raw_ch1_dbfs_x10,
                                   ch1_peak_db,
                                   sizeof(ch1_peak_db));
+
+            if (processing_config.echo_diagnostics_enabled) {
+                ESP_LOGD(TAG,
+                         "call echo probe: frames=%lu ref_active=%lu aec_out=%lu bypass=%lu warmup=%lu/%lu near_end=%lu linear_peak=%lu guard=%lu ref_peak=%lu mic_peak=%lu out_peak=%lu suppress=%lu%% ref_gain=%lu.%02lux ref_scaled=%lu clip=%d codec=%d.%01ddB upload=%lu.%lux auto=%lu.%lux pre=%s/%s post=%s/%s",
+                         (unsigned long)log_frame_count,
+                         (unsigned long)log_echo_reference_frames,
+                         (unsigned long)log_echo_active_frames,
+                         (unsigned long)log_echo_bypass_frames,
+                         (unsigned long)log_echo_warmup_frames,
+                         (unsigned long)log_echo_warmup_passthrough_frames,
+                         (unsigned long)log_echo_near_end_frames,
+                         (unsigned long)log_echo_linear_peak,
+                         (unsigned long)log_far_end_guard_frames,
+                         (unsigned long)log_echo_ref_peak,
+                         (unsigned long)log_echo_mic_peak,
+                         (unsigned long)log_echo_out_peak,
+                         (unsigned long)log_echo_suppress_percent,
+                         (unsigned long)(reference_gain_q8 / 256U),
+                         (unsigned long)(((reference_gain_q8 % 256U) * 100U) / 256U),
+                         (unsigned long)log_scaled_reference_peak,
+                         log_scaled_reference_peak >= AUDIO_AEC_REFERENCE_CLIP_PEAK ? 1 : 0,
+                         codec_gain_x10 / 10,
+                         codec_gain_x10 % 10,
+                         (unsigned long)(sw_gain_x10 / 10U),
+                         (unsigned long)(sw_gain_x10 % 10U),
+                         (unsigned long)(auto_gain_x10 / 10U),
+                         (unsigned long)(auto_gain_x10 % 10U),
+                         pre_peak_db,
+                         pre_rms_db,
+                         post_peak_db,
+                         post_rms_db);
+            }
 
             ESP_LOGD(TAG,
                      "mic capture level: frames=%lu send=%u codec_gain=%d.%01ddB upload_gain=%lu.%lux auto_gain=%lu.%lux auto_max=%u%% noise_gate=%u/%lu primary_ch=%u ch0_peak=%sdBFS ch1_peak=%sdBFS aec_frames=%lu aec_ref=%lu aec_out=%lu aec_suppress=%lu%% pre_peak=%sdBFS pre_rms=%sdBFS post_peak=%sdBFS post_rms=%sdBFS meter=%lu",
@@ -1557,14 +2070,41 @@ static void audio_capture_task(void *ctx)
                      post_rms_db,
                      (unsigned long)audio_capture_peak_to_meter_percent(log_post_gain_peak));
 
+#if AUDIO_CAPTURE_REFERENCE_ENABLED
+            if (log_scaled_reference_peak >= AUDIO_AEC_REFERENCE_CLIP_PEAK) {
+                ESP_LOGW(TAG,
+                         "AEC reference clipping: ref_dma=%u ref_tdm_slot=%u ref_codec_ch=%u raw_peak=%lu scaled_peak=%lu",
+                         AUDIO_CAPTURE_REFERENCE_DMA_CHANNEL,
+                         AUDIO_CAPTURE_REFERENCE_TDM_SLOT,
+                         AUDIO_CAPTURE_REFERENCE_CODEC_CHANNEL,
+                         (unsigned long)log_raw_channel_peak[AUDIO_CAPTURE_REFERENCE_DMA_CHANNEL],
+                         (unsigned long)log_scaled_reference_peak);
+            }
+#endif
+
             memset(log_raw_channel_peak, 0, sizeof(log_raw_channel_peak));
+            log_scaled_reference_peak = 0;
             log_pre_gain_peak = 0;
             log_post_gain_peak = 0;
             log_pre_gain_square_sum = 0;
             log_post_gain_square_sum = 0;
             log_echo_ref_peak = 0;
+            log_echo_mic_peak = 0;
             log_echo_out_peak = 0;
+            log_echo_reference_frames = 0;
             log_echo_active_frames = 0;
+            log_echo_bypass_frames = 0;
+            log_echo_warmup_frames = 0;
+            log_echo_warmup_passthrough_frames = 0;
+            log_echo_near_end_detected_frames = 0;
+            log_echo_near_end_frames = 0;
+            log_echo_near_decisions = 0;
+            log_echo_near_reject_low_peak = 0;
+            log_echo_near_reject_low_retained = 0;
+            log_echo_near_reject_low_nlp = 0;
+            log_echo_near_reject_high_coherence = 0;
+            log_echo_linear_peak = 0;
+            log_far_end_guard_frames = 0;
             log_echo_suppress_percent = 0;
             log_noise_gate_closed_frames = 0;
             log_sample_count = 0;
@@ -1578,33 +2118,52 @@ static void audio_tone_task(void *ctx)
 {
     uint32_t tone_hz = ((uint32_t *)ctx)[0];
     uint32_t duration_ms = ((uint32_t *)ctx)[1];
+    bool stop_after_tone = false;
     free(ctx);
 
+    taskENTER_CRITICAL(&s_audio_lock);
+    stop_after_tone = !s_speaker_path_enabled;
+    taskEXIT_CRITICAL(&s_audio_lock);
+
+    const uint32_t chunk_ms = 20U;
     size_t frame_count = ((size_t)s_playback_format.sample_rate_hz * duration_ms) / 1000U;
-    size_t sample_count = frame_count * s_playback_format.channels;
-    int16_t *tone_buffer = calloc(sample_count, sizeof(int16_t));
+    size_t chunk_frames = ((size_t)s_playback_format.sample_rate_hz * chunk_ms) / 1000U;
+    size_t chunk_samples = chunk_frames * s_playback_format.channels;
+    int16_t *tone_buffer = heap_caps_calloc(chunk_samples,
+                                           sizeof(int16_t),
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (tone_buffer == NULL) {
         s_tone_task = NULL;
         vTaskDelete(NULL);
         return;
     }
 
-    for (size_t frame_index = 0; frame_index < frame_count; ++frame_index) {
-        float phase = (6.2831853f * (float)tone_hz * (float)frame_index) /
-                      (float)s_playback_format.sample_rate_hz;
-        int16_t sample = (int16_t)(sinf(phase) * 14000.0f);
-        for (uint8_t channel = 0; channel < s_playback_format.channels; ++channel) {
-            tone_buffer[frame_index * s_playback_format.channels + channel] = sample;
+    audio_format_t tone_format = s_playback_format;
+    for (size_t first_frame = 0; first_frame < frame_count; first_frame += chunk_frames) {
+        size_t frames_this_chunk = frame_count - first_frame;
+        if (frames_this_chunk > chunk_frames) {
+            frames_this_chunk = chunk_frames;
         }
+        for (size_t frame = 0; frame < frames_this_chunk; ++frame) {
+            size_t absolute_frame = first_frame + frame;
+            float phase = (6.2831853f * (float)tone_hz * (float)absolute_frame) /
+                          (float)s_playback_format.sample_rate_hz;
+            int16_t sample = (int16_t)(sinf(phase) * 14000.0f);
+            for (uint8_t channel = 0; channel < s_playback_format.channels; ++channel) {
+                tone_buffer[frame * s_playback_format.channels + channel] = sample;
+            }
+        }
+        audio_play_pcm_frame_with_format(
+            (const uint8_t *)tone_buffer,
+            frames_this_chunk * s_playback_format.channels * sizeof(int16_t),
+            &tone_format);
+    }
+    /* A diagnostic pulse inside a live call must not reset its AEC/playback path. */
+    if (stop_after_tone) {
+        audio_stop_playback();
     }
 
-    audio_format_t tone_format = s_playback_format;
-    audio_play_pcm_frame_with_format((const uint8_t *)tone_buffer,
-                                              sample_count * sizeof(int16_t),
-                                              &tone_format);
-    audio_stop_playback();
-
-    free(tone_buffer);
+    heap_caps_free(tone_buffer);
     s_tone_task = NULL;
     vTaskDelete(NULL);
 }
@@ -1984,14 +2543,23 @@ esp_err_t audio_set_capture_processing_config(const audio_capture_processing_con
     s_audio_stats.capture_codec_gain_percent = next.codec_gain_percent;
     s_audio_stats.capture_upload_gain_percent = next.upload_gain_percent;
     s_audio_stats.capture_auto_gain_max_percent = next.auto_gain_max_percent;
+    s_audio_stats.echo_continuous_processing = next.echo_continuous_processing;
+    s_audio_stats.echo_near_end_protection_enabled = next.echo_near_end_protection_enabled;
+    s_audio_stats.far_end_gain_guard_enabled = next.far_end_gain_guard_enabled;
+    s_audio_stats.far_end_upload_gain_percent = next.far_end_upload_gain_percent;
+    s_audio_stats.far_end_auto_gain_max_percent = next.far_end_auto_gain_max_percent;
+    s_audio_stats.echo_suppression = next.echo_suppression;
     s_audio_stats.capture_noise_gate_enabled = next.noise_gate_enabled;
     input_ready = s_audio_input_ready;
     taskEXIT_CRITICAL(&s_audio_lock);
+    audio_echo_cancel_set_suppression(next.echo_suppression);
 
     int codec_gain_x10 = (int)(audio_capture_gain_percent_to_db(next.codec_gain_percent) * 10.0f + 0.5f);
     uint32_t upload_gain_x10 = (audio_capture_base_gain_q8(next.upload_gain_percent) * 10U) / 256U;
+    uint32_t far_end_upload_gain_x10 =
+        (audio_capture_base_gain_q8(next.far_end_upload_gain_percent) * 10U) / 256U;
     ESP_LOGI(TAG,
-             "capture processing configured: send=%u codec=%u(%d.%01ddB) upload=%u(%lu.%lux) auto_max=%u%% noise_gate=%u open=%u close=%u atten=%u%%",
+             "capture processing configured: send=%u codec=%u(%d.%01ddB) upload=%u(%lu.%lux) auto_max=%u%% echo_continuous=%u near_end_protect=%u far_end_guard=%u upload=%u(%lu.%lux) auto_max=%u%% suppression=%s diagnostics=%u noise_gate=%u open=%u close=%u atten=%u%%",
              (unsigned)next.send_volume_percent,
              (unsigned)next.codec_gain_percent,
              codec_gain_x10 / 10,
@@ -2000,13 +2568,22 @@ esp_err_t audio_set_capture_processing_config(const audio_capture_processing_con
              (unsigned long)(upload_gain_x10 / 10U),
              (unsigned long)(upload_gain_x10 % 10U),
              (unsigned)next.auto_gain_max_percent,
+             next.echo_continuous_processing ? 1U : 0U,
+             next.echo_near_end_protection_enabled ? 1U : 0U,
+             next.far_end_gain_guard_enabled ? 1U : 0U,
+             (unsigned)next.far_end_upload_gain_percent,
+             (unsigned long)(far_end_upload_gain_x10 / 10U),
+             (unsigned long)(far_end_upload_gain_x10 % 10U),
+             (unsigned)next.far_end_auto_gain_max_percent,
+             next.echo_suppression == AUDIO_ECHO_SUPPRESSION_STRONG ? "strong" : "balanced",
+             next.echo_diagnostics_enabled ? 1U : 0U,
              next.noise_gate_enabled ? 1U : 0U,
              (unsigned)next.noise_gate_open_peak,
              (unsigned)next.noise_gate_close_peak,
              (unsigned)next.noise_gate_attenuation_percent);
 
     if (input_ready) {
-        esp_err_t codec_ret = audio_apply_microphone_gain(next.codec_gain_percent);
+        esp_err_t codec_ret = audio_apply_primary_microphone_gain(next.codec_gain_percent);
         if (codec_ret != ESP_OK) {
             ESP_LOGD(TAG,
                      "codec mic gain update deferred: codec_gain=%u ret=%s",
@@ -2092,6 +2669,16 @@ esp_err_t audio_play_pcm_frame_with_format(const uint8_t *data,
     return ret;
 }
 
+static int16_t audio_playback_input_mono_sample(const int16_t *samples,
+                                                size_t frame_index,
+                                                uint8_t channels)
+{
+    int16_t left = samples[frame_index * channels];
+    int16_t right = channels == 2U ?
+                        samples[frame_index * channels + 1U] : left;
+    return (int16_t)(((int32_t)left + right) / 2);
+}
+
 esp_err_t audio_render_playback_pcm(const uint8_t *data,
                                               size_t data_len,
                                               const audio_format_t *format,
@@ -2159,7 +2746,9 @@ esp_err_t audio_render_playback_pcm(const uint8_t *data,
     for (size_t frame_index = 0; frame_index < input_frames; ++frame_index) {
         int16_t left = input_samples[frame_index * format->channels];
         int16_t right = (format->channels == 2) ? input_samples[frame_index * format->channels + 1] : left;
-        int16_t mono = (int16_t)(((int32_t)left + (int32_t)right) / 2);
+        int16_t mono = audio_playback_input_mono_sample(input_samples,
+                                                        frame_index,
+                                                        format->channels);
         uint32_t abs_left = (uint32_t)abs(left);
         uint32_t abs_right = (uint32_t)abs(right);
         if (abs_left > playback_peak) {
@@ -2168,9 +2757,41 @@ esp_err_t audio_render_playback_pcm(const uint8_t *data,
         if (abs_right > playback_peak) {
             playback_peak = abs_right;
         }
-        for (size_t repeat_index = 0; repeat_index < upsample_ratio; ++repeat_index) {
+        for (uint8_t channel = 0; channel < s_playback_format.channels; ++channel) {
+            output_samples[out_index++] = mono;
+        }
+        if (upsample_ratio == 2U) {
+            size_t previous_frame = frame_index > 0U ? frame_index - 1U : frame_index;
+            size_t next_frame = frame_index + 1U < input_frames ?
+                                    frame_index + 1U : frame_index;
+            size_t next_next_frame = frame_index + 2U < input_frames ?
+                                         frame_index + 2U : next_frame;
+            int16_t previous_mono = audio_playback_input_mono_sample(
+                input_samples,
+                previous_frame,
+                format->channels);
+            int16_t next_mono = audio_playback_input_mono_sample(
+                input_samples,
+                next_frame,
+                format->channels);
+            int16_t next_next_mono = audio_playback_input_mono_sample(
+                input_samples,
+                next_next_frame,
+                format->channels);
+            /*
+             * Four-point half-sample interpolation preserves noticeably more
+             * of the 2-3.4 kHz speech-presence band than a simple midpoint,
+             * without adding state or changing packet timing.
+             */
+            int32_t interpolation_sum = -(int32_t)previous_mono +
+                                        9 * (int32_t)mono +
+                                        9 * (int32_t)next_mono -
+                                        (int32_t)next_next_mono;
+            int32_t interpolated =
+                (interpolation_sum + (interpolation_sum >= 0 ? 8 : -8)) / 16;
+            int16_t midpoint = audio_clip_i16(interpolated);
             for (uint8_t channel = 0; channel < s_playback_format.channels; ++channel) {
-                output_samples[out_index++] = mono;
+                output_samples[out_index++] = midpoint;
             }
         }
     }
@@ -2192,6 +2813,8 @@ esp_err_t audio_write_rendered_playback(int16_t *data,
 {
     int64_t prepare_start_us = 0;
     int64_t write_start_us = 0;
+    uint32_t prepare_us = 0;
+    uint32_t write_us = 0;
     uint32_t prepare_ms = 0;
     uint32_t write_ms = 0;
     esp_err_t ret = ESP_OK;
@@ -2222,27 +2845,12 @@ esp_err_t audio_write_rendered_playback(int16_t *data,
         }
     }
 
-    taskENTER_CRITICAL(&s_audio_lock);
-    playback_path_ready = s_speaker_path_enabled;
-    taskEXIT_CRITICAL(&s_audio_lock);
-    if (!playback_path_ready) {
-        prepare_start_us = esp_timer_get_time();
-        ret = audio_prepare_playback_path();
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "prepare playback path failed: %s", esp_err_to_name(ret));
-            goto out;
-        }
-        prepare_ms = (uint32_t)((esp_timer_get_time() - prepare_start_us) / 1000ULL);
-    }
-
     if (log_muted_playback) {
-        ESP_LOGD(TAG, "speaker volume is 0: remote playback muted, AEC keeps far-end reference");
+        ESP_LOGD(TAG, "speaker volume is 0: remote playback and AEC reference are muted");
     }
 
     if (speaker_volume_percent == 0U) {
-        audio_echo_cancel_feed_playback(data,
-                                        data_len / sizeof(int16_t),
-                                        s_playback_format.channels);
+        audio_echo_cancel_reset();
         audio_mute_playback_path_no_mutex();
 
         taskENTER_CRITICAL(&s_audio_lock);
@@ -2254,10 +2862,30 @@ esp_err_t audio_write_rendered_playback(int16_t *data,
         goto out;
     }
 
-    audio_apply_speaker_volume(data, data_len / sizeof(int16_t), speaker_volume_percent);
-    output_level = (uint32_t)(((uint64_t)(output_level > 100U ? 100U : output_level) *
-                               speaker_volume_percent) /
-                              100U);
+    taskENTER_CRITICAL(&s_audio_lock);
+    playback_path_ready = s_speaker_path_enabled;
+    taskEXIT_CRITICAL(&s_audio_lock);
+    if (!playback_path_ready) {
+        prepare_start_us = esp_timer_get_time();
+        ret = audio_prepare_playback_path();
+        if (ret != ESP_OK) {
+            taskENTER_CRITICAL(&s_audio_lock);
+            s_audio_stats.speaker_prepare_errors++;
+            taskEXIT_CRITICAL(&s_audio_lock);
+            ESP_LOGW(TAG, "prepare playback path failed: %s", esp_err_to_name(ret));
+            goto out;
+        }
+        prepare_us = (uint32_t)(esp_timer_get_time() - prepare_start_us);
+        prepare_ms = prepare_us / 1000U;
+    }
+
+    /*
+     * The ES8311 codec is the sole owner of user playback volume. Applying the
+     * same percentage to PCM here as well caused two independent attenuations:
+     * volume 80 was scaled by 0.8 in PCM and then mapped to -10 dB by
+     * esp_codec_dev. Keep the media samples and AEC reference at their original
+     * level; speaker_set_volume_percent() controls the real acoustic gain.
+     */
     audio_echo_cancel_feed_playback(data,
                                     data_len / sizeof(int16_t),
                                     s_playback_format.channels);
@@ -2265,14 +2893,28 @@ esp_err_t audio_write_rendered_playback(int16_t *data,
     write_start_us = esp_timer_get_time();
     ret = esp_codec_dev_write(s_play_dev_handle, (void *)data, (int)data_len);
     if (ret != ESP_OK) {
+        audio_echo_cancel_reset();
+        taskENTER_CRITICAL(&s_audio_lock);
+        s_audio_stats.speaker_write_errors++;
+        taskEXIT_CRITICAL(&s_audio_lock);
         ESP_LOGW(TAG, "speaker write failed: %s", esp_err_to_name(ret));
         goto out;
     }
-    write_ms = (uint32_t)((esp_timer_get_time() - write_start_us) / 1000ULL);
+    write_us = (uint32_t)(esp_timer_get_time() - write_start_us);
+    write_ms = write_us / 1000U;
 
     taskENTER_CRITICAL(&s_audio_lock);
     s_audio_stats.speaker_enabled = true;
     s_audio_stats.output_level = output_level > 100U ? 100U : output_level;
+    s_audio_stats.speaker_write_frames++;
+    s_audio_stats.speaker_prepare_last_us = prepare_us;
+    if (prepare_us > s_audio_stats.speaker_prepare_max_us) {
+        s_audio_stats.speaker_prepare_max_us = prepare_us;
+    }
+    s_audio_stats.speaker_write_last_us = write_us;
+    if (write_us > s_audio_stats.speaker_write_max_us) {
+        s_audio_stats.speaker_write_max_us = write_us;
+    }
     s_last_playback_timing.prepare_ms = prepare_ms;
     s_last_playback_timing.write_ms = write_ms;
     s_last_playback_timing.data_bytes = (uint32_t)data_len;

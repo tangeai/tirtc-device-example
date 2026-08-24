@@ -34,6 +34,7 @@ static const char *TAG = "device_binding";
 #define DEVICE_BINDING_WEAK_NET_RETRY_MS     5000U
 #define DEVICE_BINDING_WAIT_POLL_MS          500U
 #define DEVICE_BINDING_REASON_MAX_LEN        32
+#define DEVICE_BINDING_PENDING_MIN_RESTORE_TTL_SEC 30U
 
 typedef struct {
     uint32_t magic;
@@ -248,13 +249,14 @@ static esp_err_t device_binding_save_pending_session(const device_binding_identi
 }
 
 static bool device_binding_load_pending_session(const device_binding_identity_t *identity,
-                                                device_binding_http_report_result_t *report)
+                                                device_binding_http_report_result_t *report,
+                                                uint32_t *remaining_wait_ms)
 {
     device_binding_pending_store_t store = {0};
     size_t store_len = sizeof(store);
     time_t now = 0;
 
-    if (identity == NULL || report == NULL) {
+    if (identity == NULL || report == NULL || remaining_wait_ms == NULL) {
         return false;
     }
     esp_err_t ret = platform_nvs_async_get_blob(DEVICE_BINDING_PENDING_NVS_NAMESPACE,
@@ -275,16 +277,28 @@ static bool device_binding_load_pending_session(const device_binding_identity_t 
         return false;
     }
 
+    const int64_t ttl_left_sec = store.expires_at_unix - (int64_t)now;
+    if (ttl_left_sec < (int64_t)DEVICE_BINDING_PENDING_MIN_RESTORE_TTL_SEC) {
+        ESP_LOGI(TAG,
+                 "binding pending session discarded: ttl_left=%llds min_restore=%us",
+                 (long long)ttl_left_sec,
+                 (unsigned)DEVICE_BINDING_PENDING_MIN_RESTORE_TTL_SEC);
+        (void)device_binding_clear_pending_session();
+        return false;
+    }
+
     memset(report, 0, sizeof(*report));
     report->type = DEVICE_BINDING_HTTP_REPORT_UNBOUND;
     strlcpy(report->code, store.code, sizeof(report->code));
     strlcpy(report->temp_client_id, store.temp_client_id, sizeof(report->temp_client_id));
     strlcpy(report->temp_token, store.temp_token, sizeof(report->temp_token));
+    const uint64_t ttl_left_ms = (uint64_t)ttl_left_sec * 1000ULL;
+    *remaining_wait_ms = ttl_left_ms > UINT32_MAX ? UINT32_MAX : (uint32_t)ttl_left_ms;
     ESP_LOGI(TAG,
              "binding pending session restored: code=%s temp_client=%s ttl_left=%llds",
              store.code,
              store.temp_client_id,
-             (long long)(store.expires_at_unix - (int64_t)now));
+             (long long)ttl_left_sec);
     return true;
 }
 
@@ -339,6 +353,7 @@ static esp_err_t device_binding_run(void)
     uint32_t wait_timeout_ms = s_binding.config.wait_timeout_ms != 0U ?
                                s_binding.config.wait_timeout_ms :
                                DEVICE_BINDING_DEFAULT_WAIT_MS;
+    uint32_t binding_wait_timeout_ms = wait_timeout_ms;
     uint32_t report_retry_elapsed_ms = 0;
     uint32_t weak_net_retry_elapsed_ms = 0;
     bool has_existing_credentials = false;
@@ -379,7 +394,12 @@ static esp_err_t device_binding_run(void)
                  (unsigned)strlen(existing.device_id));
     }
 
-    has_pending_session = device_binding_load_pending_session(&identity, &report);
+    has_pending_session = device_binding_load_pending_session(&identity,
+                                                              &report,
+                                                              &binding_wait_timeout_ms);
+    if (has_pending_session && binding_wait_timeout_ms > wait_timeout_ms) {
+        binding_wait_timeout_ms = wait_timeout_ms;
+    }
     while (!has_pending_session) {
         device_binding_set_state(DEVICE_BINDING_STATE_REPORTING, ESP_OK, "request binding code");
         memset(&report, 0, sizeof(report));
@@ -448,6 +468,7 @@ static esp_err_t device_binding_run(void)
                                                   &report,
                                                   wait_timeout_ms,
                                                   true);
+        binding_wait_timeout_ms = wait_timeout_ms;
         if (device_binding_cancelled(cancel_ctx.generation)) {
             (void)device_binding_clear_pending_session();
             return ESP_ERR_INVALID_STATE;
@@ -470,7 +491,7 @@ static esp_err_t device_binding_run(void)
         .mac = identity.mac,
         .temp_client_id = report.temp_client_id,
         .temp_token = report.temp_token,
-        .wait_timeout_ms = wait_timeout_ms,
+        .wait_timeout_ms = binding_wait_timeout_ms,
         .should_cancel = device_binding_cancel_cb,
         .cancel_ctx = &cancel_ctx,
     };

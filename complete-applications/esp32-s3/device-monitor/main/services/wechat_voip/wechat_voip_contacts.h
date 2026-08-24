@@ -10,11 +10,13 @@
 extern "C" {
 #endif
 
-#define WECHAT_VOIP_CONTACT_MAX 3
+/* UI snapshot capacity. The complete server authorization cache is dynamic. */
+#define WECHAT_VOIP_CONTACT_MAX 4
 #define WECHAT_VOIP_OPEN_ID_MAX 96
 #define WECHAT_VOIP_MODEL_ID_MAX 64
 #define WECHAT_VOIP_APP_ID_MAX 64
-#define WECHAT_VOIP_REMARK_MAX 64
+#define WECHAT_VOIP_REMARK_MAX_CHARS 64
+#define WECHAT_VOIP_REMARK_MAX ((WECHAT_VOIP_REMARK_MAX_CHARS * 4) + 1)
 
 typedef struct {
     char open_id[WECHAT_VOIP_OPEN_ID_MAX];
@@ -24,6 +26,7 @@ typedef struct {
 typedef struct {
     bool ready;
     bool server_synced;
+    esp_err_t last_error;
     uint8_t count;
     wechat_voip_contact_t contacts[WECHAT_VOIP_CONTACT_MAX];
 } wechat_voip_contacts_snapshot_t;
@@ -37,22 +40,21 @@ typedef struct {
 
 esp_err_t wechat_voip_contacts_init(void);
 void wechat_voip_contacts_reset_for_device(const char *device_id, uint32_t identity_generation);
-void wechat_voip_contacts_clear_identity_cache(uint32_t identity_generation);
-void wechat_voip_contacts_load(const char *device_id, uint32_t identity_generation);
-esp_err_t wechat_voip_contacts_remember_for_device(const char *device_id,
-                                                    uint32_t identity_generation,
-                                                    const wechat_voip_auth_user_t *user,
-                                                    const char *source);
 esp_err_t wechat_voip_contacts_replace_for_device(const char *device_id,
                                                    uint32_t identity_generation,
                                                    const wechat_voip_auth_user_t *users,
                                                    size_t count,
                                                    const char *source);
+void wechat_voip_contacts_note_sync_error_for_device(const char *device_id,
+                                                      uint32_t identity_generation,
+                                                      esp_err_t error);
+esp_err_t wechat_voip_contacts_check_authorized(const char *openid);
 esp_err_t wechat_voip_contacts_update_remark(const char *openid,
                                              const char *remark,
                                              const char *source);
 void wechat_voip_contacts_find(const char *openid, wechat_voip_auth_user_t *target);
 void wechat_voip_contacts_get_snapshot(wechat_voip_contacts_snapshot_t *snapshot);
+bool wechat_voip_remark_is_valid(const char *remark);
 
 #ifdef __cplusplus
 }

@@ -333,6 +333,11 @@ bool thing_service_registry_is_discovered(void)
     return discovered;
 }
 
+const char *thing_service_registry_discovery_url(void)
+{
+    return s_registry.endpoints.discovery_url;
+}
+
 const char *thing_service_registry_device_api_base(void)
 {
     return s_registry.endpoints.device_api_base;

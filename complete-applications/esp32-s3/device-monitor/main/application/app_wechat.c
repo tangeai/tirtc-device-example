@@ -17,6 +17,7 @@ static const char *TAG = "app_wechat";
 
 #define APP_WECHAT_SCAN_RESTORE_TASK_STACK_SIZE 4096
 #define APP_WECHAT_SCAN_RESTORE_TASK_PRIORITY   3
+#define APP_WECHAT_OPEN_ID_LENGTH                28U
 
 typedef struct {
 	app_scan_preview_cb_t preview_cb;
@@ -26,6 +27,24 @@ typedef struct {
 } app_wechat_contact_scan_state_t;
 
 static app_wechat_contact_scan_state_t s_wechat_contact_scan;
+
+static bool app_wechat_open_id_valid(const char *open_id)
+{
+	if (open_id == NULL || strlen(open_id) != APP_WECHAT_OPEN_ID_LENGTH) {
+		return false;
+	}
+
+	for (size_t index = 0U; index < APP_WECHAT_OPEN_ID_LENGTH; ++index) {
+		char ch = open_id[index];
+		if (!((ch >= '0' && ch <= '9') ||
+		      (ch >= 'A' && ch <= 'Z') ||
+		      (ch >= 'a' && ch <= 'z') ||
+		      ch == '_' || ch == '-')) {
+			return false;
+		}
+	}
+	return true;
+}
 
 static void app_wechat_scan_restore_task(void *arg)
 {
@@ -110,7 +129,7 @@ static void app_wechat_scan_result_cb(esp_err_t result,
 		strlcpy(raw_payload_buf, contact->raw_payload, sizeof(raw_payload_buf));
 	}
 	if (result == ESP_OK) {
-		if (contact == NULL || contact->open_id[0] == '\0') {
+		if (contact == NULL || !app_wechat_open_id_valid(contact->open_id)) {
 			result = ESP_ERR_INVALID_RESPONSE;
 		} else {
 			strlcpy(open_id_buf, contact->open_id, sizeof(open_id_buf));
@@ -150,28 +169,15 @@ esp_err_t app_wechat_call_contact(const char *open_id)
 
 esp_err_t app_wechat_add_contact(const char *open_id)
 {
-	if (open_id == NULL || open_id[0] == '\0') {
+	if (!app_wechat_open_id_valid(open_id)) {
 		return ESP_ERR_INVALID_ARG;
 	}
 	if (app_get_active_app() != APP_ID_WECHAT) {
 		return ESP_ERR_INVALID_STATE;
 	}
 
-	ESP_LOGD(TAG, "wechat contact add requested");
+	ESP_LOGD(TAG, "wechat contact authorization check requested");
 	return wechat_voip_service_add_contact(open_id);
-}
-
-esp_err_t app_wechat_remove_contact(const char *open_id)
-{
-	if (open_id == NULL || open_id[0] == '\0') {
-		return ESP_ERR_INVALID_ARG;
-	}
-	if (app_get_active_app() != APP_ID_WECHAT) {
-		return ESP_ERR_INVALID_STATE;
-	}
-
-	ESP_LOGD(TAG, "wechat contact remove requested");
-	return wechat_voip_service_remove_contact(open_id);
 }
 
 esp_err_t app_wechat_update_contact_remark(const char *open_id, const char *remark)
@@ -179,8 +185,10 @@ esp_err_t app_wechat_update_contact_remark(const char *open_id, const char *rema
 	if (open_id == NULL || open_id[0] == '\0' || remark == NULL) {
 		return ESP_ERR_INVALID_ARG;
 	}
-	if (strlen(open_id) >= APP_WECHAT_OPEN_ID_MAX ||
-	    strlen(remark) >= APP_WECHAT_REMARK_MAX) {
+	if (strlen(open_id) >= APP_WECHAT_OPEN_ID_MAX) {
+		return ESP_ERR_INVALID_SIZE;
+	}
+	if (!wechat_voip_remark_is_valid(remark)) {
 		return ESP_ERR_INVALID_SIZE;
 	}
 	if (app_get_active_app() != APP_ID_WECHAT || !network_is_connected()) {
@@ -216,7 +224,7 @@ esp_err_t app_scan_wechat_contact(void)
 	if (resume_ret != ESP_OK) {
 		return resume_ret;
 	}
-	if (contact.open_id[0] == '\0') {
+	if (!app_wechat_open_id_valid(contact.open_id)) {
 		return ESP_ERR_INVALID_RESPONSE;
 	}
 

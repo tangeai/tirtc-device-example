@@ -18,7 +18,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
-#include "jpeg_decoder.h"
 #include "lvgl.h"
 
 #include "app_task_affinity.h"
@@ -87,7 +86,6 @@ static esp_err_t display_allocate_status_buffers(void)
 }
 static TaskHandle_t s_wechat_hangup_task;
 static int64_t s_last_wifi_scan_request_us;
-static int64_t s_wifi_connect_request_us;
 static char s_selected_ssid[33];
 static char s_wifi_connect_target_ssid[33];
 static char s_main_hint_text[96] = "Ready";
@@ -102,9 +100,14 @@ static bool s_binding_prompt_visible;
 static bool s_binding_prompt_code_dialog_visible;
 static char s_binding_prompt_code_text[16];
 static lv_obj_t *s_call_alert_box;
+static lv_obj_t *s_call_contact_request_box;
+static lv_obj_t *s_call_delete_confirm_box;
 static lv_obj_t *s_wechat_delete_confirm_box;
 static bool s_call_alert_wechat;
-static uint8_t s_wechat_delete_pending_index = UINT8_MAX;
+static char s_call_contact_request_peer[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX];
+static char s_call_contact_request_suppressed_peer[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX];
+static uint8_t s_call_delete_pending_index = UINT8_MAX;
+static char s_call_delete_pending_device_id[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX];
 static char s_wechat_delete_pending_open_id[DISPLAY_WECHAT_OPEN_ID_MAX];
 static char s_wechat_remark_edit_open_id[DISPLAY_WECHAT_OPEN_ID_MAX];
 static bool s_ai_dialog_external_font_applied;
@@ -122,7 +125,6 @@ static int64_t s_refresh_slow_last_log_us;
 #define DISPLAY_MAIN_DEVICE_ID_LABEL_Y 158
 #define DISPLAY_MAIN_DEVICE_ID_LABEL_WIDTH 146
 #define DISPLAY_MAIN_DEVICE_ID_LABEL_FONT_SIZE 12
-#define DISPLAY_REMOTE_VIDEO_BUFFER_COUNT 2U
 #define DISPLAY_AI_CHAT_CAPTION_BOLD_LAYER_COUNT 3U
 #define DISPLAY_REFRESH_SLOW_LOG_US (40LL * 1000LL)
 #define DISPLAY_REFRESH_SLOW_LOG_INTERVAL_US (5LL * 1000LL * 1000LL)
@@ -240,6 +242,8 @@ typedef enum {
     DISPLAY_WIFI_CONNECT_STATE_SHORT_PASSWORD,
     DISPLAY_WIFI_CONNECT_STATE_CONNECTING,
     DISPLAY_WIFI_CONNECT_STATE_FAILED,
+    DISPLAY_WIFI_CONNECT_STATE_AUTH_FAILED,
+    DISPLAY_WIFI_CONNECT_STATE_AP_NOT_FOUND,
     DISPLAY_WIFI_CONNECT_STATE_TIMEOUT,
     DISPLAY_WIFI_CONNECT_STATE_CONNECTED,
 } display_wifi_connect_state_t;
@@ -255,6 +259,7 @@ typedef enum {
     DISPLAY_PAGE_CALL_ADD,
     DISPLAY_PAGE_CALL_SCAN,
     DISPLAY_PAGE_CALL_LIST,
+    DISPLAY_PAGE_CALL_REMARK,
     DISPLAY_PAGE_CALL_ACTIVE,
     DISPLAY_PAGE_WECHAT,
     DISPLAY_PAGE_WECHAT_ADD,
@@ -325,8 +330,8 @@ typedef struct {
 } display_debug_scroll_request_t;
 
 static display_wifi_connect_state_t s_wifi_connect_state;
-static display_page_id_t s_wifi_parent_page = DISPLAY_PAGE_DEVICE;
-static display_page_id_t s_uuid_parent_page = DISPLAY_PAGE_DEVICE;
+static display_page_id_t s_wifi_parent_page = DISPLAY_PAGE_HOME;
+static display_page_id_t s_uuid_parent_page = DISPLAY_PAGE_HOME;
 
 static lv_obj_t *s_home_page;
 static lv_obj_t *s_home_carousel;
@@ -349,6 +354,7 @@ static lv_obj_t *s_call_add_page;
 static lv_obj_t *s_call_add_edit_page;
 static lv_obj_t *s_call_scan_page;
 static lv_obj_t *s_call_list_page;
+static lv_obj_t *s_call_remark_page;
 static lv_obj_t *s_call_active_page;
 static lv_obj_t *s_wechat_page;
 static lv_obj_t *s_wechat_add_page;
@@ -383,7 +389,7 @@ static lv_obj_t *s_device_receive_volume_label;
 static lv_obj_t *s_device_send_volume_label;
 static lv_obj_t *s_device_receive_mute_label;
 static lv_obj_t *s_device_send_mute_label;
-static uint8_t s_device_receive_restore_volume = 50U;
+static uint8_t s_device_receive_restore_volume = 80U;
 static uint8_t s_device_send_restore_volume = 50U;
 static bool s_device_receive_restore_valid;
 static bool s_device_send_restore_valid;
@@ -392,9 +398,8 @@ static lv_obj_t *s_uuid_edit_hint_label;
 static lv_obj_t *s_uuid_edit_length_label;
 static lv_obj_t *s_uuid_edit_status_label;
 static lv_obj_t *s_main_hint_label;
-static lv_obj_t *s_remote_video_img;
-static lv_obj_t *s_remote_video_placeholder_label;
 static lv_obj_t *s_wifi_connection_state_label;
+static lv_obj_t *s_wifi_connection_runtime_label;
 static lv_obj_t *s_wifi_scan_state_label;
 static lv_obj_t *s_wifi_scan_count_label;
 static lv_obj_t *s_wifi_list;
@@ -402,6 +407,7 @@ static lv_obj_t *s_wifi_list_buttons[DISPLAY_WIFI_SCAN_MAX];
 static lv_obj_t *s_wifi_list_ssid_labels[DISPLAY_WIFI_SCAN_MAX];
 static lv_obj_t *s_wifi_list_rssi_labels[DISPLAY_WIFI_SCAN_MAX];
 static lv_obj_t *s_wifi_connect_hint_label;
+static lv_obj_t *s_wifi_connect_progress_label;
 static lv_obj_t *s_wifi_connect_rssi_label;
 static lv_obj_t *s_wifi_connect_details_label;
 static lv_obj_t *s_network_summary_wifi_label;
@@ -445,6 +451,11 @@ static lv_obj_t *s_call_add_edit_keyboard;
 static lv_obj_t *s_call_add_edit_hint_label;
 static lv_obj_t *s_call_add_edit_length_label;
 static lv_obj_t *s_call_add_edit_status_label;
+static lv_obj_t *s_call_remark_ta;
+static lv_obj_t *s_call_remark_keyboard;
+static lv_obj_t *s_call_remark_length_label;
+static lv_obj_t *s_call_remark_status_label;
+static lv_obj_t *s_call_list_content;
 static lv_obj_t *s_call_scan_img;
 static lv_obj_t *s_call_scan_info_overlay;
 static lv_obj_t *s_wechat_qrcode;
@@ -464,8 +475,6 @@ static lv_obj_t *s_wechat_contact_remark_labels[DISPLAY_WECHAT_CONTACT_MAX];
 static lv_obj_t *s_wechat_contact_open_id_labels[DISPLAY_WECHAT_CONTACT_MAX];
 static lv_obj_t *s_wechat_remark_current_label;
 static lv_obj_t *s_test_status_label;
-static lv_obj_t *s_test_video_btn;
-static lv_obj_t *s_test_video_btn_label;
 static lv_obj_t *s_test_audio_btn;
 static lv_obj_t *s_test_audio_btn_label;
 static lv_obj_t *s_ota_status_label;
@@ -520,10 +529,6 @@ static lv_obj_t *s_ai_settings_speaker_value_label;
 static lv_obj_t *s_ai_settings_avatar_buttons[DISPLAY_AI_AVATAR_COUNT];
 static lv_obj_t *s_ai_settings_avatar_labels[DISPLAY_AI_AVATAR_COUNT];
 static lv_obj_t *s_password_ta;
-static lv_img_dsc_t s_remote_video_dsc[2];
-static uint16_t *s_remote_video_buffers[DISPLAY_REMOTE_VIDEO_BUFFER_COUNT];
-static size_t s_remote_video_pixels;
-static size_t s_remote_video_dsc_index;
 static lv_img_dsc_t s_call_scan_preview_dsc[2];
 static uint16_t *s_call_scan_preview_buffers[2];
 static size_t s_call_scan_preview_pixels;
@@ -531,6 +536,7 @@ static size_t s_call_scan_preview_index;
 static bool s_call_scan_active;
 static display_scan_owner_t s_scan_owner;
 static display_call_add_field_t s_call_add_edit_field;
+static EXT_RAM_BSS_ATTR char s_call_remark_edit_device_id[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX];
 static EXT_RAM_BSS_ATTR char s_device_qr_payload[DISPLAY_DEVICE_QR_PAYLOAD_MAX];
 static EXT_RAM_BSS_ATTR char s_call_qr_payload[DISPLAY_CONTACT_QR_PAYLOAD_MAX];
 static EXT_RAM_BSS_ATTR char s_wechat_qr_payload[DISPLAY_CONTACT_QR_PAYLOAD_MAX];
@@ -546,6 +552,7 @@ static void display_show_call_add_edit_page(display_call_add_field_t field);
 static void display_show_call_scan_page(void);
 static void display_show_tirtc_config_scan_page(void);
 static void display_show_call_list_page(void);
+static void display_show_call_remark_page(uint8_t contact_index);
 static void display_show_call_active_page(void);
 static void display_show_wechat_page(void);
 static void display_show_wechat_add_page(void);
@@ -591,6 +598,14 @@ static void display_call_add_edit_save_btn_cb(lv_event_t *event);
 static void display_call_confirm_add_btn_cb(lv_event_t *event);
 static void display_call_contact_touch_cb(lv_event_t *event);
 static void display_call_contact_call_btn_cb(lv_event_t *event);
+static void display_call_contact_remark_btn_cb(lv_event_t *event);
+static void display_call_contact_delete_cb(lv_event_t *event);
+static void display_call_remark_back_btn_cb(lv_event_t *event);
+static void display_call_remark_save_btn_cb(lv_event_t *event);
+static void display_call_delete_cancel_btn_cb(lv_event_t *event);
+static void display_call_delete_confirm_btn_cb(lv_event_t *event);
+static void display_call_contact_request_reject_btn_cb(lv_event_t *event);
+static void display_call_contact_request_accept_btn_cb(lv_event_t *event);
 static void display_call_hangup_btn_cb(lv_event_t *event);
 static void display_call_volume_btn_cb(lv_event_t *event);
 static void display_wechat_child_back_btn_cb(lv_event_t *event);
@@ -621,6 +636,7 @@ static void display_tirtc_config_scan_btn_cb(lv_event_t *event);
 static void display_tirtc_config_edit_back_btn_cb(lv_event_t *event);
 static void display_tirtc_config_edit_save_btn_cb(lv_event_t *event);
 static void display_call_add_edit_textarea_event_cb(lv_event_t *event);
+static void display_call_remark_textarea_event_cb(lv_event_t *event);
 static void display_wechat_add_edit_textarea_event_cb(lv_event_t *event);
 static void display_tirtc_edit_textarea_event_cb(lv_event_t *event);
 static void display_update_call_add_field_labels(void);
@@ -641,6 +657,7 @@ static void display_build_call_add_page(lv_obj_t *screen);
 static void display_build_call_add_edit_page(lv_obj_t *screen);
 static void display_build_call_scan_page(lv_obj_t *screen);
 static void display_build_call_list_page(lv_obj_t *screen);
+static void display_build_call_remark_page(lv_obj_t *screen);
 static void display_build_call_active_page(lv_obj_t *screen);
 static void display_build_wechat_page(lv_obj_t *screen);
 static void display_build_wechat_add_page(lv_obj_t *screen);
@@ -680,6 +697,7 @@ static void display_ai_chat_render_scroll_limited(const display_status_t *status
 static void display_update_binding_prompt(const display_status_t *status);
 static void display_show_wifi_alert(const char *title, const char *message);
 static const lv_font_t *display_ascii_font(uint8_t size);
+static const lv_font_t *display_runtime_utf8_font(void);
 static const lv_font_t *display_ai_chat_font(void);
 static void display_apply_ai_dialog_font_if_ready(void);
 static void display_text_set(lv_obj_t *obj, const char *text);
@@ -762,7 +780,6 @@ static void display_show_wechat_delete_confirm(uint8_t contact_index);
 #define DISPLAY_WIFI_CONNECT_RSSI_WIDTH      70
 #define DISPLAY_WIFI_CONNECT_DETAILS_TOP     100
 #define DISPLAY_WIFI_CONNECT_DETAILS_WIDTH   280
-#define DISPLAY_WIFI_CONNECT_TIMEOUT_US      (25LL * 1000000LL)
 #define DISPLAY_WIFI_PASSWORD_MIN_LEN        8
 #define DISPLAY_WIFI_KEYBOARD_LEFT           4
 #define DISPLAY_WIFI_KEYBOARD_TOP            104
@@ -774,9 +791,8 @@ static void display_show_wechat_delete_confirm(uint8_t contact_index);
 #define DISPLAY_WIFI_STATUS_RIGHT_WIDTH      96
 #define DISPLAY_WIFI_SCAN_REFRESH_GRACE_US   (500LL * 1000LL)
 #define DISPLAY_WIFI_SCAN_REFRESH_TIMEOUT_US (8LL * 1000000LL)
-#define DISPLAY_DEVICE_VOLUME_RESTORE_DEFAULT 50U
-#define DISPLAY_REMOTE_VIDEO_WIDTH           110
-#define DISPLAY_REMOTE_VIDEO_HEIGHT          82
+#define DISPLAY_DEVICE_SPEAKER_VOLUME_RESTORE_DEFAULT 80U
+#define DISPLAY_DEVICE_CAPTURE_GAIN_RESTORE_DEFAULT 50U
 #define DISPLAY_MIN_VALID_UNIX_TIME          1672531200LL
 #define DISPLAY_UUID_INPUT_WIDTH             304
 #define DISPLAY_UUID_INPUT_HEIGHT            31
@@ -792,8 +808,8 @@ static void display_show_wechat_delete_confirm(uint8_t contact_index);
 #define DISPLAY_UUID_KEYBOARD_WIDTH          (DISPLAY_DRIVER_WIDTH - (DISPLAY_UUID_KEYBOARD_LEFT * 2))
 #define DISPLAY_UUID_KEYBOARD_HEIGHT         112
 #define DISPLAY_CALL_CONTACT_COUNT           DISPLAY_CALL_CONTACT_MAX
-#define DISPLAY_CALL_CONTACT_TOUCH_LEFT      204
-#define DISPLAY_CALL_CONTACT_TOUCH_WIDTH     100
+#define DISPLAY_CALL_CONTACT_TOUCH_LEFT      220
+#define DISPLAY_CALL_CONTACT_TOUCH_WIDTH     84
 #define DISPLAY_CALL_CONTACT_TOUCH_HEIGHT    44
 #define DISPLAY_WECHAT_CONTACT_COUNT         DISPLAY_WECHAT_CONTACT_MAX
 #define DISPLAY_WECHAT_OPEN_ID_LENGTH        28U
@@ -805,7 +821,7 @@ static void display_show_wechat_delete_confirm(uint8_t contact_index);
 #define DISPLAY_KB_BTN_SPACE_ID              37
 #define DISPLAY_KB_BTN_CURSOR_RIGHT_ID       38
 #define DISPLAY_KB_BTN_JOIN_ID               39
-#define DISPLAY_TIRTC_VERSION_TEXT           "TiRTC 2.2.0"
+#define DISPLAY_TIRTC_VERSION_TEXT           "TiRTC 2.3.0"
 #define DISPLAY_AI_CHAT_STATE_IDLE           0U
 #define DISPLAY_AI_CHAT_STATE_STARTING       1U
 #define DISPLAY_AI_CHAT_STATE_TOKEN          2U
@@ -831,6 +847,9 @@ typedef struct {
     char open_id[DISPLAY_WECHAT_OPEN_ID_MAX];
     char raw_payload[DISPLAY_CONTACT_QR_PAYLOAD_MAX];
 } display_contact_scan_result_event_t;
+
+static display_contact_scan_result_event_t s_wechat_scan_fallback_event;
+static bool s_wechat_scan_fallback_busy;
 
 static const char * const s_wifi_keyboard_map_lc[] = {
     "1#", "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", LV_SYMBOL_BACKSPACE, "\n",
@@ -913,8 +932,11 @@ static const char * const s_wechat_remark_presets[] = {
 };
 
 static EXT_RAM_BSS_ATTR display_call_contact_t s_call_contacts[DISPLAY_CALL_CONTACT_COUNT];
+static EXT_RAM_BSS_ATTR display_call_pending_contact_t s_call_pending_contacts[DISPLAY_CALL_CONTACT_COUNT];
 static lv_obj_t *s_call_contact_call_buttons[DISPLAY_CALL_CONTACT_COUNT];
+static bool s_call_contact_long_pressed[DISPLAY_CALL_CONTACT_COUNT];
 static uint8_t s_call_contact_count;
+static uint8_t s_call_pending_contact_count;
 static EXT_RAM_BSS_ATTR char s_call_add_device_id[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX];
 static EXT_RAM_BSS_ATTR char s_wechat_add_open_id[DISPLAY_WECHAT_OPEN_ID_MAX];
 
@@ -1023,127 +1045,6 @@ static bool display_build_contact_qr_payload(char *payload,
     return true;
 }
 
-static uint16_t display_remote_video_zoom(uint16_t width, uint16_t height)
-{
-    if (width == 0 || height == 0) {
-        return LV_IMG_ZOOM_NONE;
-    }
-
-    uint32_t zoom_x = (DISPLAY_REMOTE_VIDEO_WIDTH * LV_IMG_ZOOM_NONE) / width;
-    uint32_t zoom_y = (DISPLAY_REMOTE_VIDEO_HEIGHT * LV_IMG_ZOOM_NONE) / height;
-    uint32_t zoom = zoom_x < zoom_y ? zoom_x : zoom_y;
-
-    if (zoom == 0) {
-        zoom = 1;
-    }
-    if (zoom > LV_IMG_ZOOM_NONE) {
-        zoom = LV_IMG_ZOOM_NONE;
-    }
-    return (uint16_t)zoom;
-}
-
-static void display_clear_remote_video_locked(const char *text)
-{
-    if (s_remote_video_img != NULL) {
-        lv_obj_add_flag(s_remote_video_img, LV_OBJ_FLAG_HIDDEN);
-        lv_img_set_src(s_remote_video_img, NULL);
-    }
-    if (s_remote_video_placeholder_label != NULL) {
-        display_text_set(s_remote_video_placeholder_label,
-                          text != NULL ? text : "Remote video\nwaiting");
-        lv_obj_clear_flag(s_remote_video_placeholder_label, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_center(s_remote_video_placeholder_label);
-    }
-}
-
-static esp_err_t display_ensure_remote_video_buffers(size_t pixel_count)
-{
-    bool buffers_ready = true;
-
-    if (pixel_count == 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    for (size_t index = 0; index < DISPLAY_REMOTE_VIDEO_BUFFER_COUNT; ++index) {
-        if (s_remote_video_buffers[index] == NULL) {
-            buffers_ready = false;
-            break;
-        }
-    }
-    if (s_remote_video_pixels == pixel_count && buffers_ready) {
-        return ESP_OK;
-    }
-
-    if (s_remote_video_img != NULL) {
-        lv_obj_add_flag(s_remote_video_img, LV_OBJ_FLAG_HIDDEN);
-        lv_img_set_src(s_remote_video_img, NULL);
-    }
-    for (size_t index = 0; index < DISPLAY_REMOTE_VIDEO_BUFFER_COUNT; ++index) {
-        free(s_remote_video_buffers[index]);
-        s_remote_video_buffers[index] = NULL;
-        memset(&s_remote_video_dsc[index], 0, sizeof(s_remote_video_dsc[index]));
-    }
-    s_remote_video_pixels = 0;
-    s_remote_video_dsc_index = 0;
-
-    size_t bytes = pixel_count * sizeof(uint16_t);
-    for (size_t index = 0; index < DISPLAY_REMOTE_VIDEO_BUFFER_COUNT; ++index) {
-        s_remote_video_buffers[index] =
-            heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (s_remote_video_buffers[index] == NULL) {
-            s_remote_video_buffers[index] = malloc(bytes);
-        }
-        if (s_remote_video_buffers[index] == NULL) {
-            for (size_t cleanup = 0; cleanup < DISPLAY_REMOTE_VIDEO_BUFFER_COUNT; ++cleanup) {
-                free(s_remote_video_buffers[cleanup]);
-                s_remote_video_buffers[cleanup] = NULL;
-            }
-            return ESP_ERR_NO_MEM;
-        }
-    }
-
-    s_remote_video_pixels = pixel_count;
-    return ESP_OK;
-}
-
-static void display_show_remote_video_locked(const uint16_t *pixels, uint16_t width, uint16_t height)
-{
-    if (s_remote_video_img == NULL || s_remote_video_placeholder_label == NULL || pixels == NULL || width == 0 || height == 0) {
-        display_clear_remote_video_locked(NULL);
-        return;
-    }
-
-    size_t pixel_count = (size_t)width * height;
-    if (height != 0 && pixel_count / height != width) {
-        display_clear_remote_video_locked("Remote video\ninvalid");
-        return;
-    }
-    if (display_ensure_remote_video_buffers(pixel_count) != ESP_OK) {
-        ESP_LOGW(TAG, "remote video buffer allocation failed: %ux%u", (unsigned)width, (unsigned)height);
-        display_clear_remote_video_locked("Remote video\nno memory");
-        return;
-    }
-
-    s_remote_video_dsc_index = (s_remote_video_dsc_index + 1U) % DISPLAY_REMOTE_VIDEO_BUFFER_COUNT;
-    uint16_t *buffer = s_remote_video_buffers[s_remote_video_dsc_index];
-    lv_img_dsc_t *frame_dsc = &s_remote_video_dsc[s_remote_video_dsc_index];
-
-    memcpy(buffer, pixels, pixel_count * sizeof(uint16_t));
-    memset(frame_dsc, 0, sizeof(*frame_dsc));
-    frame_dsc->header.always_zero = 0;
-    frame_dsc->header.w = width;
-    frame_dsc->header.h = height;
-    frame_dsc->header.cf = LV_IMG_CF_TRUE_COLOR;
-    frame_dsc->data_size = (uint32_t)(pixel_count * sizeof(uint16_t));
-    frame_dsc->data = (const uint8_t *)buffer;
-
-    lv_img_set_src(s_remote_video_img, frame_dsc);
-    lv_img_set_zoom(s_remote_video_img, display_remote_video_zoom(width, height));
-    lv_obj_center(s_remote_video_img);
-    lv_obj_clear_flag(s_remote_video_img, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(s_remote_video_placeholder_label, LV_OBJ_FLAG_HIDDEN);
-}
-
 static uint16_t display_scan_preview_zoom(uint16_t width, uint16_t height)
 {
     if (width == 0 || height == 0) {
@@ -1207,7 +1108,6 @@ static esp_err_t display_ensure_call_scan_preview_buffers(size_t pixel_count)
     s_call_scan_preview_pixels = pixel_count;
     return ESP_OK;
 }
-
 static void display_show_call_scan_preview_locked(const uint16_t *pixels, uint16_t width, uint16_t height)
 {
     if (s_call_scan_img == NULL || pixels == NULL || width == 0 || height == 0) {
@@ -1345,25 +1245,38 @@ static void display_invalidate_call_list_page(void)
         lv_obj_add_flag(s_call_list_page, LV_OBJ_FLAG_HIDDEN);
         lv_obj_del_async(s_call_list_page);
         s_call_list_page = NULL;
+        s_call_list_content = NULL;
     }
     memset(s_call_contact_call_buttons, 0, sizeof(s_call_contact_call_buttons));
+    memset(s_call_contact_long_pressed, 0, sizeof(s_call_contact_long_pressed));
 }
 
 static bool display_call_contacts_match_status(const display_status_t *status)
 {
     if (status == NULL) {
-        return s_call_contact_count == 0;
+        return s_call_contact_count == 0 && s_call_pending_contact_count == 0;
     }
 
     uint8_t count = status->call_contact_count > DISPLAY_CALL_CONTACT_COUNT ?
         DISPLAY_CALL_CONTACT_COUNT : status->call_contact_count;
-    if (s_call_contact_count != count) {
+    uint8_t pending_count = status->call_pending_contact_count > DISPLAY_CALL_CONTACT_COUNT ?
+        DISPLAY_CALL_CONTACT_COUNT : status->call_pending_contact_count;
+    if (s_call_contact_count != count || s_call_pending_contact_count != pending_count) {
         return false;
     }
     for (uint8_t index = 0; index < count; ++index) {
         if (strcmp(s_call_contacts[index].device_id, status->call_contacts[index].device_id) != 0 ||
             strcmp(s_call_contacts[index].remark, status->call_contacts[index].remark) != 0 ||
-            s_call_contacts[index].online != status->call_contacts[index].online) {
+            s_call_contacts[index].online != status->call_contacts[index].online ||
+            s_call_contacts[index].deletable != status->call_contacts[index].deletable) {
+            return false;
+        }
+    }
+    for (uint8_t index = 0; index < pending_count; ++index) {
+        if (strcmp(s_call_pending_contacts[index].device_id,
+                   status->call_pending_contacts[index].device_id) != 0 ||
+            strcmp(s_call_pending_contacts[index].created_at,
+                   status->call_pending_contacts[index].created_at) != 0) {
             return false;
         }
     }
@@ -1377,13 +1290,21 @@ static bool display_sync_call_contacts_from_status(const display_status_t *statu
     }
 
     memset(s_call_contacts, 0, sizeof(s_call_contacts));
+    memset(s_call_pending_contacts, 0, sizeof(s_call_pending_contacts));
     s_call_contact_count = 0;
+    s_call_pending_contact_count = 0;
     if (status != NULL) {
         uint8_t count = status->call_contact_count > DISPLAY_CALL_CONTACT_COUNT ?
             DISPLAY_CALL_CONTACT_COUNT : status->call_contact_count;
         s_call_contact_count = count;
         for (uint8_t index = 0; index < count; ++index) {
             s_call_contacts[index] = status->call_contacts[index];
+        }
+        uint8_t pending_count = status->call_pending_contact_count > DISPLAY_CALL_CONTACT_COUNT ?
+            DISPLAY_CALL_CONTACT_COUNT : status->call_pending_contact_count;
+        s_call_pending_contact_count = pending_count;
+        for (uint8_t index = 0; index < pending_count; ++index) {
+            s_call_pending_contacts[index] = status->call_pending_contacts[index];
         }
     }
     return true;
@@ -1394,7 +1315,6 @@ static const char *display_call_add_field_title(display_call_add_field_t field)
     (void)field;
     return "Device ID";
 }
-
 static size_t display_call_add_field_max_len(display_call_add_field_t field)
 {
     (void)field;
@@ -1447,61 +1367,6 @@ static void display_update_wechat_add_field_label(void)
         display_text_set_color(s_wechat_add_open_id_label, lv_color_hex(0x8AA0B5), 0);
         display_text_set(s_wechat_add_open_id_label, "28位微信Open ID");
     }
-}
-
-static void display_store_scanned_wechat_contact(const char *open_id)
-{
-    display_wechat_contact_t contact = {0};
-    uint8_t count = s_last_status.wechat_contact_count > DISPLAY_WECHAT_CONTACT_COUNT ?
-        DISPLAY_WECHAT_CONTACT_COUNT : s_last_status.wechat_contact_count;
-    uint8_t existing_index = DISPLAY_WECHAT_CONTACT_COUNT;
-
-    if (open_id == NULL || open_id[0] == '\0') {
-        return;
-    }
-
-    for (uint8_t index = 0; index < count; ++index) {
-        if (strcmp(s_last_status.wechat_contacts[index].open_id, open_id) == 0) {
-            existing_index = index;
-            break;
-        }
-    }
-
-    if (existing_index < count) {
-        for (uint8_t index = existing_index; index > 0; --index) {
-            s_last_status.wechat_contacts[index] = s_last_status.wechat_contacts[index - 1U];
-        }
-    } else if (count < DISPLAY_WECHAT_CONTACT_COUNT) {
-        ++count;
-        for (uint8_t index = count - 1U; index > 0; --index) {
-            s_last_status.wechat_contacts[index] = s_last_status.wechat_contacts[index - 1U];
-        }
-    } else {
-        for (uint8_t index = DISPLAY_WECHAT_CONTACT_COUNT - 1U; index > 0; --index) {
-            s_last_status.wechat_contacts[index] = s_last_status.wechat_contacts[index - 1U];
-        }
-        count = DISPLAY_WECHAT_CONTACT_COUNT;
-    }
-
-    strlcpy(contact.open_id, open_id, sizeof(contact.open_id));
-    s_last_status.wechat_contacts[0] = contact;
-    s_last_status.wechat_contact_count = count;
-}
-
-static display_wechat_contact_t *display_find_wechat_contact_by_open_id(const char *open_id)
-{
-    uint8_t count = s_last_status.wechat_contact_count > DISPLAY_WECHAT_CONTACT_COUNT ?
-        DISPLAY_WECHAT_CONTACT_COUNT : s_last_status.wechat_contact_count;
-
-    if (open_id == NULL || open_id[0] == '\0') {
-        return NULL;
-    }
-    for (uint8_t index = 0; index < count; ++index) {
-        if (strcmp(s_last_status.wechat_contacts[index].open_id, open_id) == 0) {
-            return &s_last_status.wechat_contacts[index];
-        }
-    }
-    return NULL;
 }
 
 static const char *display_contact_scan_error_text(esp_err_t result)
@@ -1707,6 +1572,16 @@ static void __attribute__((unused)) display_tirtc_config_scan_result_cb(esp_err_
     }
 }
 
+static void display_release_wechat_scan_result_event(display_contact_scan_result_event_t *event)
+{
+    if (event == &s_wechat_scan_fallback_event) {
+        memset(&s_wechat_scan_fallback_event, 0, sizeof(s_wechat_scan_fallback_event));
+        s_wechat_scan_fallback_busy = false;
+        return;
+    }
+    free(event);
+}
+
 static void display_wechat_scan_result_async_cb(void *arg)
 {
     display_contact_scan_result_event_t *event = (display_contact_scan_result_event_t *)arg;
@@ -1717,20 +1592,71 @@ static void display_wechat_scan_result_async_cb(void *arg)
 
     s_call_scan_active = false;
     if (event->result == ESP_OK) {
-        display_store_scanned_wechat_contact(event->open_id);
         display_reset_wechat_add_input();
         display_show_wechat_list_page();
-        display_show_wifi_alert("扫码添加", "扫描成功");
+        display_show_wifi_alert("扫码添加", "该联系人已在授权列表");
     } else {
         display_show_wechat_add_page();
         if (event->result == ESP_ERR_INVALID_RESPONSE && event->raw_payload[0] != '\0') {
             display_show_wifi_alert("QR Payload", event->raw_payload);
+        } else if (event->result == ESP_ERR_INVALID_STATE) {
+            display_show_wifi_alert("扫码添加", "授权列表同步中，请稍后重试");
+        } else if (event->result == ESP_ERR_NOT_FOUND) {
+            display_show_wifi_alert("扫码添加", "该用户尚未授权此设备");
+        } else if (event->result == ESP_ERR_NO_MEM) {
+            display_show_wifi_alert("扫码添加", "内存不足");
         } else {
             display_show_wifi_alert("扫码添加", display_contact_scan_error_text(event->result));
         }
     }
 
-    free(event);
+    display_release_wechat_scan_result_event(event);
+}
+
+static bool display_queue_wechat_scan_result(display_contact_scan_result_event_t *event,
+                                             bool log_failure)
+{
+    if (event == NULL) {
+        return true;
+    }
+    if (!lvgl_port_lock(1)) {
+        if (log_failure) {
+            ESP_LOGW(TAG,
+                     "wechat scan result dispatch waits for lvgl lock: result=%s",
+                     esp_err_to_name(event->result));
+        }
+        return false;
+    }
+
+    lv_res_t async_ret = lv_async_call(display_wechat_scan_result_async_cb, event);
+    lvgl_port_unlock();
+    if (async_ret != LV_RES_OK) {
+        if (log_failure) {
+            ESP_LOGW(TAG,
+                     "wechat scan result dispatch failed: async result=%d",
+                     (int)async_ret);
+        }
+        return false;
+    }
+    return true;
+}
+
+static void display_wechat_scan_result_dispatch_task(void *arg)
+{
+    display_contact_scan_result_event_t *event = (display_contact_scan_result_event_t *)arg;
+
+    for (uint8_t attempt = 0U; attempt < DISPLAY_SCAN_RESULT_DISPATCH_RETRY_COUNT; ++attempt) {
+        if (display_queue_wechat_scan_result(event, attempt == 0U)) {
+            platform_task_reaper_delete_current_with_caps(TAG);
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(DISPLAY_SCAN_RESULT_DISPATCH_RETRY_MS));
+    }
+
+    ESP_LOGW(TAG, "wechat scan result dispatch abandoned after retries");
+    s_call_scan_active = false;
+    display_release_wechat_scan_result_event(event);
+    platform_task_reaper_delete_current_with_caps(TAG);
 }
 
 static void display_wechat_scan_result_cb(esp_err_t result,
@@ -1742,9 +1668,23 @@ static void display_wechat_scan_result_cb(esp_err_t result,
 
     (void)ctx;
 
-    event = calloc(1, sizeof(*event));
+    event = heap_caps_calloc(1,
+                             sizeof(*event),
+                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (event == NULL) {
-        return;
+        event = calloc(1, sizeof(*event));
+    }
+    if (event == NULL) {
+        if (!s_wechat_scan_fallback_busy) {
+            s_wechat_scan_fallback_busy = true;
+            memset(&s_wechat_scan_fallback_event, 0, sizeof(s_wechat_scan_fallback_event));
+            event = &s_wechat_scan_fallback_event;
+            ESP_LOGW(TAG, "wechat scan result uses static fallback event");
+        } else {
+            s_call_scan_active = false;
+            ESP_LOGW(TAG, "wechat scan result event unavailable");
+            return;
+        }
     }
 
     event->result = result;
@@ -1755,14 +1695,29 @@ static void display_wechat_scan_result_cb(esp_err_t result,
         strlcpy(event->raw_payload, raw_payload, sizeof(event->raw_payload));
     }
 
-    if (!lvgl_port_lock(100)) {
-        free(event);
-        return;
-    }
-    lv_res_t async_ret = lv_async_call(display_wechat_scan_result_async_cb, event);
-    lvgl_port_unlock();
-    if (async_ret != LV_RES_OK) {
-        free(event);
+    if (!display_queue_wechat_scan_result(event, false)) {
+        BaseType_t task_ret = xTaskCreatePinnedToCoreWithCaps(
+            display_wechat_scan_result_dispatch_task,
+            "wechat_ui_evt",
+            DISPLAY_SCAN_RESULT_DISPATCH_TASK_STACK,
+            event,
+            DISPLAY_SCAN_RESULT_DISPATCH_TASK_PRIORITY,
+            NULL,
+            APP_TASK_CORE_BACKGROUND,
+            DISPLAY_SCAN_RESULT_DISPATCH_TASK_ALLOC_CAPS);
+        if (task_ret != pdPASS) {
+            ESP_LOGW(TAG, "wechat scan result dispatch task create failed");
+            for (uint8_t attempt = 0U;
+                 attempt < DISPLAY_SCAN_RESULT_DISPATCH_RETRY_COUNT;
+                 ++attempt) {
+                if (display_queue_wechat_scan_result(event, attempt == 0U)) {
+                    return;
+                }
+                vTaskDelay(pdMS_TO_TICKS(DISPLAY_SCAN_RESULT_DISPATCH_RETRY_MS));
+            }
+            s_call_scan_active = false;
+            display_release_wechat_scan_result_event(event);
+        }
     }
 }
 
@@ -1796,6 +1751,10 @@ static void display_hide_keyboard(void)
         lv_keyboard_set_textarea(s_call_add_edit_keyboard, NULL);
         lv_obj_add_flag(s_call_add_edit_keyboard, LV_OBJ_FLAG_HIDDEN);
     }
+    if (s_call_remark_keyboard != NULL) {
+        lv_keyboard_set_textarea(s_call_remark_keyboard, NULL);
+        lv_obj_add_flag(s_call_remark_keyboard, LV_OBJ_FLAG_HIDDEN);
+    }
     if (s_wechat_add_edit_keyboard != NULL) {
         lv_keyboard_set_textarea(s_wechat_add_edit_keyboard, NULL);
         lv_obj_add_flag(s_wechat_add_edit_keyboard, LV_OBJ_FLAG_HIDDEN);
@@ -1808,6 +1767,9 @@ static void display_hide_keyboard(void)
     }
     if (s_call_add_edit_ta != NULL) {
         lv_obj_clear_state(s_call_add_edit_ta, LV_STATE_FOCUSED);
+    }
+    if (s_call_remark_ta != NULL) {
+        lv_obj_clear_state(s_call_remark_ta, LV_STATE_FOCUSED);
     }
     if (s_wechat_add_edit_ta != NULL) {
         lv_obj_clear_state(s_wechat_add_edit_ta, LV_STATE_FOCUSED);
@@ -2016,13 +1978,294 @@ static void display_show_call_alert(bool wechat)
     lv_obj_set_style_radius(accept_btn, 7, 0);
 }
 
+static bool display_call_pending_contains(const display_status_t *status, const char *device_id)
+{
+    if (status == NULL || device_id == NULL || device_id[0] == '\0') {
+        return false;
+    }
+
+    uint8_t count = status->call_pending_contact_count > DISPLAY_CALL_CONTACT_COUNT ?
+        DISPLAY_CALL_CONTACT_COUNT : status->call_pending_contact_count;
+    for (uint8_t index = 0; index < count; ++index) {
+        if (strcmp(status->call_pending_contacts[index].device_id, device_id) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void display_hide_call_contact_request(void)
+{
+    if (s_call_contact_request_box != NULL) {
+        lv_obj_del(s_call_contact_request_box);
+        s_call_contact_request_box = NULL;
+    }
+    s_call_contact_request_peer[0] = '\0';
+}
+
+static void display_submit_call_contact_response(bool accept)
+{
+    char peer[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX] = {0};
+
+    strlcpy(peer, s_call_contact_request_peer, sizeof(peer));
+    if (peer[0] == '\0' || s_actions.on_respond_call_contact == NULL) {
+        display_show_wifi_alert("添加联系人", "添加接口不可用");
+        return;
+    }
+
+    esp_err_t ret = s_actions.on_respond_call_contact(peer, accept, s_actions.ctx);
+    if (ret != ESP_OK) {
+        display_show_wifi_alert("添加联系人",
+                                ret == ESP_ERR_INVALID_STATE ?
+                                "联系人服务忙，请稍后再试" : "添加失败");
+        return;
+    }
+
+    strlcpy(s_call_contact_request_suppressed_peer,
+            peer,
+            sizeof(s_call_contact_request_suppressed_peer));
+    display_hide_call_contact_request();
+}
+
+static void display_call_contact_request_reject_btn_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        display_submit_call_contact_response(false);
+    }
+}
+
+static void display_call_contact_request_accept_btn_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        display_submit_call_contact_response(true);
+    }
+}
+
+static void display_show_call_contact_request(const char *device_id)
+{
+    lv_obj_t *card = NULL;
+    lv_obj_t *reject_btn = NULL;
+    lv_obj_t *accept_btn = NULL;
+
+    if (device_id == NULL || device_id[0] == '\0') {
+        return;
+    }
+    if (s_call_contact_request_box != NULL &&
+        strcmp(s_call_contact_request_peer, device_id) == 0) {
+        return;
+    }
+
+    display_hide_call_contact_request();
+    strlcpy(s_call_contact_request_peer, device_id, sizeof(s_call_contact_request_peer));
+
+    s_call_contact_request_box = lv_obj_create(lv_scr_act());
+    lv_obj_remove_style_all(s_call_contact_request_box);
+    lv_obj_set_pos(s_call_contact_request_box, 0, 0);
+    lv_obj_set_size(s_call_contact_request_box, 320, 240);
+    lv_obj_set_style_bg_color(s_call_contact_request_box, lv_color_hex(0x10233B), 0);
+    lv_obj_set_style_bg_opa(s_call_contact_request_box, LV_OPA_20, 0);
+    lv_obj_set_style_border_width(s_call_contact_request_box, 0, 0);
+    lv_obj_set_style_pad_all(s_call_contact_request_box, 0, 0);
+    lv_obj_clear_flag(s_call_contact_request_box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_move_foreground(s_call_contact_request_box);
+
+    card = display_create_figma_box(s_call_contact_request_box,
+                                    44,
+                                    58,
+                                    232,
+                                    124,
+                                    lv_color_hex(0xFFFFFF),
+                                    lv_color_hex(0xD6E4EF),
+                                    8);
+    lv_obj_set_style_shadow_width(card, 14, 0);
+    lv_obj_set_style_shadow_ofs_y(card, 5, 0);
+    lv_obj_set_style_shadow_color(card, lv_color_hex(0x10233B), 0);
+    lv_obj_set_style_shadow_opa(card, LV_OPA_20, 0);
+
+    (void)display_create_figma_text(card,
+                                    "添加联系人",
+                                    16,
+                                    12,
+                                    200,
+                                    lv_color_hex(0x10233B),
+                                    16,
+                                    LV_TEXT_ALIGN_CENTER);
+    (void)display_create_figma_text(card,
+                                    device_id,
+                                    16,
+                                    40,
+                                    200,
+                                    lv_color_hex(0x64758A),
+                                    12,
+                                    LV_TEXT_ALIGN_CENTER);
+
+    reject_btn = display_create_figma_button(card,
+                                             18,
+                                             78,
+                                             88,
+                                             32,
+                                             lv_color_hex(0xFFE7E7),
+                                             lv_color_hex(0xF15A5A),
+                                             "关闭",
+                                             lv_color_hex(0xE44747),
+                                             12,
+                                             display_call_contact_request_reject_btn_cb);
+    accept_btn = display_create_figma_button(card,
+                                             126,
+                                             78,
+                                             88,
+                                             32,
+                                             lv_color_hex(0x21C783),
+                                             lv_color_hex(0x21C783),
+                                             "确认添加",
+                                             lv_color_hex(0xFFFFFF),
+                                             12,
+                                             display_call_contact_request_accept_btn_cb);
+    lv_obj_set_style_radius(reject_btn, 7, 0);
+    lv_obj_set_style_radius(accept_btn, 7, 0);
+}
+
+static void display_update_call_contact_request(const display_status_t *status)
+{
+    if (status == NULL) {
+        display_hide_call_contact_request();
+        return;
+    }
+
+    if (s_call_contact_request_suppressed_peer[0] != '\0') {
+        if (status->call_contacts_refreshing) {
+            return;
+        }
+        bool still_pending = display_call_pending_contains(
+            status,
+            s_call_contact_request_suppressed_peer);
+        s_call_contact_request_suppressed_peer[0] = '\0';
+        if (still_pending && status->call_contacts_last_error != ESP_OK) {
+            display_show_wifi_alert("添加联系人", "添加失败");
+            return;
+        }
+    }
+
+    if (s_call_contact_request_box != NULL &&
+        !display_call_pending_contains(status, s_call_contact_request_peer)) {
+        display_hide_call_contact_request();
+    }
+
+    bool call_busy = status->call_state != DISPLAY_CALL_STATE_IDLE ||
+                     status->wechat_call_state != DISPLAY_WECHAT_CALL_STATE_IDLE ||
+                     status->rtc_incoming_call_pending ||
+                     status->wechat_incoming_call_pending;
+    if (call_busy) {
+        display_hide_call_contact_request();
+        return;
+    }
+
+    if (s_call_contact_request_box == NULL &&
+        status->call_pending_contact_count > 0U &&
+        s_call_alert_box == NULL &&
+        s_call_delete_confirm_box == NULL &&
+        s_wechat_delete_confirm_box == NULL &&
+        s_wifi_alert_box == NULL) {
+        display_show_call_contact_request(status->call_pending_contacts[0].device_id);
+    }
+}
+
+static void display_hide_call_delete_confirm(void)
+{
+    if (s_call_delete_confirm_box != NULL) {
+        lv_obj_del(s_call_delete_confirm_box);
+        s_call_delete_confirm_box = NULL;
+    }
+    s_call_delete_pending_index = UINT8_MAX;
+    s_call_delete_pending_device_id[0] = '\0';
+}
+
+static void display_show_call_delete_confirm(uint8_t contact_index)
+{
+    lv_obj_t *card = NULL;
+
+    if (contact_index >= s_call_contact_count ||
+        s_call_contacts[contact_index].device_id[0] == '\0') {
+        display_show_wifi_alert("联系人", "联系人不存在");
+        return;
+    }
+    if (!s_call_contacts[contact_index].deletable) {
+        ESP_LOGI(CALL_FLOW_TAG,
+                 "stage=contact_delete_blocked peer=%s reason=same_account_auto_contact",
+                 s_call_contacts[contact_index].device_id);
+        display_show_wifi_alert("删除联系人", "Same-account contact\nReset device on Web");
+        return;
+    }
+
+    display_hide_call_delete_confirm();
+    s_call_delete_pending_index = contact_index;
+    strlcpy(s_call_delete_pending_device_id,
+            s_call_contacts[contact_index].device_id,
+            sizeof(s_call_delete_pending_device_id));
+
+    s_call_delete_confirm_box = lv_obj_create(lv_scr_act());
+    lv_obj_remove_style_all(s_call_delete_confirm_box);
+    lv_obj_set_pos(s_call_delete_confirm_box, 0, 0);
+    lv_obj_set_size(s_call_delete_confirm_box, 320, 240);
+    lv_obj_set_style_bg_color(s_call_delete_confirm_box, lv_color_hex(0x10233B), 0);
+    lv_obj_set_style_bg_opa(s_call_delete_confirm_box, LV_OPA_20, 0);
+    lv_obj_clear_flag(s_call_delete_confirm_box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_move_foreground(s_call_delete_confirm_box);
+
+    card = display_create_figma_box(s_call_delete_confirm_box,
+                                    44,
+                                    58,
+                                    232,
+                                    124,
+                                    lv_color_hex(0xFFFFFF),
+                                    lv_color_hex(0xD6E4EF),
+                                    8);
+    (void)display_create_figma_text(card,
+                                    "删除联系人",
+                                    16,
+                                    12,
+                                    200,
+                                    lv_color_hex(0x10233B),
+                                    16,
+                                    LV_TEXT_ALIGN_CENTER);
+    (void)display_create_figma_text(card,
+                                    s_call_delete_pending_device_id,
+                                    16,
+                                    40,
+                                    200,
+                                    lv_color_hex(0x64758A),
+                                    12,
+                                    LV_TEXT_ALIGN_CENTER);
+    (void)display_create_figma_button(card,
+                                      18,
+                                      78,
+                                      88,
+                                      32,
+                                      lv_color_hex(0xF3F6F9),
+                                      lv_color_hex(0xD5E0EB),
+                                      "关闭",
+                                      lv_color_hex(0x64758A),
+                                      12,
+                                      display_call_delete_cancel_btn_cb);
+    (void)display_create_figma_button(card,
+                                      126,
+                                      78,
+                                      88,
+                                      32,
+                                      lv_color_hex(0xFFE7E7),
+                                      lv_color_hex(0xF15A5A),
+                                      "删除联系人",
+                                      lv_color_hex(0xE44747),
+                                      12,
+                                      display_call_delete_confirm_btn_cb);
+}
+
 static void display_hide_wechat_delete_confirm(void)
 {
     if (s_wechat_delete_confirm_box != NULL) {
         lv_obj_del(s_wechat_delete_confirm_box);
         s_wechat_delete_confirm_box = NULL;
     }
-    s_wechat_delete_pending_index = UINT8_MAX;
     s_wechat_delete_pending_open_id[0] = '\0';
 }
 
@@ -2040,7 +2283,6 @@ static void display_show_wechat_delete_confirm(uint8_t contact_index)
     }
 
     display_hide_wechat_delete_confirm();
-    s_wechat_delete_pending_index = contact_index;
     strlcpy(s_wechat_delete_pending_open_id,
             s_last_status.wechat_contacts[contact_index].open_id,
             sizeof(s_wechat_delete_pending_open_id));
@@ -2071,7 +2313,7 @@ static void display_show_wechat_delete_confirm(uint8_t contact_index)
     lv_obj_set_style_shadow_opa(card, LV_OPA_20, 0);
 
     (void)display_create_figma_text(card,
-                                    "删除联系人",
+                                    "取消联系人授权",
                                     12,
                                     13,
                                     208,
@@ -2105,7 +2347,7 @@ static void display_show_wechat_delete_confirm(uint8_t contact_index)
                                              30,
                                              lv_color_hex(0xFFE7E7),
                                              lv_color_hex(0xF15A5A),
-                                             "Delete",
+                                             "OK",
                                              lv_color_hex(0xE44747),
                                              12,
                                              display_wechat_delete_confirm_btn_cb);
@@ -2135,21 +2377,21 @@ static void display_show_wifi_alert(const char *title, const char *message)
     lv_obj_add_event_cb(s_wifi_alert_box, display_wifi_alert_event_cb, LV_EVENT_ALL, NULL);
 
     (void)display_create_figma_text(s_wifi_alert_box,
-                                    title != NULL ? title : "",
-                                    12,
-                                    14,
-                                    208,
-                                    lv_color_hex(0x10243E),
-                                    16,
-                                    LV_TEXT_ALIGN_CENTER);
+                                           title != NULL ? title : "",
+                                           12,
+                                           14,
+                                           208,
+                                           lv_color_hex(0x10243E),
+                                           16,
+                                           LV_TEXT_ALIGN_CENTER);
     (void)display_create_figma_text(s_wifi_alert_box,
-                                    message != NULL ? message : "",
-                                    16,
-                                    46,
-                                    200,
-                                    lv_color_hex(0x64758A),
-                                    12,
-                                    LV_TEXT_ALIGN_CENTER);
+                                           message != NULL ? message : "",
+                                           16,
+                                           46,
+                                           200,
+                                           lv_color_hex(0x64758A),
+                                           12,
+                                           LV_TEXT_ALIGN_CENTER);
     (void)display_create_figma_button(s_wifi_alert_box,
                                       68,
                                       80,
@@ -2431,6 +2673,7 @@ static void display_update_wifi_connect_status_line(const display_status_t *stat
     lv_color_t rssi_color = lv_color_hex(0x48656F);
     const display_wifi_scan_result_t *selected_result = NULL;
     bool signal_known = false;
+    bool use_runtime_hint = false;
     int signal_rssi = 0;
 
     if (s_wifi_connect_hint_label == NULL || s_wifi_connect_rssi_label == NULL || status == NULL) {
@@ -2483,11 +2726,22 @@ static void display_update_wifi_connect_status_line(const display_status_t *stat
             int dot_count = (int)((esp_timer_get_time() / 250000ULL) % 9ULL) + 1;
             snprintf(hint_text, sizeof(hint_text), "连接中%.*s", dot_count, dots);
             hint_color = lv_color_hex(0xF59E0B);
+            use_runtime_hint = true;
             break;
         }
         case DISPLAY_WIFI_CONNECT_STATE_FAILED:
+            strlcpy(hint_text, "连接失败", sizeof(hint_text));
+            hint_color = lv_color_hex(0xE45656);
+            use_runtime_hint = true;
+            break;
+        case DISPLAY_WIFI_CONNECT_STATE_AUTH_FAILED:
             strlcpy(hint_text, "密码错误", sizeof(hint_text));
             hint_color = lv_color_hex(0xE45656);
+            break;
+        case DISPLAY_WIFI_CONNECT_STATE_AP_NOT_FOUND:
+            strlcpy(hint_text, "未找到该热点", sizeof(hint_text));
+            hint_color = lv_color_hex(0xE45656);
+            use_runtime_hint = true;
             break;
         case DISPLAY_WIFI_CONNECT_STATE_TIMEOUT:
             strlcpy(hint_text, "连接超时", sizeof(hint_text));
@@ -2511,10 +2765,26 @@ static void display_update_wifi_connect_status_line(const display_status_t *stat
         }
     }
 
-    display_text_set_color(s_wifi_connect_hint_label, hint_color, 0);
-    display_text_set(s_wifi_connect_hint_label, hint_text);
+    if (use_runtime_hint && s_wifi_connect_progress_label != NULL) {
+        lv_obj_add_flag(s_wifi_connect_hint_label, LV_OBJ_FLAG_HIDDEN);
+        display_text_set_color(s_wifi_connect_progress_label, hint_color, 0);
+        display_text_set(s_wifi_connect_progress_label, hint_text);
+        lv_obj_clear_flag(s_wifi_connect_progress_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        if (s_wifi_connect_progress_label != NULL) {
+            lv_obj_add_flag(s_wifi_connect_progress_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        display_text_set_color(s_wifi_connect_hint_label, hint_color, 0);
+        display_text_set(s_wifi_connect_hint_label, hint_text);
+    }
     display_text_set_color(s_wifi_connect_rssi_label, rssi_color, 0);
     display_text_set(s_wifi_connect_rssi_label, rssi_text);
+}
+
+static void display_set_wifi_connect_state(display_wifi_connect_state_t state)
+{
+    s_wifi_connect_state = state;
+    display_update_wifi_connect_status_line(&s_last_status);
 }
 
 static void display_keyboard_draw_part_event_cb(lv_event_t *event)
@@ -2577,6 +2847,10 @@ static void display_submit_wifi_connect(void)
     if (s_password_ta == NULL) {
         return;
     }
+    if (s_wifi_connect_pending) {
+        display_update_wifi_connect_status_line(&s_last_status);
+        return;
+    }
 
     const char *password = lv_textarea_get_text(s_password_ta);
     display_set_password_border_color(lv_color_hex(0xD1D7DB));
@@ -2586,7 +2860,7 @@ static void display_submit_wifi_connect(void)
     using_saved_password = has_saved_config && password_len == 0;
 
     if (s_selected_ssid[0] == '\0') {
-        s_wifi_connect_state = DISPLAY_WIFI_CONNECT_STATE_SELECT_FIRST;
+        display_set_wifi_connect_state(DISPLAY_WIFI_CONNECT_STATE_SELECT_FIRST);
         return;
     }
     if (s_last_status.network_connected && strcmp(s_last_status.network_ssid, s_selected_ssid) == 0) {
@@ -2596,11 +2870,11 @@ static void display_submit_wifi_connect(void)
         return;
     }
     if (s_actions.on_wifi_connect == NULL) {
-        s_wifi_connect_state = DISPLAY_WIFI_CONNECT_STATE_UNAVAILABLE;
+        display_set_wifi_connect_state(DISPLAY_WIFI_CONNECT_STATE_UNAVAILABLE);
         return;
     }
     if (requires_password && !using_saved_password && password_len < DISPLAY_WIFI_PASSWORD_MIN_LEN) {
-        s_wifi_connect_state = DISPLAY_WIFI_CONNECT_STATE_SHORT_PASSWORD;
+        display_set_wifi_connect_state(DISPLAY_WIFI_CONNECT_STATE_SHORT_PASSWORD);
         display_set_password_border_color(lv_color_hex(0xC8513C));
         display_show_wifi_alert("WiFi Password", "Password must be at least 8 characters.");
         return;
@@ -2609,15 +2883,14 @@ static void display_submit_wifi_connect(void)
     esp_err_t ret = s_actions.on_wifi_connect(s_selected_ssid, password, s_actions.ctx);
     if (ret == ESP_OK) {
         s_wifi_connect_pending = true;
-        s_wifi_connect_request_us = esp_timer_get_time();
         strlcpy(s_wifi_connect_target_ssid, s_selected_ssid, sizeof(s_wifi_connect_target_ssid));
-        s_wifi_connect_state = DISPLAY_WIFI_CONNECT_STATE_CONNECTING;
+        display_set_wifi_connect_state(DISPLAY_WIFI_CONNECT_STATE_CONNECTING);
         display_set_password_border_color(lv_color_hex(0xC89F4A));
         display_set_main_hint("Ready");
     } else {
         s_wifi_connect_pending = false;
         s_wifi_connect_target_ssid[0] = '\0';
-        s_wifi_connect_state = DISPLAY_WIFI_CONNECT_STATE_FAILED;
+        display_set_wifi_connect_state(DISPLAY_WIFI_CONNECT_STATE_FAILED);
         display_set_password_border_color(lv_color_hex(0xC8513C));
     }
 }
@@ -2674,6 +2947,8 @@ static void display_keyboard_value_event_cb(lv_event_t *event)
             display_tirtc_config_edit_save_btn_cb(NULL);
         } else if (textarea == s_call_add_edit_ta) {
             display_call_add_edit_save_btn_cb(NULL);
+        } else if (textarea == s_call_remark_ta) {
+            display_call_remark_save_btn_cb(NULL);
         } else if (textarea == s_wechat_add_edit_ta) {
             display_wechat_add_edit_save_btn_cb(NULL);
         } else {
@@ -2787,6 +3062,11 @@ static const lv_font_t *display_ascii_font(uint8_t size)
 }
 
 static const lv_font_t *display_ai_chat_font(void)
+{
+    return display_runtime_utf8_font();
+}
+
+static const lv_font_t *display_runtime_utf8_font(void)
 {
     return ai_chat_font_get_current();
 }
@@ -3164,13 +3444,13 @@ static void display_prepare_figma_page(lv_obj_t *page)
 }
 
 static lv_obj_t *display_create_figma_text(lv_obj_t *parent,
-                                                    const char *text,
-                                                    lv_coord_t x,
-                                                    lv_coord_t y,
-                                                    lv_coord_t width,
-                                                    lv_color_t color,
-                                                    uint8_t font_size,
-                                                    lv_text_align_t align)
+                                           const char *text,
+                                           lv_coord_t x,
+                                           lv_coord_t y,
+                                           lv_coord_t width,
+                                           lv_color_t color,
+                                           uint8_t font_size,
+                                           lv_text_align_t align)
 {
     const ui_text_asset_t *asset = ui_text_asset_find(text, font_size);
     if (asset != NULL) {
@@ -3186,21 +3466,30 @@ static lv_obj_t *display_create_figma_text(lv_obj_t *parent,
         lv_obj_t *img = display_create_text_asset_obj(parent, x, y, width, color, font_size, align);
         if (img != NULL) {
             lv_obj_add_flag(img, LV_OBJ_FLAG_HIDDEN);
-            ESP_LOGW(TAG, "missing figma text asset: text=\"%s\" size=%u", text != NULL ? text : "", (unsigned)font_size);
+            ESP_LOGW(TAG, "missing figma text asset: text=\"%s\" size=%u",
+                     text != NULL ? text : "", (unsigned)font_size);
             return img;
         }
     }
 
     lv_obj_t *label = lv_label_create(parent);
-
     lv_obj_set_pos(label, x, y);
     lv_obj_set_width(label, width);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     display_text_set_color(label, color, 0);
     lv_obj_set_style_text_align(label, align, 0);
     lv_obj_set_style_text_font(label, display_ascii_font(font_size), 0);
+    lv_obj_clear_flag(label, LV_OBJ_FLAG_SCROLLABLE);
     display_text_set(label, text != NULL ? text : "");
     return label;
+}
+
+static void display_text_set_uint(lv_obj_t *obj, uint32_t value)
+{
+    char text[11];
+
+    (void)snprintf(text, sizeof(text), "%lu", (unsigned long)value);
+    display_text_set(obj, text);
 }
 
 static lv_obj_t *display_create_ai_text(lv_obj_t *parent,
@@ -3235,6 +3524,29 @@ static lv_obj_t *display_create_ai_dialog_text(lv_obj_t *parent,
     lv_obj_clear_flag(label, LV_OBJ_FLAG_SCROLLABLE);
     display_text_set(label, text != NULL ? text : "");
     return label;
+}
+
+static void display_call_remark_textarea_event_cb(lv_event_t *event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+    lv_obj_t *target = lv_event_get_target(event);
+
+    if (code == LV_EVENT_FOCUSED && s_call_remark_keyboard != NULL) {
+        lv_keyboard_set_textarea(s_call_remark_keyboard, target);
+        lv_keyboard_set_mode(s_call_remark_keyboard, LV_KEYBOARD_MODE_USER_1);
+        lv_obj_clear_flag(s_call_remark_keyboard, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(s_call_remark_keyboard);
+    }
+    if (code == LV_EVENT_VALUE_CHANGED) {
+        const char *value = lv_textarea_get_text(target);
+        size_t value_len = value != NULL ? strlen(value) : 0U;
+        if (s_call_remark_length_label != NULL) {
+            lv_label_set_text_fmt(s_call_remark_length_label,
+                                  "%u/%u",
+                                  (unsigned)value_len,
+                                  (unsigned)(DISPLAY_CALL_CONTACT_REMARK_MAX - 1U));
+        }
+    }
 }
 
 static lv_obj_t *display_create_runtime_cn_text(lv_obj_t *parent,
@@ -3702,7 +4014,10 @@ static void display_render_ai_chat_visible_messages(const display_status_t *stat
 
 static bool display_ai_chat_should_show_new_chat_button(const display_status_t *status)
 {
-    if (status == NULL || status->ai_chat_active || s_actions.on_start_ai_chat == NULL) {
+    if (status == NULL ||
+        status->ai_chat_active ||
+        status->ai_chat_output_playback_pending ||
+        s_actions.on_start_ai_chat == NULL) {
         return false;
     }
 
@@ -4638,7 +4953,7 @@ static ai_chat_avatar_state_t display_ai_avatar_visual_state(const display_statu
     if (status->ai_chat_state == DISPLAY_AI_CHAT_STATE_ERROR) {
         return AI_CHAT_AVATAR_STATE_ERROR;
     }
-    if (status->ai_chat_cloud_speaking) {
+    if (status->ai_chat_cloud_speaking || status->ai_chat_output_playback_pending) {
         return AI_CHAT_AVATAR_STATE_SPEAKING;
     }
     if (latest_message != NULL && latest_message->text[0] != '\0') {
@@ -4761,13 +5076,13 @@ static void display_create_device_status_row(lv_obj_t *parent,
                               LV_TEXT_ALIGN_LEFT);
     if (value_label != NULL) {
         *value_label = display_create_figma_text(parent,
-                                                 value,
-                                                 88,
-                                                 y + 1,
-                                                 46,
-                                                 lv_color_hex(0x10243E),
-                                                 12,
-                                                 LV_TEXT_ALIGN_RIGHT);
+                                                        value,
+                                                        88,
+                                                        y + 1,
+                                                        46,
+                                                        lv_color_hex(0x10243E),
+                                                        12,
+                                                        LV_TEXT_ALIGN_RIGHT);
     }
 }
 
@@ -4858,13 +5173,13 @@ static void display_create_device_volume_card(lv_obj_t *parent,
                                     6);
     if (value_label != NULL) {
         *value_label = display_create_figma_text(pill,
-                                                 value,
-                                                 0,
-                                                 3,
-                                                 32,
-                                                 lv_color_hex(0x1768B7),
-                                                 12,
-                                                 LV_TEXT_ALIGN_CENTER);
+                                                        value,
+                                                        0,
+                                                        3,
+                                                        32,
+                                                        lv_color_hex(0x1768B7),
+                                                        12,
+                                                        LV_TEXT_ALIGN_CENTER);
     }
 
     (void)display_create_device_volume_button(card, 11, "-10", false, down_action, NULL);
@@ -5015,13 +5330,13 @@ static lv_obj_t *display_create_info_row(lv_obj_t *parent,
                               12,
                               LV_TEXT_ALIGN_LEFT);
     lv_obj_t *value_obj = display_create_figma_text(row,
-                                                    value,
-                                                    103,
-                                                    9,
-                                                    190,
-                                                    value_color,
-                                                    12,
-                                                    LV_TEXT_ALIGN_LEFT);
+                                                           value,
+                                                           103,
+                                                           9,
+                                                           190,
+                                                           value_color,
+                                                           12,
+                                                           LV_TEXT_ALIGN_LEFT);
     if (value_label != NULL) {
         *value_label = value_obj;
     }
@@ -5054,13 +5369,13 @@ static lv_obj_t *display_create_check_row(lv_obj_t *parent,
                               12,
                               LV_TEXT_ALIGN_LEFT);
     lv_obj_t *value_obj = display_create_figma_text(row,
-                                                    value,
-                                                    143,
-                                                    4,
-                                                    152,
-                                                    value_color,
-                                                    12,
-                                                    LV_TEXT_ALIGN_RIGHT);
+                                                           value,
+                                                           143,
+                                                           4,
+                                                           152,
+                                                           value_color,
+                                                           12,
+                                                           LV_TEXT_ALIGN_RIGHT);
     if (value_label != NULL) {
         *value_label = value_obj;
     }
@@ -5309,16 +5624,15 @@ static lv_obj_t *display_create_call_add_field_row(lv_obj_t *parent,
                               12,
                               LV_TEXT_ALIGN_LEFT);
 
-    lv_obj_t *value_label = display_create_figma_text(row,
-                                                      value[0] != '\0' ?
-                                                          value : display_call_add_field_placeholder(field),
-                                                      85,
-                                                      13,
-                                                      176,
-                                                      value[0] != '\0' ?
-                                                          lv_color_hex(0x10233B) : lv_color_hex(0x8AA0B5),
-                                                      12,
-                                                      LV_TEXT_ALIGN_LEFT);
+    lv_obj_t *value_label = display_create_figma_text(
+        row,
+        value[0] != '\0' ? value : display_call_add_field_placeholder(field),
+        85,
+        13,
+        176,
+        value[0] != '\0' ? lv_color_hex(0x10233B) : lv_color_hex(0x8AA0B5),
+        12,
+        LV_TEXT_ALIGN_LEFT);
     display_create_figma_text(row,
                               ">",
                               270,
@@ -5356,16 +5670,15 @@ static lv_obj_t *display_create_wechat_add_field_row(lv_obj_t *parent, lv_coord_
                               12,
                               LV_TEXT_ALIGN_LEFT);
 
-    lv_obj_t *value_label = display_create_figma_text(row,
-                                                      s_wechat_add_open_id[0] != '\0' ?
-                                                          s_wechat_add_open_id : "28位微信Open ID",
-                                                      85,
-                                                      13,
-                                                      176,
-                                                      s_wechat_add_open_id[0] != '\0' ?
-                                                          lv_color_hex(0x10233B) : lv_color_hex(0x8AA0B5),
-                                                      12,
-                                                      LV_TEXT_ALIGN_LEFT);
+    lv_obj_t *value_label = display_create_figma_text(
+        row,
+        s_wechat_add_open_id[0] != '\0' ? s_wechat_add_open_id : "28位微信Open ID",
+        85,
+        13,
+        176,
+        s_wechat_add_open_id[0] != '\0' ? lv_color_hex(0x10233B) : lv_color_hex(0x8AA0B5),
+        12,
+        LV_TEXT_ALIGN_LEFT);
     display_create_figma_text(row,
                               ">",
                               270,
@@ -5389,6 +5702,7 @@ static void display_create_call_contact_row(lv_obj_t *parent, uint8_t index, lv_
         s_call_contacts[index].remark :
         (s_call_contacts[index].online ? "Online" : "Offline");
     lv_obj_t *call_btn = NULL;
+    lv_obj_t *remark_btn = NULL;
     lv_obj_t *touch_target = NULL;
     lv_obj_t *row = display_create_figma_box(parent,
                                              8,
@@ -5396,37 +5710,63 @@ static void display_create_call_contact_row(lv_obj_t *parent, uint8_t index, lv_
                                              304,
                                              44,
                                              lv_color_hex(0xFFFFFF),
-                                             lv_color_hex(0xD6E4EF),
-                                             7);
+                                              lv_color_hex(0xD6E4EF),
+                                              7);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(row,
+                        display_call_contact_delete_cb,
+                        LV_EVENT_LONG_PRESSED,
+                        (void *)(uintptr_t)index);
     display_create_figma_text(row,
                               s_call_contacts[index].device_id,
                               11,
                               6,
-                              220,
+                              145,
                               lv_color_hex(0x10233B),
                               12,
                               LV_TEXT_ALIGN_LEFT);
     display_create_figma_text(row,
-                              subtitle,
-                              11,
-                              25,
-                              190,
-                              lv_color_hex(0x65768A),
-                              10,
-                              LV_TEXT_ALIGN_LEFT);
+                                     subtitle,
+                                     11,
+                                     25,
+                                     145,
+                                     lv_color_hex(0x65768A),
+                                     10,
+                                     LV_TEXT_ALIGN_LEFT);
+
+    remark_btn = display_create_figma_button(row,
+                                             164,
+                                             7,
+                                             54,
+                                             30,
+                                             lv_color_hex(0xE9F5FF),
+                                             lv_color_hex(0xB9D7F1),
+                                             "改名",
+                                             lv_color_hex(0x1768B7),
+                                             10,
+                                             NULL);
+    lv_obj_set_style_radius(remark_btn, 7, 0);
+    lv_obj_add_event_cb(remark_btn,
+                        display_call_contact_remark_btn_cb,
+                        LV_EVENT_ALL,
+                        (void *)(uintptr_t)index);
+    lv_obj_add_event_cb(remark_btn,
+                        display_call_contact_delete_cb,
+                        LV_EVENT_LONG_PRESSED,
+                        (void *)(uintptr_t)index);
 
     call_btn = display_create_figma_button(row,
-                                           245,
-                                           9,
-                                           46,
-                                           26,
+                                           226,
+                                           5,
+                                           66,
+                                           34,
                                            button_fill,
                                            button_fill,
-                                           online ? "呼叫" : "Offline",
+                                           "呼叫",
                                            button_text,
-                                           10,
+                                           12,
                                            NULL);
-    lv_obj_set_style_radius(call_btn, 7, 0);
+    lv_obj_set_style_radius(call_btn, 8, 0);
     lv_obj_clear_flag(call_btn, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     s_call_contact_call_buttons[index] = call_btn;
 
@@ -5442,6 +5782,10 @@ static void display_create_call_contact_row(lv_obj_t *parent, uint8_t index, lv_
     lv_obj_add_event_cb(touch_target,
                         display_call_contact_touch_cb,
                         LV_EVENT_ALL,
+                        (void *)(uintptr_t)index);
+    lv_obj_add_event_cb(touch_target,
+                        display_call_contact_delete_cb,
+                        LV_EVENT_LONG_PRESSED,
                         (void *)(uintptr_t)index);
 }
 
@@ -5760,13 +6104,13 @@ static lv_obj_t *display_create_call_volume_row(lv_obj_t *parent,
                                               6);
     if (value_label != NULL) {
         *value_label = display_create_figma_text(pill,
-                                                 value,
-                                                 0,
-                                                 6,
-                                                 34,
-                                                 lv_color_hex(0x20C982),
-                                                 12,
-                                                 LV_TEXT_ALIGN_CENTER);
+                                                        value,
+                                                        0,
+                                                        6,
+                                                        34,
+                                                        lv_color_hex(0x20C982),
+                                                        12,
+                                                        LV_TEXT_ALIGN_CENTER);
     }
     up_btn = display_create_figma_button(row,
                                          234,
@@ -5963,6 +6307,7 @@ static void display_hide_all_pages(void)
         s_call_add_edit_page,
         s_call_scan_page,
         s_call_list_page,
+        s_call_remark_page,
         s_call_active_page,
         s_wechat_page,
         s_wechat_add_page,
@@ -6034,6 +6379,7 @@ static void display_show_page(lv_obj_t *page)
     if (page != s_call_scan_page) {
         display_stop_call_scan_if_active();
     }
+    display_hide_call_delete_confirm();
     display_hide_wechat_delete_confirm();
     display_hide_all_pages();
     if (page != NULL) {
@@ -6052,6 +6398,7 @@ static void display_show_home_page(void)
 
 static void display_show_main_page(void)
 {
+    display_update_main_page(&s_last_status);
     display_show_page(s_main_page);
 }
 
@@ -6158,6 +6505,40 @@ static void display_show_call_list_page(void)
         display_build_call_list_page(lv_scr_act());
     }
     display_show_page(s_call_list_page);
+}
+
+static void display_show_call_remark_page(uint8_t contact_index)
+{
+    if (contact_index >= s_call_contact_count ||
+        s_call_contacts[contact_index].device_id[0] == '\0') {
+        display_show_wifi_alert("联系人", "联系人不存在");
+        return;
+    }
+    if (s_call_remark_page == NULL) {
+        display_build_call_remark_page(lv_scr_act());
+    }
+
+    strlcpy(s_call_remark_edit_device_id,
+            s_call_contacts[contact_index].device_id,
+            sizeof(s_call_remark_edit_device_id));
+    display_show_page(s_call_remark_page);
+    if (s_call_remark_ta != NULL) {
+        lv_textarea_set_text(s_call_remark_ta, s_call_contacts[contact_index].remark);
+        lv_textarea_set_cursor_pos(s_call_remark_ta,
+                                   (uint32_t)strlen(s_call_contacts[contact_index].remark));
+    }
+    if (s_call_remark_status_label != NULL) {
+        display_text_set_color(s_call_remark_status_label, lv_color_hex(0x0D8A59), 0);
+        display_text_set(s_call_remark_status_label, "点击保存生效");
+    }
+    if (s_call_remark_keyboard != NULL && s_call_remark_ta != NULL) {
+        lv_keyboard_set_textarea(s_call_remark_keyboard, s_call_remark_ta);
+        lv_keyboard_set_mode(s_call_remark_keyboard, LV_KEYBOARD_MODE_USER_1);
+        lv_obj_clear_flag(s_call_remark_keyboard, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(s_call_remark_keyboard);
+        lv_obj_add_state(s_call_remark_ta, LV_STATE_FOCUSED);
+        lv_event_send(s_call_remark_ta, LV_EVENT_FOCUSED, NULL);
+    }
 }
 
 static void display_show_call_active_page(void)
@@ -6316,7 +6697,10 @@ static void display_show_wifi_connect_page(void)
     if (s_password_ta != NULL) {
     display_prepare_password_entry(&s_last_status);
     }
-    s_wifi_connect_state = DISPLAY_WIFI_CONNECT_STATE_IDLE;
+    if (!s_wifi_connect_pending) {
+        s_wifi_connect_target_ssid[0] = '\0';
+    }
+    display_set_wifi_connect_state(DISPLAY_WIFI_CONNECT_STATE_IDLE);
     if (s_keyboard != NULL && s_password_ta != NULL) {
         display_set_wifi_keyboard_mode(LV_KEYBOARD_MODE_USER_1);
         display_layout_wifi_keyboard();
@@ -7263,6 +7647,129 @@ static void display_call_contact_call_btn_cb(lv_event_t *event)
     display_show_call_active_page();
 }
 
+static void display_call_contact_remark_btn_cb(lv_event_t *event)
+{
+    uint8_t contact_index = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
+    lv_event_code_t code = lv_event_get_code(event);
+
+    if (code == LV_EVENT_PRESSED) {
+        if (contact_index < DISPLAY_CALL_CONTACT_COUNT) {
+            s_call_contact_long_pressed[contact_index] = false;
+        }
+        return;
+    }
+    if (code != LV_EVENT_CLICKED) {
+        return;
+    }
+    if (contact_index < DISPLAY_CALL_CONTACT_COUNT &&
+        s_call_contact_long_pressed[contact_index]) {
+        s_call_contact_long_pressed[contact_index] = false;
+        return;
+    }
+    display_show_call_remark_page(contact_index);
+}
+
+static void display_call_contact_delete_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_LONG_PRESSED) {
+        return;
+    }
+
+    uint8_t contact_index = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
+    if (contact_index < DISPLAY_CALL_CONTACT_COUNT) {
+        s_call_contact_long_pressed[contact_index] = true;
+        if (s_call_contact_call_buttons[contact_index] != NULL) {
+            lv_obj_clear_state(s_call_contact_call_buttons[contact_index], LV_STATE_PRESSED);
+        }
+    }
+    lv_event_stop_bubbling(event);
+    display_show_call_delete_confirm(contact_index);
+}
+
+static void display_call_delete_cancel_btn_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        display_hide_call_delete_confirm();
+    }
+}
+
+static void display_call_delete_confirm_btn_cb(lv_event_t *event)
+{
+    char device_id[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX] = {0};
+
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    strlcpy(device_id, s_call_delete_pending_device_id, sizeof(device_id));
+    display_hide_call_delete_confirm();
+
+    if (device_id[0] == '\0' || s_actions.on_delete_call_contact == NULL) {
+        display_show_wifi_alert("联系人", "删除接口不可用");
+        return;
+    }
+    ESP_LOGI(CALL_FLOW_TAG, "stage=contact_delete_submit peer=%s", device_id);
+    esp_err_t ret = s_actions.on_delete_call_contact(device_id, s_actions.ctx);
+    if (ret != ESP_OK) {
+        ESP_LOGW(CALL_FLOW_TAG,
+                 "stage=contact_delete_rejected peer=%s ret=%s",
+                 device_id,
+                 esp_err_to_name(ret));
+        const char *message = ret == ESP_ERR_NOT_ALLOWED ?
+            "Same-account contact\nReset device on Web" :
+            (ret == ESP_ERR_INVALID_STATE ? "联系人服务忙，请稍后再试" : "删除失败");
+        display_show_wifi_alert("联系人", message);
+        return;
+    }
+    ESP_LOGI(CALL_FLOW_TAG, "stage=contact_delete_queued peer=%s", device_id);
+    display_show_wifi_alert("删除联系人", "Deleting...");
+}
+
+static void display_call_remark_back_btn_cb(lv_event_t *event)
+{
+    (void)event;
+    s_call_remark_edit_device_id[0] = '\0';
+    display_show_call_list_page();
+}
+
+static void display_call_remark_save_btn_cb(lv_event_t *event)
+{
+    char remark[DISPLAY_CALL_CONTACT_REMARK_MAX] = {0};
+
+    (void)event;
+    if (s_call_remark_ta == NULL || s_call_remark_edit_device_id[0] == '\0') {
+        return;
+    }
+
+    display_copy_trimmed_text(remark,
+                              sizeof(remark),
+                              lv_textarea_get_text(s_call_remark_ta));
+    if (strlen(remark) >= DISPLAY_CALL_CONTACT_REMARK_MAX) {
+        if (s_call_remark_status_label != NULL) {
+            display_text_set_color(s_call_remark_status_label, lv_color_hex(0xE45656), 0);
+            display_text_set(s_call_remark_status_label, "内容不合法");
+        }
+        return;
+    }
+    if (s_actions.on_update_call_contact_remark == NULL) {
+        display_show_wifi_alert("联系人", "改名接口不可用");
+        return;
+    }
+
+    esp_err_t ret = s_actions.on_update_call_contact_remark(
+        s_call_remark_edit_device_id,
+        remark,
+        s_actions.ctx);
+    if (ret != ESP_OK) {
+        display_show_wifi_alert("联系人",
+                                ret == ESP_ERR_INVALID_STATE ?
+                                "联系人服务忙，请稍后再试" : "保存失败");
+        return;
+    }
+
+    s_call_remark_edit_device_id[0] = '\0';
+    display_show_call_list_page();
+}
+
 static void display_call_contact_touch_cb(lv_event_t *event)
 {
     uint8_t contact_index = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
@@ -7271,6 +7778,9 @@ static void display_call_contact_touch_cb(lv_event_t *event)
         s_call_contact_call_buttons[contact_index] : NULL;
 
     if (code == LV_EVENT_PRESSED) {
+        if (contact_index < DISPLAY_CALL_CONTACT_COUNT) {
+            s_call_contact_long_pressed[contact_index] = false;
+        }
         if (visual_button != NULL) {
             lv_obj_add_state(visual_button, LV_STATE_PRESSED);
         }
@@ -7283,6 +7793,11 @@ static void display_call_contact_touch_cb(lv_event_t *event)
         return;
     }
     if (code == LV_EVENT_CLICKED) {
+        if (contact_index < DISPLAY_CALL_CONTACT_COUNT &&
+            s_call_contact_long_pressed[contact_index]) {
+            s_call_contact_long_pressed[contact_index] = false;
+            return;
+        }
         display_call_contact_call_btn_cb(event);
     }
 }
@@ -7489,15 +8004,15 @@ static void display_wechat_confirm_add_btn_cb(lv_event_t *event)
     ret = s_actions.on_add_wechat_contact(open_id_trimmed, s_actions.ctx);
     if (ret != ESP_OK) {
         display_show_wifi_alert("微信联系人",
-                                ret == ESP_ERR_INVALID_STATE ? "请先进入微信呼叫" :
-                                ret == ESP_ERR_NOT_FOUND ? "联系人不存在" : "添加失败");
+                                ret == ESP_ERR_INVALID_STATE ? "授权列表同步中，请稍后重试" :
+                                ret == ESP_ERR_NOT_FOUND ? "该用户尚未授权此设备" :
+                                ret == ESP_ERR_NO_MEM ? "内存不足" : "验证失败");
         return;
     }
 
-    display_store_scanned_wechat_contact(open_id_trimmed);
     display_reset_wechat_add_input();
     display_show_wechat_list_page();
-    display_show_wifi_alert("微信联系人", "添加成功");
+    display_show_wifi_alert("微信联系人", "该联系人已在授权列表");
 }
 
 static void display_wechat_contact_remark_btn_cb(lv_event_t *event)
@@ -7520,7 +8035,6 @@ static void display_wechat_remark_back_btn_cb(lv_event_t *event)
 static void display_wechat_remark_preset_btn_cb(lv_event_t *event)
 {
     const char *remark = (const char *)lv_event_get_user_data(event);
-    display_wechat_contact_t *contact = NULL;
     esp_err_t ret = ESP_OK;
 
     if (lv_event_get_code(event) != LV_EVENT_CLICKED || remark == NULL) {
@@ -7545,14 +8059,9 @@ static void display_wechat_remark_preset_btn_cb(lv_event_t *event)
         return;
     }
 
-    contact = display_find_wechat_contact_by_open_id(s_wechat_remark_edit_open_id);
-    if (contact != NULL) {
-        strlcpy(contact->remark, remark, sizeof(contact->remark));
-    }
     s_wechat_remark_edit_open_id[0] = '\0';
-    display_update_wechat_contact_list(&s_last_status);
     display_show_wechat_list_page();
-    display_show_wifi_alert("微信联系人", "名称已提交");
+    display_show_wifi_alert("微信联系人", "名称更新中");
 }
 
 static void display_wechat_contact_call_btn_cb(lv_event_t *event)
@@ -7625,26 +8134,6 @@ static void display_queue_wechat_hangup(void)
     }
 }
 
-static void display_remove_wechat_contact_from_last_status(uint8_t contact_index)
-{
-    if (contact_index >= s_last_status.wechat_contact_count ||
-        contact_index >= DISPLAY_WECHAT_CONTACT_COUNT) {
-        return;
-    }
-
-    uint8_t count = s_last_status.wechat_contact_count > DISPLAY_WECHAT_CONTACT_COUNT ?
-        DISPLAY_WECHAT_CONTACT_COUNT : s_last_status.wechat_contact_count;
-    for (uint8_t index = contact_index; index + 1U < count; ++index) {
-        s_last_status.wechat_contacts[index] = s_last_status.wechat_contacts[index + 1U];
-    }
-    if (count > 0) {
-        memset(&s_last_status.wechat_contacts[count - 1U],
-               0,
-               sizeof(s_last_status.wechat_contacts[count - 1U]));
-        --s_last_status.wechat_contact_count;
-    }
-}
-
 static void display_wechat_contact_delete_cb(lv_event_t *event)
 {
     if (lv_event_get_code(event) != LV_EVENT_LONG_PRESSED) {
@@ -7665,57 +8154,11 @@ static void display_wechat_delete_cancel_btn_cb(lv_event_t *event)
 
 static void display_wechat_delete_confirm_btn_cb(lv_event_t *event)
 {
-    uint8_t contact_index = s_wechat_delete_pending_index;
-    char open_id[DISPLAY_WECHAT_OPEN_ID_MAX] = {0};
-    esp_err_t ret = ESP_OK;
-
     if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
         return;
     }
-
-    strlcpy(open_id, s_wechat_delete_pending_open_id, sizeof(open_id));
-
-    if (contact_index >= DISPLAY_WECHAT_CONTACT_COUNT ||
-        contact_index >= s_last_status.wechat_contact_count ||
-        strcmp(s_last_status.wechat_contacts[contact_index].open_id, open_id) != 0) {
-        uint8_t count = s_last_status.wechat_contact_count > DISPLAY_WECHAT_CONTACT_COUNT ?
-            DISPLAY_WECHAT_CONTACT_COUNT : s_last_status.wechat_contact_count;
-        contact_index = DISPLAY_WECHAT_CONTACT_COUNT;
-        for (uint8_t index = 0; index < count; ++index) {
-            if (strcmp(s_last_status.wechat_contacts[index].open_id, open_id) == 0) {
-                contact_index = index;
-                break;
-            }
-        }
-    }
-
-    if (open_id[0] == '\0' ||
-        contact_index >= DISPLAY_WECHAT_CONTACT_COUNT ||
-        contact_index >= s_last_status.wechat_contact_count ||
-        s_last_status.wechat_contacts[contact_index].open_id[0] == '\0') {
-        display_hide_wechat_delete_confirm();
-        display_show_wifi_alert("微信联系人", "联系人不存在");
-        return;
-    }
-    if (s_actions.on_remove_wechat_contact == NULL) {
-        display_hide_wechat_delete_confirm();
-        display_show_wifi_alert("微信联系人", "删除接口不可用");
-        return;
-    }
-
-    ret = s_actions.on_remove_wechat_contact(open_id, s_actions.ctx);
-    if (ret != ESP_OK) {
-        display_hide_wechat_delete_confirm();
-        display_show_wifi_alert("微信联系人",
-                                ret == ESP_ERR_NOT_FOUND ? "联系人不存在" :
-                                ret == ESP_ERR_NOT_SUPPORTED ? "删除接口不可用" : "删除失败");
-        return;
-    }
-
     display_hide_wechat_delete_confirm();
-    display_remove_wechat_contact_from_last_status(contact_index);
-    display_update_wechat_contact_list(&s_last_status);
-    display_show_wifi_alert("微信联系人", "已删除");
+    display_show_wifi_alert("微信联系人", "请在微信小程序取消授权");
 }
 
 static void display_wechat_hangup_btn_cb(lv_event_t *event)
@@ -7964,23 +8407,6 @@ static void display_ota_reboot_btn_cb(lv_event_t *event)
     (void)s_actions.on_restart_for_ota(s_actions.ctx);
 }
 
-static void display_test_video_btn_cb(lv_event_t *event)
-{
-    (void)event;
-
-    if (s_actions.on_start_sender_video_test == NULL) {
-        display_set_main_hint("Video test unavailable");
-        return;
-    }
-
-    esp_err_t ret = s_actions.on_start_sender_video_test(s_actions.ctx);
-    if (ret != ESP_OK) {
-        display_set_main_hint(ret == ESP_ERR_INVALID_STATE ? "Connect WiFi first" : "Video test failed");
-    } else {
-        display_set_main_hint("Video switch requested");
-    }
-}
-
 static void display_test_audio_btn_cb(lv_event_t *event)
 {
     (void)event;
@@ -8084,11 +8510,11 @@ static void display_device_volume_btn_cb(lv_event_t *event)
         } else if (receive) {
             next = s_device_receive_restore_valid
                        ? s_device_receive_restore_volume
-                       : DISPLAY_DEVICE_VOLUME_RESTORE_DEFAULT;
+                       : DISPLAY_DEVICE_SPEAKER_VOLUME_RESTORE_DEFAULT;
         } else {
             next = s_device_send_restore_valid
                        ? s_device_send_restore_volume
-                       : DISPLAY_DEVICE_VOLUME_RESTORE_DEFAULT;
+                       : DISPLAY_DEVICE_CAPTURE_GAIN_RESTORE_DEFAULT;
         }
         break;
     default:
@@ -8159,19 +8585,29 @@ static void display_update_wifi_scan_state(const display_status_t *status)
     char right_text[32] = {0};
     lv_color_t left_color = lv_color_hex(0x64758A);
     lv_color_t right_color = lv_color_hex(0x64758A);
+    bool use_runtime_left = false;
 
     if (status == NULL || s_wifi_connection_state_label == NULL ||
         s_wifi_scan_state_label == NULL || s_wifi_scan_count_label == NULL) {
         return;
     }
 
-    if (status->network_connected) {
+    if (s_wifi_connect_pending) {
+        left_color = lv_color_hex(0xF59E0B);
+        if (s_wifi_connect_target_ssid[0] != '\0') {
+            snprintf(left_text, sizeof(left_text), "连接中 %s", s_wifi_connect_target_ssid);
+        } else {
+            strlcpy(left_text, "连接中", sizeof(left_text));
+        }
+        use_runtime_left = true;
+    } else if (status->network_connected) {
         left_color = lv_color_hex(0x0D8A59);
         if (status->network_ssid[0] != '\0') {
             snprintf(left_text, sizeof(left_text), "已连接 %s", status->network_ssid);
         } else {
             strlcpy(left_text, "已连接 Wi-Fi", sizeof(left_text));
         }
+        use_runtime_left = true;
     } else {
         strlcpy(left_text, "未连接 Wi-Fi", sizeof(left_text));
     }
@@ -8184,8 +8620,18 @@ static void display_update_wifi_scan_state(const display_status_t *status)
         right_color = status->wifi_scan_count > 0 ? lv_color_hex(0x20BF7A) : lv_color_hex(0x64758A);
     }
 
-    display_text_set_color(s_wifi_connection_state_label, left_color, 0);
-    display_text_set(s_wifi_connection_state_label, left_text);
+    if (use_runtime_left && s_wifi_connection_runtime_label != NULL) {
+        lv_obj_add_flag(s_wifi_connection_state_label, LV_OBJ_FLAG_HIDDEN);
+        display_text_set_color(s_wifi_connection_runtime_label, left_color, 0);
+        display_text_set(s_wifi_connection_runtime_label, left_text);
+        lv_obj_clear_flag(s_wifi_connection_runtime_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        if (s_wifi_connection_runtime_label != NULL) {
+            lv_obj_add_flag(s_wifi_connection_runtime_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        display_text_set_color(s_wifi_connection_state_label, left_color, 0);
+        display_text_set(s_wifi_connection_state_label, left_text);
+    }
     if (status->wifi_scan_in_progress) {
         lv_obj_add_flag(s_wifi_scan_count_label, LV_OBJ_FLAG_HIDDEN);
         display_text_set_color(s_wifi_scan_state_label, right_color, 0);
@@ -8281,18 +8727,16 @@ static void display_update_main_page(const display_status_t *status)
         display_text_set(s_device_door_value_label, status->device_door_open ? "已开门" : "未开门");
     }
     if (s_device_receive_volume_label != NULL) {
-        lv_label_set_text_fmt(s_device_receive_volume_label,
-                              "%u",
-                              (unsigned)status->audio_speaker_volume_percent);
+        display_text_set_uint(s_device_receive_volume_label,
+                              status->audio_speaker_volume_percent);
     }
     if (s_device_receive_mute_label != NULL) {
         display_text_set(s_device_receive_mute_label,
                          status->audio_speaker_volume_percent == 0U ? "恢复" : "禁音");
     }
     if (s_device_send_volume_label != NULL) {
-        lv_label_set_text_fmt(s_device_send_volume_label,
-                              "%u",
-                              (unsigned)status->audio_capture_gain_percent);
+        display_text_set_uint(s_device_send_volume_label,
+                              status->audio_capture_gain_percent);
     }
     if (s_device_send_mute_label != NULL) {
         display_text_set(s_device_send_mute_label,
@@ -8310,6 +8754,7 @@ static void display_update_ai_chat_page(const display_status_t *status)
     const display_ai_chat_message_t *latest_message = NULL;
     bool ai_dialog_font_ready = false;
     bool show_new_chat_button = false;
+    bool reply_active = false;
 
     if (status == NULL) {
         return;
@@ -8318,14 +8763,16 @@ static void display_update_ai_chat_page(const display_status_t *status)
     display_apply_ai_dialog_font_if_ready();
     ai_dialog_font_ready = ai_chat_font_is_ready();
     show_new_chat_button = display_ai_chat_should_show_new_chat_button(status);
+    reply_active = status->ai_chat_cloud_speaking ||
+                   status->ai_chat_output_playback_pending;
 
     if (show_new_chat_button) {
         state_text = "休息";
         state_color = lv_color_hex(0x64758A);
-    } else if (status->ai_chat_listening && !status->ai_chat_cloud_speaking) {
+    } else if (status->ai_chat_listening && !reply_active) {
         state_text = "聆听";
         state_color = lv_color_hex(0x2F82D7);
-    } else if (status->ai_chat_cloud_speaking) {
+    } else if (reply_active) {
         state_text = "回复";
         state_color = lv_color_hex(0x23C17D);
     } else if (status->ai_chat_active) {
@@ -8360,7 +8807,7 @@ static void display_update_ai_chat_page(const display_status_t *status)
         caption_color = latest_message->caption_type == DISPLAY_AI_CHAT_CAPTION_TYPE_ASR ?
             lv_color_hex(0x0D8A59) :
             lv_color_hex(0x1768B7);
-    } else if (status->ai_chat_cloud_speaking && status->ai_chat_tts_caption[0] != '\0') {
+    } else if (reply_active && status->ai_chat_tts_caption[0] != '\0') {
         caption_text = status->ai_chat_tts_caption;
         caption_color = lv_color_hex(0x1768B7);
     } else if (status->ai_chat_listening && status->ai_chat_asr_caption[0] != '\0') {
@@ -8424,15 +8871,13 @@ static void display_update_ai_chat_settings_page(const display_status_t *status)
     }
 
     if (s_ai_settings_mic_value_label != NULL) {
-        lv_label_set_text_fmt(s_ai_settings_mic_value_label,
-                              "%u",
-                              (unsigned)status->audio_capture_gain_percent);
+        display_text_set_uint(s_ai_settings_mic_value_label,
+                              status->audio_capture_gain_percent);
     }
 
     if (s_ai_settings_speaker_value_label != NULL) {
-        lv_label_set_text_fmt(s_ai_settings_speaker_value_label,
-                              "%u",
-                              (unsigned)status->audio_speaker_volume_percent);
+        display_text_set_uint(s_ai_settings_speaker_value_label,
+                              status->audio_speaker_volume_percent);
     }
 
     display_update_ai_avatar_choice_buttons(status->ai_chat_avatar);
@@ -8728,6 +9173,16 @@ static void display_update_wechat_contact_list(const display_status_t *status)
 
     if (s_wechat_empty_label != NULL) {
         if (shown_count == 0) {
+            const char *empty_text = "暂无微信联系人";
+            if (!status->wechat_contacts_ready) {
+                empty_text = status->wechat_contacts_last_error == ESP_OK ?
+                             "联系人加载中" : "联系人加载失败";
+            } else if (status->wechat_contacts_last_error != ESP_OK) {
+                empty_text = "授权联系人同步失败";
+            } else if (!status->wechat_contacts_server_synced) {
+                empty_text = "授权联系人同步中";
+            }
+            display_text_set(s_wechat_empty_label, empty_text);
             lv_obj_clear_flag(s_wechat_empty_label, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_add_flag(s_wechat_empty_label, LV_OBJ_FLAG_HIDDEN);
@@ -8769,10 +9224,10 @@ static void display_update_call_active_page(const display_status_t *status)
         display_text_set(s_call_duration_label, duration);
     }
     if (s_call_mic_value_label != NULL) {
-        lv_label_set_text_fmt(s_call_mic_value_label, "%u", (unsigned)mic);
+        display_text_set_uint(s_call_mic_value_label, mic);
     }
     if (s_call_speaker_value_label != NULL) {
-        lv_label_set_text_fmt(s_call_speaker_value_label, "%u", (unsigned)speaker);
+        display_text_set_uint(s_call_speaker_value_label, speaker);
     }
 }
 
@@ -8846,47 +9301,62 @@ static void display_update_wechat_active_page(const display_status_t *status)
         display_text_set(s_wechat_duration_label, duration);
     }
     if (s_wechat_mic_value_label != NULL) {
-        lv_label_set_text_fmt(s_wechat_mic_value_label, "%u", (unsigned)mic);
+        display_text_set_uint(s_wechat_mic_value_label, mic);
     }
     if (s_wechat_speaker_value_label != NULL) {
-        lv_label_set_text_fmt(s_wechat_speaker_value_label, "%u", (unsigned)speaker);
+        display_text_set_uint(s_wechat_speaker_value_label, speaker);
     }
 }
 
 static void display_update_wifi_connect_feedback(const display_status_t *status)
 {
-    if (!s_wifi_connect_pending) {
-        return;
-    }
-
+    const char *connect_target = s_wifi_connect_target_ssid[0] != '\0'
+                                     ? s_wifi_connect_target_ssid
+                                     : s_selected_ssid;
     bool connect_target_matched = status->network_connected &&
-                                  (s_wifi_connect_target_ssid[0] == '\0' ||
+                                  (connect_target[0] == '\0' ||
                                    status->network_ssid[0] == '\0' ||
-                                   strcmp(status->network_ssid, s_wifi_connect_target_ssid) == 0);
+                                   strcmp(status->network_ssid, connect_target) == 0);
 
     if (connect_target_matched) {
         s_wifi_connect_pending = false;
-        s_wifi_connect_state = DISPLAY_WIFI_CONNECT_STATE_CONNECTED;
+        display_set_wifi_connect_state(DISPLAY_WIFI_CONNECT_STATE_CONNECTED);
         display_set_password_border_color(lv_color_hex(0x2E8F6B));
         s_wifi_connect_target_ssid[0] = '\0';
         display_show_wifi_page();
         return;
     }
 
-    if (status->network_connect_failed) {
-        s_wifi_connect_pending = false;
-        s_wifi_connect_state = DISPLAY_WIFI_CONNECT_STATE_FAILED;
-        display_set_password_border_color(lv_color_hex(0xC8513C));
-        s_wifi_connect_target_ssid[0] = '\0';
+    if (!s_wifi_connect_pending) {
         return;
     }
 
-    if ((esp_timer_get_time() - s_wifi_connect_request_us) > DISPLAY_WIFI_CONNECT_TIMEOUT_US) {
+    if (status->network_connect_failed) {
         s_wifi_connect_pending = false;
-        s_wifi_connect_state = DISPLAY_WIFI_CONNECT_STATE_TIMEOUT;
+        switch (status->network_connect_failure) {
+        case NETWORK_CONNECT_FAILURE_AUTHENTICATION:
+            display_set_wifi_connect_state(DISPLAY_WIFI_CONNECT_STATE_AUTH_FAILED);
+            break;
+        case NETWORK_CONNECT_FAILURE_AP_NOT_FOUND:
+            display_set_wifi_connect_state(DISPLAY_WIFI_CONNECT_STATE_AP_NOT_FOUND);
+            break;
+        case NETWORK_CONNECT_FAILURE_TIMEOUT:
+            display_set_wifi_connect_state(DISPLAY_WIFI_CONNECT_STATE_TIMEOUT);
+            break;
+        case NETWORK_CONNECT_FAILURE_ASSOCIATION:
+        case NETWORK_CONNECT_FAILURE_OTHER:
+        case NETWORK_CONNECT_FAILURE_NONE:
+        default:
+            display_set_wifi_connect_state(DISPLAY_WIFI_CONNECT_STATE_FAILED);
+            break;
+        }
         display_set_password_border_color(lv_color_hex(0xC8513C));
-        s_wifi_connect_target_ssid[0] = '\0';
+        return;
     }
+
+    /* Connection failure ownership lives in the Wi-Fi state machine. A UI
+     * timer cannot distinguish AP association from DHCP and used to report a
+     * false timeout while the station was already waiting for an address. */
 }
 
 static void display_update_test_page(const display_status_t *status)
@@ -9826,9 +10296,128 @@ static void display_build_call_list_page(lv_obj_t *screen)
                                               display_call_child_back_btn_cb);
     display_create_call_list_refresh_button(header);
 
+    s_call_list_content = lv_obj_create(s_call_list_page);
+    lv_obj_remove_style_all(s_call_list_content);
+    lv_obj_set_pos(s_call_list_content, 0, 30);
+    lv_obj_set_size(s_call_list_content, DISPLAY_DRIVER_WIDTH, DISPLAY_DRIVER_HEIGHT - 30);
+    lv_obj_set_style_bg_opa(s_call_list_content, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(s_call_list_content, 0, 0);
+    lv_obj_set_scroll_dir(s_call_list_content, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_call_list_content, LV_SCROLLBAR_MODE_AUTO);
+
     for (uint8_t index = 0; index < s_call_contact_count; ++index) {
-        display_create_call_contact_row(s_call_list_page, index, 36 + ((lv_coord_t)index * 50));
+        display_create_call_contact_row(s_call_list_content, index, 4 + ((lv_coord_t)index * 50));
     }
+    if (s_call_contact_count == 0U) {
+        (void)display_create_figma_text(s_call_list_content,
+                                        "No contacts",
+                                        8,
+                                        78,
+                                        304,
+                                        lv_color_hex(0x64758A),
+                                        12,
+                                        LV_TEXT_ALIGN_CENTER);
+    }
+}
+
+static void display_build_call_remark_page(lv_obj_t *screen)
+{
+    s_call_remark_page = lv_obj_create(screen);
+    display_prepare_figma_page(s_call_remark_page);
+    lv_obj_add_flag(s_call_remark_page, LV_OBJ_FLAG_HIDDEN);
+
+    (void)display_create_figma_header(s_call_remark_page,
+                                      "联系人名称",
+                                      display_call_remark_back_btn_cb,
+                                      "保存",
+                                      lv_color_hex(0x20BF7A),
+                                      display_call_remark_save_btn_cb);
+
+    (void)display_create_figma_text(s_call_remark_page,
+                                    "联系人名称",
+                                    8,
+                                    36,
+                                    196,
+                                    lv_color_hex(0x64758A),
+                                    12,
+                                    LV_TEXT_ALIGN_LEFT);
+    s_call_remark_length_label = display_create_figma_text(s_call_remark_page,
+                                                            "0/63",
+                                                            230,
+                                                            36,
+                                                            82,
+                                                            lv_color_hex(0x64758A),
+                                                            12,
+                                                            LV_TEXT_ALIGN_RIGHT);
+
+    s_call_remark_ta = lv_textarea_create(s_call_remark_page);
+    lv_obj_set_pos(s_call_remark_ta, 8, DISPLAY_UUID_INPUT_TOP);
+    lv_obj_set_size(s_call_remark_ta, DISPLAY_UUID_INPUT_WIDTH, DISPLAY_UUID_INPUT_HEIGHT);
+    lv_textarea_set_one_line(s_call_remark_ta, true);
+    lv_textarea_set_max_length(s_call_remark_ta, DISPLAY_CALL_CONTACT_REMARK_MAX - 1U);
+    lv_textarea_set_placeholder_text(s_call_remark_ta, "Name");
+    lv_obj_set_style_radius(s_call_remark_ta, 8, 0);
+    lv_obj_set_style_border_width(s_call_remark_ta, 1, 0);
+    lv_obj_set_style_border_color(s_call_remark_ta, lv_color_hex(0xD5E0EB), 0);
+    lv_obj_set_style_bg_color(s_call_remark_ta, lv_color_hex(0xFFFFFF), 0);
+    display_text_set_color(s_call_remark_ta, lv_color_hex(0x10243E), 0);
+    lv_obj_set_style_text_font(s_call_remark_ta, display_ascii_font(12), 0);
+    lv_obj_set_style_pad_left(s_call_remark_ta, 12, 0);
+    lv_obj_set_style_pad_right(s_call_remark_ta, 12, 0);
+    lv_obj_add_event_cb(s_call_remark_ta,
+                        display_call_remark_textarea_event_cb,
+                        LV_EVENT_ALL,
+                        NULL);
+
+    s_call_remark_status_label = display_create_figma_text(s_call_remark_page,
+                                                            "点击保存生效",
+                                                            8,
+                                                            DISPLAY_UUID_STATUS_TOP,
+                                                            DISPLAY_UUID_STATUS_WIDTH,
+                                                            lv_color_hex(0x0D8A59),
+                                                            12,
+                                                            LV_TEXT_ALIGN_LEFT);
+
+    s_call_remark_keyboard = lv_keyboard_create(s_call_remark_page);
+    lv_obj_set_pos(s_call_remark_keyboard, DISPLAY_UUID_KEYBOARD_LEFT, DISPLAY_UUID_KEYBOARD_TOP);
+    lv_obj_set_size(s_call_remark_keyboard, DISPLAY_UUID_KEYBOARD_WIDTH, DISPLAY_UUID_KEYBOARD_HEIGHT);
+    lv_obj_set_style_bg_opa(s_call_remark_keyboard, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(s_call_remark_keyboard, 0, 0);
+    lv_obj_set_style_pad_row(s_call_remark_keyboard, 3, 0);
+    lv_obj_set_style_pad_column(s_call_remark_keyboard, 2, 0);
+    lv_obj_set_style_border_width(s_call_remark_keyboard, 0, 0);
+    lv_obj_set_style_radius(s_call_remark_keyboard, 0, 0);
+    lv_obj_set_style_pad_all(s_call_remark_keyboard, 0, LV_PART_ITEMS);
+    display_text_set_color(s_call_remark_keyboard, lv_color_hex(0x10243E), LV_PART_ITEMS);
+    lv_obj_set_style_bg_color(s_call_remark_keyboard, lv_color_hex(0xFFFFFF), LV_PART_ITEMS);
+    lv_obj_set_style_bg_color(s_call_remark_keyboard,
+                              lv_color_hex(0xD7EAFB),
+                              LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_style_radius(s_call_remark_keyboard, 5, LV_PART_ITEMS);
+    lv_obj_set_style_shadow_width(s_call_remark_keyboard, 0, LV_PART_ITEMS);
+    lv_keyboard_set_map(s_call_remark_keyboard,
+                        LV_KEYBOARD_MODE_USER_1,
+                        (const char **)s_wifi_keyboard_map_lc,
+                        s_wifi_keyboard_ctrl_lc_map);
+    lv_keyboard_set_map(s_call_remark_keyboard,
+                        LV_KEYBOARD_MODE_USER_2,
+                        (const char **)s_wifi_keyboard_map_uc,
+                        s_wifi_keyboard_ctrl_uc_map);
+    lv_keyboard_set_map(s_call_remark_keyboard,
+                        LV_KEYBOARD_MODE_USER_3,
+                        (const char **)s_wifi_keyboard_map_spec,
+                        s_wifi_keyboard_ctrl_spec_map);
+    lv_obj_remove_event_cb(s_call_remark_keyboard, lv_keyboard_def_event_cb);
+    lv_obj_add_event_cb(s_call_remark_keyboard,
+                        display_keyboard_value_event_cb,
+                        LV_EVENT_VALUE_CHANGED,
+                        NULL);
+    lv_obj_add_event_cb(s_call_remark_keyboard,
+                        display_keyboard_draw_part_event_cb,
+                        LV_EVENT_DRAW_PART_BEGIN,
+                        NULL);
+    lv_obj_add_flag(s_call_remark_keyboard, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(s_call_remark_keyboard, display_keyboard_event_cb, LV_EVENT_ALL, NULL);
 }
 
 static void display_build_call_active_page(lv_obj_t *screen)
@@ -10046,7 +10635,7 @@ static void display_build_wechat_list_page(lv_obj_t *screen)
     }
 
     s_wechat_empty_label = display_create_ai_text(s_wechat_list_page,
-                                                  "No WeChat contacts",
+                                                  "联系人加载中",
                                                   8,
                                                   104,
                                                   304,
@@ -10087,12 +10676,12 @@ static void display_build_wechat_remark_page(lv_obj_t *screen)
                                     11,
                                     LV_TEXT_ALIGN_LEFT);
     s_wechat_remark_current_label = display_create_runtime_cn_text(current_row,
-                                                                   "未设置",
-                                                                   105,
-                                                                   5,
-                                                                   188,
-                                                                   lv_color_hex(0x10233B),
-                                                                   LV_TEXT_ALIGN_RIGHT);
+                                                                    "未设置",
+                                                                    105,
+                                                                    5,
+                                                                    188,
+                                                                    lv_color_hex(0x10233B),
+                                                                    LV_TEXT_ALIGN_RIGHT);
 
     for (size_t index = 0;
          index < sizeof(s_wechat_remark_presets) / sizeof(s_wechat_remark_presets[0]);
@@ -10118,7 +10707,7 @@ static void display_build_wechat_remark_page(lv_obj_t *screen)
     }
 
     (void)display_create_figma_text(s_wechat_remark_page,
-                                    "名称仅用于本设备和AI呼叫",
+                                    "名称会同步到其他已授权设备",
                                     8,
                                     216,
                                     304,
@@ -10198,13 +10787,13 @@ static lv_obj_t *display_create_tirtc_config_field(lv_obj_t *parent,
                               12,
                               LV_TEXT_ALIGN_LEFT);
     lv_obj_t *value_label = display_create_figma_text(row,
-                                                      value,
-                                                      10,
-                                                      22,
-                                                      246,
-                                                      lv_color_hex(0x10243E),
-                                                      12,
-                                                      LV_TEXT_ALIGN_LEFT);
+                                                             value,
+                                                             10,
+                                                             22,
+                                                             246,
+                                                             lv_color_hex(0x10243E),
+                                                             12,
+                                                             LV_TEXT_ALIGN_LEFT);
     return value_label;
 }
 
@@ -10233,13 +10822,13 @@ static void display_build_network_test_page(lv_obj_t *screen)
                                        lv_color_hex(0xD5E0EB),
                                        6);
     s_network_summary_wifi_label = display_create_figma_text(summary,
-                                                             "Wi-Fi --",
-                                                             8,
-                                                             4,
-                                                             148,
-                                                             lv_color_hex(0x10243E),
-                                                             12,
-                                                             LV_TEXT_ALIGN_LEFT);
+                                                                    "Wi-Fi --",
+                                                                    8,
+                                                                    4,
+                                                                    148,
+                                                                    lv_color_hex(0x10243E),
+                                                                    12,
+                                                                    LV_TEXT_ALIGN_LEFT);
     s_network_summary_ip_label = display_create_figma_text(summary,
                                                            "IP --",
                                                            116,
@@ -10266,21 +10855,21 @@ static void display_build_network_test_page(lv_obj_t *screen)
                                       6);
     s_network_result_box = result;
     s_network_result_label = display_create_figma_text(result,
-                                                       "基础网络待测",
-                                                       10,
-                                                       7,
-                                                       150,
-                                                       lv_color_hex(0xF59E0B),
-                                                       12,
-                                                       LV_TEXT_ALIGN_LEFT);
-    s_network_result_detail_label = display_create_figma_text(result,
-                                                              "点击重测",
-                                                              174,
+                                                              "基础网络待测",
+                                                              10,
                                                               7,
-                                                              120,
-                                                              lv_color_hex(0x64758A),
+                                                              150,
+                                                              lv_color_hex(0xF59E0B),
                                                               12,
-                                                              LV_TEXT_ALIGN_RIGHT);
+                                                              LV_TEXT_ALIGN_LEFT);
+    s_network_result_detail_label = display_create_figma_text(result,
+                                                                     "点击重测",
+                                                                     174,
+                                                                     7,
+                                                                     120,
+                                                                     lv_color_hex(0x64758A),
+                                                                     12,
+                                                                     LV_TEXT_ALIGN_RIGHT);
 
     display_update_network_test_page(&s_last_status);
 }
@@ -11054,21 +11643,21 @@ static void display_build_test_page(lv_obj_t *screen)
                                                  lv_color_hex(0xD5E0EB),
                                                  6);
     s_tirtc_test_session_label = display_create_figma_text(summary,
-                                                           "会话 TEST",
-                                                           8,
-                                                           4,
-                                                           150,
-                                                           lv_color_hex(0x10243E),
-                                                           12,
-                                                           LV_TEXT_ALIGN_LEFT);
+                                                                  "会话 TEST",
+                                                                  8,
+                                                                  4,
+                                                                  150,
+                                                                  lv_color_hex(0x10243E),
+                                                                  12,
+                                                                  LV_TEXT_ALIGN_LEFT);
     s_tirtc_test_link_label = display_create_figma_text(summary,
-                                                        "音频链路",
-                                                        196,
-                                                        4,
-                                                        100,
-                                                        lv_color_hex(0x10243E),
-                                                        12,
-                                                        LV_TEXT_ALIGN_RIGHT);
+                                                               "音频链路",
+                                                               196,
+                                                               4,
+                                                               100,
+                                                               lv_color_hex(0x10243E),
+                                                               12,
+                                                               LV_TEXT_ALIGN_RIGHT);
 
     display_create_check_row(s_test_page, 63, "获取 Token", "等待", lv_color_hex(0xFFFFFF), lv_color_hex(0xF59E0B), &s_tirtc_test_token_value_label);
     display_create_check_row(s_test_page, 91, "连接房间", "等待", lv_color_hex(0xFFFFFF), lv_color_hex(0xF59E0B), &s_tirtc_test_room_value_label);
@@ -11085,21 +11674,21 @@ static void display_build_test_page(lv_obj_t *screen)
                                                 lv_color_hex(0xF59E0B),
                                                 6);
     s_tirtc_test_result_label = display_create_figma_text(result,
-                                                          "测试就绪",
-                                                          10,
-                                                          7,
-                                                          150,
-                                                          lv_color_hex(0xF59E0B),
-                                                          12,
-                                                          LV_TEXT_ALIGN_LEFT);
-    s_tirtc_test_result_detail_label = display_create_figma_text(result,
-                                                                 "点击开始",
-                                                                 174,
+                                                                 "测试就绪",
+                                                                 10,
                                                                  7,
-                                                                 120,
-                                                                 lv_color_hex(0x64758A),
+                                                                 150,
+                                                                 lv_color_hex(0xF59E0B),
                                                                  12,
-                                                                 LV_TEXT_ALIGN_RIGHT);
+                                                                 LV_TEXT_ALIGN_LEFT);
+    s_tirtc_test_result_detail_label = display_create_figma_text(result,
+                                                                        "点击开始",
+                                                                        174,
+                                                                        7,
+                                                                        120,
+                                                                        lv_color_hex(0x64758A),
+                                                                        12,
+                                                                        LV_TEXT_ALIGN_RIGHT);
 
     display_update_test_page(&s_last_status);
     return;
@@ -11124,22 +11713,8 @@ static void display_build_test_page(lv_obj_t *screen)
     lv_label_set_long_mode(s_test_status_label, LV_LABEL_LONG_WRAP);
     display_text_set(s_test_status_label, "Ready");
 
-    s_test_video_btn = lv_btn_create(card);
-    lv_obj_set_pos(s_test_video_btn, 0, 114);
-    lv_obj_set_size(s_test_video_btn, 118, 34);
-    lv_obj_set_style_radius(s_test_video_btn, 16, 0);
-    lv_obj_set_style_bg_color(s_test_video_btn, lv_color_hex(0x2E8F6B), 0);
-    lv_obj_set_style_border_width(s_test_video_btn, 0, 0);
-    lv_obj_add_event_cb(s_test_video_btn, display_test_video_btn_cb, LV_EVENT_CLICKED, NULL);
-
-    s_test_video_btn_label = lv_label_create(s_test_video_btn);
-    lv_obj_set_style_text_font(s_test_video_btn_label, &lv_font_montserrat_14, 0);
-    display_text_set_color(s_test_video_btn_label, lv_color_hex(0xFFFFFF), 0);
-    display_text_set(s_test_video_btn_label, "Video");
-    lv_obj_center(s_test_video_btn_label);
-
     s_test_audio_btn = lv_btn_create(card);
-    lv_obj_set_pos(s_test_audio_btn, 134, 114);
+    lv_obj_set_pos(s_test_audio_btn, 67, 114);
     lv_obj_set_size(s_test_audio_btn, 118, 34);
     lv_obj_set_style_radius(s_test_audio_btn, 16, 0);
     lv_obj_set_style_bg_color(s_test_audio_btn, lv_color_hex(0x1E4F62), 0);
@@ -11360,13 +11935,24 @@ static void display_build_wifi_page(lv_obj_t *screen)
                                       display_wifi_refresh_btn_cb);
 
     s_wifi_connection_state_label = display_create_figma_text(s_wifi_page,
-                                                              "未连接 Wi-Fi",
-                                                              8,
-                                                              37,
-                                                              210,
-                                                              lv_color_hex(0x64758A),
-                                                              12,
-                                                              LV_TEXT_ALIGN_LEFT);
+                                                                     "未连接 Wi-Fi",
+                                                                     8,
+                                                                     37,
+                                                                     210,
+                                                                     lv_color_hex(0x64758A),
+                                                                      12,
+                                                                      LV_TEXT_ALIGN_LEFT);
+    s_wifi_connection_runtime_label = lv_label_create(s_wifi_page);
+    if (s_wifi_connection_runtime_label != NULL) {
+        lv_obj_set_pos(s_wifi_connection_runtime_label, 8, 34);
+        lv_obj_set_width(s_wifi_connection_runtime_label, 210);
+        lv_label_set_long_mode(s_wifi_connection_runtime_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(s_wifi_connection_runtime_label, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_style_text_font(s_wifi_connection_runtime_label, display_runtime_utf8_font(), 0);
+        display_text_set_color(s_wifi_connection_runtime_label, lv_color_hex(0x64758A), 0);
+        display_text_set(s_wifi_connection_runtime_label, "");
+        lv_obj_add_flag(s_wifi_connection_runtime_label, LV_OBJ_FLAG_HIDDEN);
+    }
     s_wifi_scan_state_label = display_create_figma_text(s_wifi_page,
                                                         "扫描中",
                                                         242,
@@ -11425,7 +12011,8 @@ static void display_build_wifi_page(lv_obj_t *screen)
         lv_label_set_long_mode(label_row, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_align(label_row, LV_TEXT_ALIGN_LEFT, 0);
         display_text_set_color(label_row, lv_color_hex(0x10243E), 0);
-        lv_obj_set_style_text_font(label_row, display_ascii_font(14), 0);
+        /* SSIDs are runtime UTF-8 data, so bitmap text assets and ASCII fonts cannot render them. */
+        lv_obj_set_style_text_font(label_row, display_runtime_utf8_font(), 0);
         display_text_set(label_row, "");
         lv_obj_align(label_row, LV_ALIGN_LEFT_MID, 0, 0);
 
@@ -11560,21 +12147,35 @@ static void display_build_wifi_connect_page(lv_obj_t *screen)
                                       NULL);
 
     s_wifi_connect_hint_label = display_create_figma_text(s_wifi_connect_page,
-                                                          "输入密码加入",
-                                                          DISPLAY_WIFI_CONNECT_HINT_LEFT,
-                                                          DISPLAY_WIFI_CONNECT_HINT_TOP,
-                                                          DISPLAY_WIFI_CONNECT_HINT_WIDTH,
-                                                          lv_color_hex(0x64758A),
-                                                          12,
-                                                          LV_TEXT_ALIGN_LEFT);
-    s_wifi_connect_rssi_label = display_create_figma_text(s_wifi_connect_page,
-                                                          "",
-                                                          DISPLAY_DRIVER_WIDTH - DISPLAY_WIFI_CONNECT_HINT_LEFT - DISPLAY_WIFI_CONNECT_RSSI_WIDTH,
-                                                          DISPLAY_WIFI_CONNECT_HINT_TOP,
-                                                          DISPLAY_WIFI_CONNECT_RSSI_WIDTH,
-                                                          lv_color_hex(0xF59E0B),
-                                                          12,
-                                                          LV_TEXT_ALIGN_RIGHT);
+                                                                 "输入密码加入",
+                                                                 DISPLAY_WIFI_CONNECT_HINT_LEFT,
+                                                                 DISPLAY_WIFI_CONNECT_HINT_TOP,
+                                                                 DISPLAY_WIFI_CONNECT_HINT_WIDTH,
+                                                                 lv_color_hex(0x64758A),
+                                                                 12,
+                                                                 LV_TEXT_ALIGN_LEFT);
+    s_wifi_connect_progress_label = lv_label_create(s_wifi_connect_page);
+    if (s_wifi_connect_progress_label != NULL) {
+        lv_obj_set_pos(s_wifi_connect_progress_label,
+                       DISPLAY_WIFI_CONNECT_HINT_LEFT,
+                       DISPLAY_WIFI_CONNECT_HINT_TOP - 3);
+        lv_obj_set_width(s_wifi_connect_progress_label, DISPLAY_WIFI_CONNECT_HINT_WIDTH);
+        lv_label_set_long_mode(s_wifi_connect_progress_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(s_wifi_connect_progress_label, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_style_text_font(s_wifi_connect_progress_label, display_runtime_utf8_font(), 0);
+        display_text_set_color(s_wifi_connect_progress_label, lv_color_hex(0xF59E0B), 0);
+        display_text_set(s_wifi_connect_progress_label, "");
+        lv_obj_add_flag(s_wifi_connect_progress_label, LV_OBJ_FLAG_HIDDEN);
+    }
+    s_wifi_connect_rssi_label = display_create_figma_text(
+        s_wifi_connect_page,
+        "",
+        DISPLAY_DRIVER_WIDTH - DISPLAY_WIFI_CONNECT_HINT_LEFT - DISPLAY_WIFI_CONNECT_RSSI_WIDTH,
+        DISPLAY_WIFI_CONNECT_HINT_TOP,
+        DISPLAY_WIFI_CONNECT_RSSI_WIDTH,
+        lv_color_hex(0xF59E0B),
+        12,
+        LV_TEXT_ALIGN_RIGHT);
 
     s_password_ta = lv_textarea_create(s_wifi_connect_page);
     lv_obj_set_pos(s_password_ta, 8, DISPLAY_WIFI_CONNECT_INPUT_TOP);
@@ -11595,13 +12196,13 @@ static void display_build_wifi_connect_page(lv_obj_t *screen)
     lv_obj_add_event_cb(s_password_ta, display_textarea_event_cb, LV_EVENT_ALL, NULL);
 
     s_wifi_connect_details_label = display_create_figma_text(s_wifi_connect_page,
-                                                             "",
-                                                             8,
-                                                             DISPLAY_WIFI_CONNECT_DETAILS_TOP,
-                                                             DISPLAY_WIFI_CONNECT_DETAILS_WIDTH,
-                                                             lv_color_hex(0x64758A),
-                                                             12,
-                                                             LV_TEXT_ALIGN_LEFT);
+                                                                    "",
+                                                                    8,
+                                                                    DISPLAY_WIFI_CONNECT_DETAILS_TOP,
+                                                                    DISPLAY_WIFI_CONNECT_DETAILS_WIDTH,
+                                                                    lv_color_hex(0x64758A),
+                                                                    12,
+                                                                    LV_TEXT_ALIGN_LEFT);
     lv_obj_add_flag(s_wifi_connect_details_label, LV_OBJ_FLAG_HIDDEN);
 
     s_keyboard = lv_btnmatrix_create(s_wifi_connect_page);
@@ -11694,6 +12295,7 @@ static void display_refresh_timer(lv_timer_t *timer)
             display_show_call_list_page();
         }
     }
+    display_update_call_contact_request(status);
 
     display_update_home_status_bar(status);
     display_update_binding_prompt(status);
@@ -11736,7 +12338,10 @@ static void display_refresh_timer(lv_timer_t *timer)
     if (wifi_page_visible || wifi_connect_page_visible || s_wifi_connect_pending || s_last_wifi_scan_request_us > 0) {
         wifi_status_changed = !display_wifi_scan_equals(status, previous_status) ||
                               status->network_connected != previous_status->network_connected ||
+                              status->network_associated != previous_status->network_associated ||
+                              status->network_phase != previous_status->network_phase ||
                               status->network_connect_failed != previous_status->network_connect_failed ||
+                              status->network_connect_failure != previous_status->network_connect_failure ||
                               strcmp(status->network_ssid, previous_status->network_ssid) != 0;
 
         if (s_last_wifi_scan_request_us > 0) {
@@ -11757,8 +12362,10 @@ static void display_refresh_timer(lv_timer_t *timer)
         if (wifi_connect_page_visible || s_wifi_connect_pending) {
             display_update_wifi_connect_feedback(status);
         }
-        if (wifi_connect_page_visible && wifi_status_changed) {
-            display_update_wifi_connect_details_line(status);
+        if (wifi_connect_page_visible && (wifi_status_changed || s_wifi_connect_pending)) {
+            if (wifi_status_changed) {
+                display_update_wifi_connect_details_line(status);
+            }
             display_update_wifi_connect_status_line(status);
         }
     }
@@ -12289,35 +12896,5 @@ esp_err_t display_debug_scroll_async(uint16_t x, uint16_t y, int16_t dx, int16_t
         return ESP_FAIL;
     }
 
-    return ESP_OK;
-}
-
-esp_err_t display_show_remote_video_frame_rgb565(const uint16_t *pixels, uint16_t width, uint16_t height)
-{
-    if (!s_display_initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (pixels == NULL || width == 0 || height == 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (!lvgl_port_lock(100)) {
-        return ESP_ERR_TIMEOUT;
-    }
-
-    display_show_remote_video_locked(pixels, width, height);
-    lvgl_port_unlock();
-    return ESP_OK;
-}
-esp_err_t display_clear_remote_video(void)
-{
-    if (!s_display_initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (!lvgl_port_lock(100)) {
-        return ESP_ERR_TIMEOUT;
-    }
-
-    display_clear_remote_video_locked(NULL);
-    lvgl_port_unlock();
     return ESP_OK;
 }

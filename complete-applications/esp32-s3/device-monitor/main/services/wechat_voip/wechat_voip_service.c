@@ -284,14 +284,6 @@ esp_err_t wechat_voip_service_add_contact(const char *open_id)
     return wechat_voip_thing_add_contact(open_id);
 }
 
-esp_err_t wechat_voip_service_remove_contact(const char *open_id)
-{
-    if (!APP_CONFIG_WECHAT_VOIP_ENABLE) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    return wechat_voip_thing_remove_contact(open_id);
-}
-
 esp_err_t wechat_voip_service_update_contact_remark(const char *open_id, const char *remark)
 {
     if (!APP_CONFIG_WECHAT_VOIP_ENABLE) {

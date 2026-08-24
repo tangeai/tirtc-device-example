@@ -41,9 +41,13 @@
 #include "platform/app_task_affinity.h"
 #include "platform_nvs_async.h"
 #include "platform_task_reaper.h"
+#include "product_capabilities.h"
 #include "rtc_media_bridge.h"
 #include "rtc_transport.h"
 #include "sender_test.h"
+#if CONFIG_APP_SERIAL_NET_CLI_ENABLE
+#include "serial_net_cli.h"
+#endif
 #include "system_time.h"
 #include "thing_mqtt_client.h"
 #include "thing_service_registry.h"
@@ -66,8 +70,18 @@ static const char *CALL_FLOW_TAG = "CALL_FLOW";
 #define APP_LIFECYCLE_TASK_STACK_SIZE 6144
 #define APP_LIFECYCLE_TASK_PRIORITY   4
 #define APP_LIFECYCLE_QUEUE_LENGTH    4
+#define APP_CALL_CAPTURE_CODEC_GAIN_PERCENT 78U
+#define APP_CALL_CAPTURE_UPLOAD_UNITY_PERCENT 80U
+#define APP_CALL_CAPTURE_UI_UNITY_PERCENT 80U
+#define APP_CALL_CAPTURE_AUTO_GAIN_MAX_PERCENT 300U
+#define APP_CALL_CAPTURE_FAR_END_UPLOAD_GAIN_PERCENT 28U
+#define APP_CALL_CAPTURE_FAR_END_AUTO_GAIN_MAX_PERCENT 100U
+#define APP_CALL_SPEAKER_VOLUME_MAX_PERCENT 80U
+#define APP_CALL_CAPTURE_NOISE_GATE_OPEN_PEAK 240U
+#define APP_CALL_CAPTURE_NOISE_GATE_CLOSE_PEAK 120U
+#define APP_CALL_CAPTURE_NOISE_GATE_ATTENUATION_PERCENT 20U
 #define APP_DEVICE_IPC_SEND_VOLUME_PERCENT     80U
-#define APP_DEVICE_IPC_PLAYBACK_VOLUME_PERCENT 60U
+#define APP_DEVICE_IPC_PLAYBACK_VOLUME_PERCENT 100U
 #define APP_DEVICE_IPC_CAPTURE_CODEC_GAIN_PERCENT 45U
 #define APP_DEVICE_IPC_CAPTURE_UPLOAD_GAIN_PERCENT APP_DEVICE_IPC_SEND_VOLUME_PERCENT
 #define APP_DEVICE_IPC_CAPTURE_AUTO_GAIN_MAX_PERCENT 200U
@@ -75,7 +89,7 @@ static const char *CALL_FLOW_TAG = "CALL_FLOW";
 #define APP_DEVICE_IPC_CAPTURE_NOISE_GATE_CLOSE_PEAK 120U
 #define APP_DEVICE_IPC_CAPTURE_NOISE_GATE_ATTENUATION_PERCENT 20U
 #define APP_AI_CHAT_DEFAULT_CAPTURE_GAIN_PERCENT 50U
-#define APP_AI_CHAT_DEFAULT_SPEAKER_VOLUME_PERCENT 90U
+#define APP_AI_CHAT_DEFAULT_SPEAKER_VOLUME_PERCENT 100U
 #define APP_AI_CHAT_START_REPORT_DEFER_MS 4000U
 #define APP_AI_CHAT_TOKEN_PREFETCH_DELAY_MS 200U
 #define APP_AI_CHAT_TOKEN_PREFETCH_MIN_INTERVAL_MS 60000U
@@ -85,6 +99,10 @@ static const char *CALL_FLOW_TAG = "CALL_FLOW";
 #define APP_THING_BOOTSTRAP_TASK_PRIORITY          2
 #define APP_DEVICE_UNBIND_ACK_WAIT_MS               2000U
 #define APP_DEVICE_ONLINE_STOP_WAIT_MS              12000U
+#if APP_CONFIG_DEBUG_SCREEN_SERVER_ENABLE
+#define APP_SCREEN_DEBUG_STOP_WAIT_MS                2000U
+#define APP_SCREEN_DEBUG_STOP_POLL_MS                10U
+#endif
 
 typedef enum {
 	APP_CONTROL_EVENT_SPEAKER_VOLUME = 1,
@@ -104,6 +122,9 @@ typedef enum {
 	APP_LIFECYCLE_EVENT_RETURN_HOME,
 	APP_LIFECYCLE_EVENT_START_APP_SERVICES,
 	APP_LIFECYCLE_EVENT_AI_CHAT_CALL_CONTACT,
+	APP_LIFECYCLE_EVENT_CALL_CONTACT,
+	APP_LIFECYCLE_EVENT_CALL_ACCEPT,
+	APP_LIFECYCLE_EVENT_CALL_HANGUP,
 } app_lifecycle_event_type_t;
 
 typedef struct {
@@ -153,6 +174,9 @@ static int64_t s_ai_chat_token_last_prefetch_us;
 static bool s_thing_bootstrap_running;
 static bool s_device_binding_control_pending;
 static bool s_rtc_identity_reconfigure_pending;
+#if APP_CONFIG_DEBUG_SCREEN_SERVER_ENABLE
+static bool s_screen_debug_suspended_for_ai;
+#endif
 
 static void app_configure_log_timezone(void)
 {
@@ -178,6 +202,10 @@ static esp_err_t app_configure_thing_service_registry(void)
 static esp_err_t app_set_speaker_volume_internal(uint8_t percent, bool persist);
 static esp_err_t app_enter_app_locked(app_id_t app_id);
 static esp_err_t app_return_home_locked(void);
+#if APP_CONFIG_DEBUG_SCREEN_SERVER_ENABLE
+static esp_err_t app_suspend_screen_debug_for_ai(void);
+static void app_resume_screen_debug_after_ai(void);
+#endif
 static esp_err_t app_enter_app_sync(app_id_t app_id);
 static esp_err_t app_return_home_sync(void);
 static esp_err_t app_enqueue_lifecycle_event(app_lifecycle_event_type_t type, app_id_t app_id);
@@ -233,6 +261,7 @@ static void app_request_ai_chat_start_if_idle(const char *reason);
 static void app_begin_ai_chat_start_window(void);
 static void app_schedule_ai_chat_token_prefetch(const char *reason);
 static void app_reset_ai_chat_token_prefetch_throttle(void);
+static esp_err_t app_apply_call_capture_profile(uint8_t requested_gain_percent);
 static esp_err_t app_apply_call_audio_profile(void);
 
 enum {
@@ -619,14 +648,11 @@ static bool app_ai_call_target_valid(ai_chat_device_action_route_t route, const 
 
 static bool app_ai_call_type_valid(ai_chat_device_action_route_t route, const char *call_type)
 {
+	(void)route;
 	if (call_type == NULL) {
 		return false;
 	}
-	if (strcmp(call_type, DEVICE_CALL_TYPE_AUDIO) == 0) {
-		return true;
-	}
-	return route == AI_CHAT_DEVICE_ACTION_ROUTE_DEVICE_CALL &&
-	       strcmp(call_type, DEVICE_CALL_TYPE_VIDEO) == 0;
+	return strcmp(call_type, DEVICE_CALL_TYPE_AUDIO) == 0;
 }
 
 static void app_handle_ai_chat_call_contact(ai_chat_device_action_route_t route,
@@ -1419,6 +1445,32 @@ static void app_lifecycle_task(void *arg)
 							event.call_target_id,
 							event.call_type);
 			break;
+		case APP_LIFECYCLE_EVENT_CALL_CONTACT:
+			ret = app_call_contact_with_type(event.call_target_id,
+							 event.call_type);
+			if (ret != ESP_OK) {
+				ESP_LOGW(CALL_FLOW_TAG,
+					 "stage=queued_call_submit_failed peer=%s ret=%s",
+					 event.call_target_id,
+					 esp_err_to_name(ret));
+			}
+			break;
+		case APP_LIFECYCLE_EVENT_CALL_ACCEPT:
+			ret = app_accept_call();
+			if (ret != ESP_OK) {
+				ESP_LOGW(CALL_FLOW_TAG,
+					 "stage=queued_call_accept_failed ret=%s",
+					 esp_err_to_name(ret));
+			}
+			break;
+		case APP_LIFECYCLE_EVENT_CALL_HANGUP:
+			ret = app_hangup_call();
+			if (ret != ESP_OK) {
+				ESP_LOGW(CALL_FLOW_TAG,
+					 "stage=queued_call_hangup_failed ret=%s",
+					 esp_err_to_name(ret));
+			}
+			break;
 		default:
 			ESP_LOGW(TAG, "unknown lifecycle event: type=%u", (unsigned)event.type);
 			break;
@@ -1816,6 +1868,7 @@ static network_config_t app_make_network_config(void)
 		.auto_connect = APP_CONFIG_WIFI_AUTO_CONNECT != 0,
 		.default_ssid = APP_CONFIG_WIFI_SSID,
 		.default_password = APP_CONFIG_WIFI_PASSWORD,
+		.fallback_dns_ipv4 = APP_CONFIG_WIFI_FALLBACK_DNS_IPV4,
 	};
 
 	return config;
@@ -2448,13 +2501,6 @@ static void app_network_state_cb(const network_state_t *state, void *ctx)
 
 }
 
-static bool app_rtc_test_video_active(void *ctx)
-{
-	(void)ctx;
-
-	return sender_test_is_mode_active(SENDER_TEST_MODE_VIDEO);
-}
-
 static bool app_rtc_test_audio_active(void *ctx)
 {
 	(void)ctx;
@@ -2491,17 +2537,90 @@ static bool app_capture_uplink_allowed(void)
 	return audio.capture_gain_percent > 0U;
 }
 
+static esp_err_t app_apply_call_capture_profile(uint8_t requested_gain_percent)
+{
+	uint8_t codec_gain_percent = requested_gain_percent == 0U ?
+				     0U : APP_CALL_CAPTURE_CODEC_GAIN_PERCENT;
+	uint32_t scaled_upload = ((uint32_t)requested_gain_percent *
+				  APP_CALL_CAPTURE_UPLOAD_UNITY_PERCENT +
+				  APP_CALL_CAPTURE_UI_UNITY_PERCENT - 1U) /
+				 APP_CALL_CAPTURE_UI_UNITY_PERCENT;
+	uint8_t upload_gain_percent = scaled_upload > 100U ? 100U : (uint8_t)scaled_upload;
+	const audio_capture_processing_config_t call_capture_config = {
+		.send_volume_percent = requested_gain_percent,
+		.codec_gain_percent = codec_gain_percent,
+		.upload_gain_percent = upload_gain_percent,
+		/*
+		 * Keep MIC1 at the proven 28 dB analog point, then restore distant
+		 * speech only after AEC. The bounded 3x controller cannot alter the
+		 * reference relationship seen by the adaptive filter.
+		 */
+		.auto_gain_max_percent = APP_CALL_CAPTURE_AUTO_GAIN_MAX_PERCENT,
+		/* Keep one continuous AEC timeline across far-end speech pauses. */
+		.echo_continuous_processing = true,
+		/* Use the official FD linear result; do not mix raw microphone echo back in. */
+		.echo_near_end_protection_enabled = false,
+		/*
+		 * Attenuate residual loudspeaker echo by about 7.6 dB instead of merely
+		 * leaving it at unity gain. The AEC adapter still
+		 * classifies double talk while raw-microphone blending stays disabled;
+		 * proven near-end speech releases this far-end guard immediately.
+		 */
+		.far_end_gain_guard_enabled = true,
+		.far_end_upload_gain_percent = APP_CALL_CAPTURE_FAR_END_UPLOAD_GAIN_PERCENT,
+		.far_end_auto_gain_max_percent =
+			APP_CALL_CAPTURE_FAR_END_AUTO_GAIN_MAX_PERCENT,
+		.echo_suppression = AUDIO_ECHO_SUPPRESSION_BALANCED,
+		/* Keep AEC probes out of the real-time capture task during normal calls. */
+		.echo_diagnostics_enabled = false,
+		/* A frame-by-frame post-AEC gate clips consonants and word endings in full-duplex calls. */
+		.noise_gate_enabled = false,
+		.noise_gate_open_peak = APP_CALL_CAPTURE_NOISE_GATE_OPEN_PEAK,
+		.noise_gate_close_peak = APP_CALL_CAPTURE_NOISE_GATE_CLOSE_PEAK,
+		.noise_gate_attenuation_percent = APP_CALL_CAPTURE_NOISE_GATE_ATTENUATION_PERCENT,
+	};
+
+	return microphone_set_processing_config(&call_capture_config);
+}
+
 static esp_err_t app_apply_call_audio_profile(void)
 {
+	app_audio_config_t audio_config = {0};
 	audio_stats_t audio = {0};
 
 	/* Ordinary device calls own the built-in microphone and speaker path. */
-	media_sink_set_audio_profile(MEDIA_SINK_AUDIO_PROFILE_LOW_LATENCY);
+	media_sink_set_audio_profile(MEDIA_SINK_AUDIO_PROFILE_DEVICE_CALL);
+	/*
+	 * Keep the deployed built-in audio contract for device calls. Although both
+	 * S3 endpoints can parse PCM, the current TiRTC call path and its buffering
+	 * have only been validated end to end with 8 kHz A-law. Selecting PCM here
+	 * changed the real listening result for the worse, so format upgrades must
+	 * remain an explicit A/B experiment instead of silently changing the call
+	 * contract.
+	 */
+	ESP_RETURN_ON_ERROR(rtc_transport_set_builtin_audio_format(
+				RTC_TRANSPORT_BUILTIN_AUDIO_FORMAT_ALAW_8K),
+			    TAG,
+			    "select device call A-law audio failed");
 	ESP_RETURN_ON_ERROR(rtc_transport_set_remote_audio_stream_id(RTC_TRANSPORT_DEVICE_AUDIO_STREAM_ID),
 			    TAG,
 			    "select device call audio stream failed");
 	ESP_RETURN_ON_ERROR(rtc_transport_use_builtin_media(), TAG, "restore call media owner failed");
-	ESP_RETURN_ON_ERROR(app_apply_audio_preferences(), TAG, "apply call audio preferences failed");
+	ESP_RETURN_ON_ERROR(app_audio_config_load(&audio_config), TAG, "load call audio config failed");
+	ESP_RETURN_ON_ERROR(app_apply_call_capture_profile(audio_config.capture_gain_percent),
+			    TAG,
+			    "apply call capture profile failed");
+	ESP_RETURN_ON_FALSE(audio_device_preload_echo_cancel(),
+			    ESP_ERR_NO_MEM,
+			    TAG,
+			    "prepare call AEC failed");
+	uint8_t call_speaker_volume = audio_config.speaker_volume_percent >
+				      APP_CALL_SPEAKER_VOLUME_MAX_PERCENT ?
+				      APP_CALL_SPEAKER_VOLUME_MAX_PERCENT :
+				      audio_config.speaker_volume_percent;
+	ESP_RETURN_ON_ERROR(speaker_set_volume_percent(call_speaker_volume),
+			    TAG,
+			    "apply call speaker volume failed");
 
 	audio_device_get_stats(&audio);
 	ESP_LOGI(TAG,
@@ -2515,18 +2634,21 @@ static esp_err_t app_apply_call_audio_profile(void)
 static esp_err_t app_apply_device_ipc_audio_profile(void)
 {
 	/*
-	 * IPC viewing uses the TiRTC built-in media bridge: the primary microphone
-	 * callback is enabled only when TiRTC owns the capture path and publishes a
-	 * local audio stream.  AI Chat and WeChat VoIP use observer/external-audio
-	 * paths, so entering IPC must explicitly restore the built-in owner and
-	 * re-arm local send intent instead of inheriting the previous app's state.
+	 * The S3 "view" application is audio-only. TiRTC owns the microphone and
+	 * speaker path, while the product-level media policy keeps every RTC video
+	 * source, subscription, and renderer disabled.
 	 */
 	app_state_set_audio_enabled(true);
-	app_state_set_video_enabled(true);
+	app_state_set_video_enabled(false);
+	/* The deployed H5 talkback contract is 8 kHz A-law; keep it IPC-only. */
+	ESP_RETURN_ON_ERROR(rtc_transport_set_builtin_audio_format(
+				RTC_TRANSPORT_BUILTIN_AUDIO_FORMAT_ALAW_8K),
+			    TAG,
+			    "select IPC A-law audio failed");
 	ESP_RETURN_ON_ERROR(rtc_transport_set_remote_audio_stream_id(RTC_TRANSPORT_H5_TALKBACK_STREAM_ID),
 			    TAG,
 			    "select H5 talkback audio stream failed");
-	ESP_RETURN_ON_ERROR(rtc_transport_use_builtin_media(), TAG, "restore IPC media owner failed");
+	ESP_RETURN_ON_ERROR(rtc_transport_use_builtin_media(), TAG, "restore IPC audio owner failed");
 	ESP_RETURN_ON_ERROR(speaker_set_volume_percent(APP_DEVICE_IPC_PLAYBACK_VOLUME_PERCENT),
 			    TAG,
 			    "apply IPC playback volume failed");
@@ -2543,22 +2665,17 @@ static esp_err_t app_apply_device_ipc_audio_profile(void)
 	};
 	ESP_RETURN_ON_ERROR(microphone_set_processing_config(&ipc_capture_config),
 			    TAG,
-			    "apply IPC send volume failed");
-	ESP_RETURN_ON_ERROR(app_apply_media_policy(), TAG, "apply IPC media policy failed");
+			    "apply IPC capture profile failed");
+	ESP_RETURN_ON_ERROR(app_apply_media_policy(), TAG, "apply IPC audio policy failed");
 
 	audio_stats_t audio = {0};
 	rtc_transport_stats_t rtc = {0};
 	audio_device_get_stats(&audio);
 	rtc_transport_get_stats(&rtc);
 	ESP_LOGI(TAG,
-		 "IPC audio uplink armed: send=%u codec=%u upload=%u auto_max=%u noise_gate=%d speaker=%u call=%d stream=%u capture=%d tx_audio=%lu",
+		 "IPC audio ready: owner=tirtc send=%u speaker=%u stream=%u capture=%d video=0 tx_audio=%lu",
 		 (unsigned)audio.capture_gain_percent,
-		 (unsigned)audio.capture_codec_gain_percent,
-		 (unsigned)audio.capture_upload_gain_percent,
-		 (unsigned)audio.capture_auto_gain_max_percent,
-		 audio.capture_noise_gate_enabled ? 1 : 0,
 		 (unsigned)audio.speaker_volume_percent,
-		 rtc.call_active ? 1 : 0,
 		 (unsigned)rtc.local_audio_stream_id,
 		 audio.capture_enabled ? 1 : 0,
 		 (unsigned long)rtc.tx_audio_frames);
@@ -2586,6 +2703,7 @@ static void app_stop_app_services(app_id_t app_id)
 		if (call_ret != ESP_OK && call_ret != ESP_ERR_INVALID_STATE) {
 			ESP_LOGW(TAG, "app lifecycle device call close failed: %s", esp_err_to_name(call_ret));
 		}
+		(void)rtc_transport_set_builtin_audio_format(RTC_TRANSPORT_BUILTIN_AUDIO_FORMAT_ALAW_8K);
 		(void)rtc_transport_set_remote_audio_stream_id(RTC_TRANSPORT_H5_TALKBACK_STREAM_ID);
 		esp_err_t hangup_ret = app_hangup_rtc_session_if_active(app_id);
 		if (hangup_ret != ESP_OK) {
@@ -2621,7 +2739,7 @@ static void app_stop_app_services(app_id_t app_id)
 		}
 		esp_err_t audio_ret = app_apply_audio_preferences();
 		if (audio_ret != ESP_OK) {
-			ESP_LOGW(TAG, "restore audio preferences after IPC view failed: %s", esp_err_to_name(audio_ret));
+			ESP_LOGW(TAG, "restore audio preferences after IPC audio view failed: %s", esp_err_to_name(audio_ret));
 		}
 		break;
 	}
@@ -2727,6 +2845,12 @@ void app_release_call_session_resources(void)
 	esp_err_t ret = app_switch_resources(app_resource_mask_for_app(APP_ID_CALL));
 	if (ret != ESP_OK) {
 		ESP_LOGW(TAG, "release call session resources failed: %s", esp_err_to_name(ret));
+	}
+	esp_err_t audio_ret = app_apply_audio_preferences();
+	if (audio_ret != ESP_OK) {
+		ESP_LOGW(TAG,
+			 "restore audio preferences after device call failed: %s",
+			 esp_err_to_name(audio_ret));
 	}
 }
 
@@ -2869,7 +2993,6 @@ esp_err_t app_init(void)
 	after_network_us = esp_timer_get_time();
 
 	rtc_transport_hooks_t rtc_hooks = {
-		.is_test_video_active = app_rtc_test_video_active,
 		.is_test_audio_active = app_rtc_test_audio_active,
 		.request_test_audio_restart = app_rtc_request_test_audio_restart,
 	};
@@ -2882,6 +3005,12 @@ esp_err_t app_init(void)
 	display_set_snapshot_provider(app_ui_fill_display_status, NULL);
 	ESP_RETURN_ON_ERROR(display_init(&display_actions), TAG, "display init failed");
 	after_display_us = esp_timer_get_time();
+#if CONFIG_APP_SERIAL_NET_CLI_ENABLE
+	esp_err_t serial_cli_ret = serial_net_cli_start();
+	if (serial_cli_ret != ESP_OK) {
+		ESP_LOGW(TAG, "serial network CLI start failed: %s", esp_err_to_name(serial_cli_ret));
+	}
+#endif
 #if APP_CONFIG_DEBUG_SCREEN_SERVER_ENABLE
 	esp_err_t screen_debug_ret = screen_debug_server_start();
 	if (screen_debug_ret != ESP_OK) {
@@ -2907,10 +3036,55 @@ void app_run(void)
 	}
 }
 
+#if APP_CONFIG_DEBUG_SCREEN_SERVER_ENABLE
+static esp_err_t app_suspend_screen_debug_for_ai(void)
+{
+	if (!screen_debug_server_is_running()) {
+		return ESP_OK;
+	}
+
+	s_screen_debug_suspended_for_ai = true;
+	screen_debug_server_stop();
+
+	TickType_t wait_started = xTaskGetTickCount();
+	TickType_t timeout_ticks = pdMS_TO_TICKS(APP_SCREEN_DEBUG_STOP_WAIT_MS);
+	while (screen_debug_server_is_running()) {
+		if ((xTaskGetTickCount() - wait_started) >= timeout_ticks) {
+			ESP_LOGE(TAG, "screen debug suspend timed out before AI Chat");
+			return ESP_ERR_TIMEOUT;
+		}
+		vTaskDelay(pdMS_TO_TICKS(APP_SCREEN_DEBUG_STOP_POLL_MS));
+	}
+
+	ESP_LOGI(TAG, "screen debug suspended for AI Chat");
+	return ESP_OK;
+}
+
+static void app_resume_screen_debug_after_ai(void)
+{
+	if (!s_screen_debug_suspended_for_ai) {
+		return;
+	}
+
+	esp_err_t ret = screen_debug_server_start();
+	if (ret != ESP_OK) {
+		ESP_LOGW(TAG, "screen debug resume failed: %s", esp_err_to_name(ret));
+		return;
+	}
+
+	s_screen_debug_suspended_for_ai = false;
+	ESP_LOGI(TAG, "screen debug resumed after AI Chat");
+}
+#endif
+
 static esp_err_t app_enter_app_locked(app_id_t app_id)
 {
 	if (app_id < APP_ID_HOME || app_id > APP_ID_SYSTEM) {
 		return ESP_ERR_INVALID_ARG;
+	}
+	if (app_id == APP_ID_DEVICE && !APP_PRODUCT_IPC_AUDIO_ENABLED) {
+		ESP_LOGW(TAG, "app enter rejected: IPC audio is disabled by product capability");
+		return ESP_ERR_NOT_SUPPORTED;
 	}
 
 	app_id_t current = app_get_active_app();
@@ -2930,6 +3104,17 @@ static esp_err_t app_enter_app_locked(app_id_t app_id)
 		app_set_active_app(APP_ID_HOME);
 	}
 
+#if APP_CONFIG_DEBUG_SCREEN_SERVER_ENABLE
+	if (app_id == APP_ID_AI_CHAT) {
+		esp_err_t debug_ret = app_suspend_screen_debug_for_ai();
+		if (debug_ret != ESP_OK) {
+			return debug_ret;
+		}
+	} else {
+		app_resume_screen_debug_after_ai();
+	}
+#endif
+
 	ESP_LOGI(TAG, "app enter: %s", app_id_name(app_id));
 	uint32_t target_resources = app_resource_mask_for_app(app_id);
 	esp_err_t ret = app_switch_resources(target_resources);
@@ -2941,6 +3126,11 @@ static esp_err_t app_enter_app_locked(app_id_t app_id)
 		app_stop_app_services(app_id);
 		(void)app_switch_resources(app_resource_mask_for_app(APP_ID_HOME));
 		app_set_active_app(APP_ID_HOME);
+#if APP_CONFIG_DEBUG_SCREEN_SERVER_ENABLE
+		if (app_id == APP_ID_AI_CHAT) {
+			app_resume_screen_debug_after_ai();
+		}
+#endif
 		return ret;
 	}
 
@@ -2960,6 +3150,9 @@ static esp_err_t app_return_home_locked(void)
 			    TAG,
 			    "return home resources failed");
 	app_set_active_app(APP_ID_HOME);
+#if APP_CONFIG_DEBUG_SCREEN_SERVER_ENABLE
+	app_resume_screen_debug_after_ai();
+#endif
 	app_schedule_ai_chat_token_prefetch("home");
 	return ESP_OK;
 }
@@ -3007,6 +3200,34 @@ esp_err_t app_request_enter_app(app_id_t app_id)
 	}
 
 	return app_enqueue_lifecycle_event(APP_LIFECYCLE_EVENT_ENTER_APP, app_id);
+}
+
+esp_err_t app_request_call_contact(const char *device_id)
+{
+	if (s_app_lifecycle_queue == NULL || device_id == NULL ||
+	    strlen(device_id) != APP_CALL_CONTACT_DEVICE_ID_LENGTH) {
+		return ESP_ERR_INVALID_ARG;
+	}
+
+	app_lifecycle_event_t event = {
+		.type = APP_LIFECYCLE_EVENT_CALL_CONTACT,
+		.app_id = APP_ID_CALL,
+	};
+	strlcpy(event.call_target_id, device_id, sizeof(event.call_target_id));
+	strlcpy(event.call_type, DEVICE_CALL_TYPE_AUDIO, sizeof(event.call_type));
+	return xQueueSendToBack(s_app_lifecycle_queue, &event, 0) == pdTRUE ?
+		       ESP_OK :
+		       ESP_ERR_TIMEOUT;
+}
+
+esp_err_t app_request_accept_call(void)
+{
+	return app_enqueue_lifecycle_event(APP_LIFECYCLE_EVENT_CALL_ACCEPT, APP_ID_CALL);
+}
+
+esp_err_t app_request_hangup_call(void)
+{
+	return app_enqueue_lifecycle_event(APP_LIFECYCLE_EVENT_CALL_HANGUP, APP_ID_CALL);
 }
 
 esp_err_t app_request_return_home(void)
@@ -3154,7 +3375,10 @@ static esp_err_t app_start_device_online_if_ready(const char *reason)
 	}
 
 	esp_err_t ret = device_online_start_async(reason != NULL ? reason : "auto");
-	if (ret == ESP_OK) {
+	/* Register ingress before the first MQTT connection, but do not restart
+	 * call recovery every time another app merely verifies RTC readiness.  The
+	 * formal online callback owns recovery after each MQTT (re)connection. */
+	if (ret == ESP_OK && !device_online_is_online()) {
 		app_start_device_identity_ingress();
 	}
 	return ret;
@@ -3322,11 +3546,6 @@ esp_err_t app_set_rtc_server_env(app_rtc_server_env_t env)
 	return ESP_OK;
 }
 
-esp_err_t app_start_sender_video_test(void)
-{
-	return sender_test_start(SENDER_TEST_MODE_VIDEO);
-}
-
 esp_err_t app_start_sender_audio_test(void)
 {
 	return sender_test_start(SENDER_TEST_MODE_AUDIO);
@@ -3432,7 +3651,9 @@ esp_err_t app_set_speaker_volume(uint8_t percent)
 
 esp_err_t app_set_capture_gain(uint8_t percent)
 {
-	esp_err_t ret = microphone_set_gain_percent(percent);
+	esp_err_t ret = app_get_active_app() == APP_ID_CALL ?
+			app_apply_call_capture_profile(percent) :
+			microphone_set_gain_percent(percent);
 	if (ret != ESP_OK) {
 		return ret;
 	}
@@ -3441,16 +3662,6 @@ esp_err_t app_set_capture_gain(uint8_t percent)
 	if (save_ret != ESP_OK) {
 		ESP_LOGW(TAG, "save capture gain failed: %s", esp_err_to_name(save_ret));
 	}
-	return app_apply_media_policy();
-}
-
-esp_err_t app_set_local_video_enabled(bool enabled)
-{
-	if (!app_state_is_call_active()) {
-		return ESP_ERR_INVALID_STATE;
-	}
-
-	app_state_set_video_enabled(enabled);
 	return app_apply_media_policy();
 }
 
@@ -3499,7 +3710,9 @@ esp_err_t app_apply_media_policy(void)
 	enable_audio_send = control.audio_enabled &&
 				    app_capture_uplink_allowed();
 
-	video_ret = rtc_transport_set_local_video_send_enabled(control.video_enabled);
+	/* Audio-only product boundary: video is disabled independently of stale UI
+	 * or restored call state. */
+	video_ret = rtc_transport_set_local_video_send_enabled(false);
 	audio_ret = rtc_transport_set_local_audio_send_enabled(enable_audio_send);
 	if (video_ret != ESP_OK || audio_ret != ESP_OK) {
 		ESP_LOGW(TAG,

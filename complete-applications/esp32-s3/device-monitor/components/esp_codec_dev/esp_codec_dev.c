@@ -405,9 +405,11 @@ int esp_codec_dev_set_in_gain(esp_codec_dev_handle_t handle, float db)
     }
     const audio_codec_if_t *codec = dev->codec_if;
     if (codec && codec->set_mic_gain) {
-        codec->set_mic_gain(codec, (int) db);
-        dev->mic_gain = db;
-        return ESP_CODEC_DEV_OK;
+        ret = codec->set_mic_gain(codec, (int) db);
+        if (ret == ESP_CODEC_DEV_OK) {
+            dev->mic_gain = db;
+        }
+        return ret;
     }
     return ESP_CODEC_DEV_NOT_SUPPORT;
 }
@@ -424,8 +426,7 @@ int esp_codec_dev_set_in_channel_gain(esp_codec_dev_handle_t handle, uint16_t ch
     }
     const audio_codec_if_t *codec = dev->codec_if;
     if (codec && codec->set_mic_channel_gain) {
-        codec->set_mic_channel_gain(codec, channel_mask, (int) db);
-        return ESP_CODEC_DEV_OK;
+        return codec->set_mic_channel_gain(codec, channel_mask, (int) db);
     }
     return ESP_CODEC_DEV_NOT_SUPPORT;
 }

@@ -309,22 +309,10 @@ static esp_err_t app_ui_on_hangup_call(void *ctx)
     return app_hangup_call();
 }
 
-static esp_err_t app_ui_on_start_sender_video_test(void *ctx)
-{
-    (void)ctx;
-    return app_start_sender_video_test();
-}
-
 static esp_err_t app_ui_on_start_sender_audio_test(void *ctx)
 {
     (void)ctx;
     return app_start_sender_audio_test();
-}
-
-static esp_err_t app_ui_on_set_local_video_enabled(bool enabled, void *ctx)
-{
-    (void)ctx;
-    return app_set_local_video_enabled(enabled);
 }
 
 static esp_err_t app_ui_on_set_local_audio_enabled(bool enabled, void *ctx)
@@ -361,6 +349,28 @@ static esp_err_t app_ui_on_add_call_contact(const char *device_id, void *ctx)
 {
     (void)ctx;
     return app_add_call_contact(device_id);
+}
+
+static esp_err_t app_ui_on_respond_call_contact(const char *device_id,
+                                                bool accept,
+                                                void *ctx)
+{
+    (void)ctx;
+    return app_respond_call_contact(device_id, accept);
+}
+
+static esp_err_t app_ui_on_update_call_contact_remark(const char *device_id,
+                                                      const char *remark,
+                                                      void *ctx)
+{
+    (void)ctx;
+    return app_update_call_contact_remark(device_id, remark);
+}
+
+static esp_err_t app_ui_on_delete_call_contact(const char *device_id, void *ctx)
+{
+    (void)ctx;
+    return app_delete_call_contact(device_id);
 }
 
 static esp_err_t app_ui_on_refresh_call_contacts(void *ctx)
@@ -470,12 +480,6 @@ static esp_err_t app_ui_on_add_wechat_contact(const char *open_id, void *ctx)
 {
     (void)ctx;
     return app_wechat_add_contact(open_id);
-}
-
-static esp_err_t app_ui_on_remove_wechat_contact(const char *open_id, void *ctx)
-{
-    (void)ctx;
-    return app_wechat_remove_contact(open_id);
 }
 
 static esp_err_t app_ui_on_update_wechat_contact_remark(const char *open_id,
@@ -649,16 +653,17 @@ void app_ui_configure_display_actions(display_actions_t *actions)
         .on_start_rtc = app_ui_on_start_rtc,
         .on_disconnect_rtc = app_ui_on_disconnect_rtc,
         .on_hangup_call = app_ui_on_hangup_call,
-        .on_start_sender_video_test = app_ui_on_start_sender_video_test,
         .on_start_sender_audio_test = app_ui_on_start_sender_audio_test,
         .on_start_ota = app_ui_on_start_ota,
         .on_restart_for_ota = app_ui_on_restart_for_ota,
-        .on_set_local_video_enabled = app_ui_on_set_local_video_enabled,
         .on_set_local_audio_enabled = app_ui_on_set_local_audio_enabled,
         .on_set_speaker_volume = app_ui_on_set_speaker_volume,
         .on_set_capture_gain = app_ui_on_set_capture_gain,
         .on_call_contact = app_ui_on_call_contact,
         .on_add_call_contact = app_ui_on_add_call_contact,
+        .on_respond_call_contact = app_ui_on_respond_call_contact,
+        .on_update_call_contact_remark = app_ui_on_update_call_contact_remark,
+        .on_delete_call_contact = app_ui_on_delete_call_contact,
         .on_refresh_call_contacts = app_ui_on_refresh_call_contacts,
         .on_scan_contact = app_ui_on_scan_contact,
         .on_start_contact_scan = app_ui_on_start_contact_scan,
@@ -669,7 +674,6 @@ void app_ui_configure_display_actions(display_actions_t *actions)
         .on_reset_device_binding = app_ui_on_reset_device_binding,
         .on_wechat_contact = app_ui_on_wechat_contact,
         .on_add_wechat_contact = app_ui_on_add_wechat_contact,
-        .on_remove_wechat_contact = app_ui_on_remove_wechat_contact,
         .on_update_wechat_contact_remark = app_ui_on_update_wechat_contact_remark,
         .on_scan_wechat_contact = app_ui_on_scan_wechat_contact,
         .on_start_wechat_contact_scan = app_ui_on_start_wechat_contact_scan,
@@ -713,6 +717,8 @@ void app_ui_fill_display_status(display_status_t *status, void *ctx)
     app_get_snapshot(snapshot);
 
     status->network_connected = snapshot->network.connected;
+    status->network_associated = snapshot->network.associated;
+    status->network_phase = snapshot->network.phase;
     status->network_rssi = snapshot->network.rssi;
     strlcpy(status->network_ip_addr, snapshot->network.ip_addr, sizeof(status->network_ip_addr));
     strlcpy(status->network_ssid, snapshot->network.ssid, sizeof(status->network_ssid));
@@ -723,6 +729,7 @@ void app_ui_fill_display_status(display_status_t *status, void *ctx)
             snapshot->network.saved_password,
             sizeof(status->saved_network_password));
     status->network_connect_failed = snapshot->network.connect_failed;
+    status->network_connect_failure = snapshot->network.connect_failure;
     status->wifi_scan_in_progress = snapshot->network.scan_in_progress;
     scan_count = snapshot->network.scan_count > DISPLAY_WIFI_SCAN_MAX ?
         DISPLAY_WIFI_SCAN_MAX : snapshot->network.scan_count;
@@ -801,6 +808,9 @@ void app_ui_fill_display_status(display_status_t *status, void *ctx)
             snapshot->binding.message,
             sizeof(status->binding_message));
     status->call_state = app_ui_to_display_call_state(snapshot->call.state);
+    status->call_contacts_ready = snapshot->call_contacts.ready;
+    status->call_contacts_refreshing = snapshot->call_contacts.refreshing;
+    status->call_contacts_last_error = snapshot->call_contacts.last_error;
     call_contact_count = snapshot->call_contacts.count > DISPLAY_CALL_CONTACT_MAX ?
         DISPLAY_CALL_CONTACT_MAX : snapshot->call_contacts.count;
     status->call_contact_count = call_contact_count;
@@ -812,9 +822,24 @@ void app_ui_fill_display_status(display_status_t *status, void *ctx)
                 snapshot->call_contacts.contacts[index].remark,
                 sizeof(status->call_contacts[index].remark));
         status->call_contacts[index].online = snapshot->call_contacts.contacts[index].online;
+        status->call_contacts[index].deletable = snapshot->call_contacts.contacts[index].deletable;
+    }
+    status->call_pending_contact_count =
+        snapshot->call_contacts.pending_count > DISPLAY_CALL_CONTACT_MAX ?
+        DISPLAY_CALL_CONTACT_MAX : snapshot->call_contacts.pending_count;
+    for (uint8_t index = 0; index < status->call_pending_contact_count; ++index) {
+        strlcpy(status->call_pending_contacts[index].device_id,
+                snapshot->call_contacts.pending[index].device_id,
+                sizeof(status->call_pending_contacts[index].device_id));
+        strlcpy(status->call_pending_contacts[index].created_at,
+                snapshot->call_contacts.pending[index].created_at,
+                sizeof(status->call_pending_contacts[index].created_at));
     }
     status->wechat_incoming_call_pending = snapshot->wechat.incoming_call_pending;
     status->wechat_call_state = app_ui_to_display_wechat_call_state(snapshot->wechat.call_state);
+    status->wechat_contacts_ready = snapshot->wechat.contacts_ready;
+    status->wechat_contacts_server_synced = snapshot->wechat.contacts_server_synced;
+    status->wechat_contacts_last_error = snapshot->wechat.contacts_last_error;
     wechat_contact_count = snapshot->wechat.count > DISPLAY_WECHAT_CONTACT_MAX ?
         DISPLAY_WECHAT_CONTACT_MAX : snapshot->wechat.count;
     status->wechat_contact_count = wechat_contact_count;
@@ -838,6 +863,7 @@ void app_ui_fill_display_status(display_status_t *status, void *ctx)
     status->ai_chat_active = snapshot->ai_chat.active;
     status->ai_chat_listening = snapshot->ai_chat.listening;
     status->ai_chat_cloud_speaking = snapshot->ai_chat.cloud_speaking;
+    status->ai_chat_output_playback_pending = snapshot->ai_chat.output_playback_pending;
     status->ai_chat_tx_audio_frames = snapshot->ai_chat.tx_audio_frames;
     status->ai_chat_rx_commands = snapshot->ai_chat.rx_commands;
     status->ai_chat_last_error = snapshot->ai_chat.last_error;

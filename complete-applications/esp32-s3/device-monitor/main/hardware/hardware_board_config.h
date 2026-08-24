@@ -52,8 +52,21 @@
 #define HARDWARE_BOARD_AUDIO_ADC_CHANNEL_MASK   0x03
 #define HARDWARE_BOARD_AUDIO_ADC_PRIMARY_CHANNEL 0
 #define HARDWARE_BOARD_AUDIO_ADC_REFERENCE_ENABLED 1
-#define HARDWARE_BOARD_AUDIO_ADC_REFERENCE_CHANNEL 1
-#define HARDWARE_BOARD_AUDIO_DEFAULT_VOLUME     60
+/*
+ * The board routes near-end speech to ES7210 MIC1 and the ES8311 speaker
+ * loopback to physical MIC3. ES7210 serializes those inputs as
+ * MIC1, MIC3, MIC2, MIC4, so the required TDM slots are 0 and 1. Gain masks
+ * still use physical microphone numbering, where MIC3 is channel 2. Keep the
+ * wire slot, packed DMA channel, and physical codec channel explicit because
+ * they intentionally use different indexes.
+ */
+#define HARDWARE_BOARD_AUDIO_ADC_REFERENCE_TDM_SLOT 1
+#define HARDWARE_BOARD_AUDIO_ADC_REFERENCE_DMA_CHANNEL 1
+#define HARDWARE_BOARD_AUDIO_ADC_REFERENCE_CODEC_CHANNEL 2
+#define HARDWARE_BOARD_AUDIO_ADC_REFERENCE_GAIN_DB 0.0f
+#define HARDWARE_BOARD_AUDIO_ADC_REFERENCE_DIGITAL_GAIN_Q8 256U
+#define HARDWARE_BOARD_AUDIO_ADC_CODEC_CHANNELS 4
+#define HARDWARE_BOARD_AUDIO_DEFAULT_VOLUME     100
 #define HARDWARE_BOARD_AUDIO_DEFAULT_ADC_GAIN_DB 24.0f
 
 #define HARDWARE_BOARD_CAMERA_ENABLED           1

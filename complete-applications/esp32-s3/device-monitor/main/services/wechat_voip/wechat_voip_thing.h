@@ -22,10 +22,8 @@ esp_err_t wechat_voip_thing_request_call(const char *open_id);
 esp_err_t wechat_voip_thing_refresh_contacts_async(void);
 esp_err_t wechat_voip_thing_update_contact_remark_async(const char *open_id,
                                                         const char *remark);
-/* Compatibility entry: verifies that open_id is already authorized locally. */
+/* Verifies that an OpenID is present in the server authorization cache. */
 esp_err_t wechat_voip_thing_add_contact(const char *open_id);
-/* Authorization revocation requires the mini-program user JWT. */
-esp_err_t wechat_voip_thing_remove_contact(const char *open_id);
 bool wechat_voip_thing_request_call_busy(void);
 void wechat_voip_thing_cancel_pending_call(void);
 void wechat_voip_thing_maintenance(void);

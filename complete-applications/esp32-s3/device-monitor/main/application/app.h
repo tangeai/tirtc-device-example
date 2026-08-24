@@ -21,13 +21,14 @@
 #define APP_AI_CHAT_MESSAGE_MAX  100
 #define APP_RTC_CONFIG_TEXT_MAX  128
 #define APP_RTC_CONFIG_TOKEN_SUBJECT_MAX 64
-#define APP_CALL_CONTACT_MAX     4
+#define APP_CALL_CONTACT_MAX     8
 #define APP_CALL_CONTACT_DEVICE_ID_LENGTH 12
 #define APP_CALL_CONTACT_DEVICE_ID_MAX 64
 #define APP_CALL_CONTACT_REMARK_MAX 64
-#define APP_WECHAT_CONTACT_MAX   3
+#define APP_CALL_CONTACT_CREATED_AT_MAX 48
+#define APP_WECHAT_CONTACT_MAX   4
 #define APP_WECHAT_OPEN_ID_MAX   96
-#define APP_WECHAT_REMARK_MAX    64
+#define APP_WECHAT_REMARK_MAX    ((64 * 4) + 1)
 
 typedef enum {
 	APP_RTC_CONFIG_FIELD_DEVICE_ID = 0,
@@ -45,7 +46,7 @@ typedef enum {
 
 typedef enum {
 	APP_ID_HOME = 0,
-	APP_ID_DEVICE,
+	APP_ID_DEVICE, /* Audio-only IPC viewing; RTC video is disabled. */
 	APP_ID_CALL,
 	APP_ID_WECHAT,
 	APP_ID_AI_CHAT,
@@ -79,12 +80,15 @@ typedef struct {
 
 typedef struct {
 	bool connected;
+	bool associated;
+	network_connection_phase_t phase;
 	int8_t rssi;
 	char ip_addr[APP_IP_ADDR_MAX_LEN];
 	char ssid[APP_SSID_MAX_LEN];
 	char saved_ssid[APP_SSID_MAX_LEN];
 	char saved_password[NETWORK_PASSWORD_MAX_LEN + 1];
 	bool connect_failed;
+	network_connect_failure_t connect_failure;
 	bool scan_in_progress;
 	uint16_t scan_count;
 	app_wifi_scan_result_t scan_results[APP_WIFI_SCAN_MAX];
@@ -135,7 +139,6 @@ typedef struct {
 
 typedef struct {
 	bool sender_running;
-	bool sender_spiffs_ready;
 	char sender_status[APP_TEST_STATUS_MAX];
 } app_test_snapshot_t;
 
@@ -170,6 +173,7 @@ typedef struct {
 	bool active;
 	bool listening;
 	bool cloud_speaking;
+	bool output_playback_pending;
 	uint32_t tx_audio_frames;
 	uint32_t rx_commands;
 	char asr_caption[APP_AI_CHAT_CAPTION_MAX];
@@ -185,7 +189,13 @@ typedef struct {
 	char device_id[APP_CALL_CONTACT_DEVICE_ID_MAX];
 	char remark[APP_CALL_CONTACT_REMARK_MAX];
 	bool online;
+	bool deletable;
 } app_call_contact_t;
+
+typedef struct {
+	char device_id[APP_CALL_CONTACT_DEVICE_ID_MAX];
+	char created_at[APP_CALL_CONTACT_CREATED_AT_MAX];
+} app_call_pending_contact_t;
 
 typedef enum {
 	APP_CALL_STATE_IDLE = 0,
@@ -202,8 +212,13 @@ typedef struct {
 } app_call_snapshot_t;
 
 typedef struct {
+	bool ready;
+	bool refreshing;
 	uint8_t count;
+	uint8_t pending_count;
+	esp_err_t last_error;
 	app_call_contact_t contacts[APP_CALL_CONTACT_MAX];
+	app_call_pending_contact_t pending[APP_CALL_CONTACT_MAX];
 } app_call_contacts_snapshot_t;
 
 typedef struct {
@@ -221,6 +236,9 @@ typedef enum {
 } app_wechat_call_state_t;
 
 typedef struct {
+	bool contacts_ready;
+	bool contacts_server_synced;
+	esp_err_t contacts_last_error;
 	uint8_t count;
 	bool incoming_call_pending;
 	app_wechat_call_state_t call_state;
@@ -287,9 +305,13 @@ esp_err_t app_set_rtc_server_env(app_rtc_server_env_t env);
 
 esp_err_t app_call_contact(const char *device_id);
 esp_err_t app_call_contact_with_type(const char *device_id, const char *call_type);
+esp_err_t app_request_call_contact(const char *device_id);
+esp_err_t app_request_accept_call(void);
+esp_err_t app_request_hangup_call(void);
 esp_err_t app_add_call_contact(const char *device_id);
 esp_err_t app_respond_call_contact(const char *device_id, bool accept);
 esp_err_t app_update_call_contact_remark(const char *device_id, const char *remark);
+esp_err_t app_delete_call_contact(const char *device_id);
 esp_err_t app_refresh_call_contacts(void);
 void app_get_call_contacts(app_call_contacts_snapshot_t *snapshot);
 esp_err_t app_scan_contact(void);
@@ -307,7 +329,6 @@ esp_err_t app_reject_call(void);
 
 esp_err_t app_wechat_call_contact(const char *open_id);
 esp_err_t app_wechat_add_contact(const char *open_id);
-esp_err_t app_wechat_remove_contact(const char *open_id);
 esp_err_t app_wechat_update_contact_remark(const char *open_id, const char *remark);
 esp_err_t app_scan_wechat_contact(void);
 esp_err_t app_start_wechat_contact_scan(app_scan_preview_cb_t preview_cb,
@@ -318,7 +339,6 @@ esp_err_t app_wechat_hangup_call(void);
 esp_err_t app_wechat_accept_call(void);
 esp_err_t app_wechat_reject_call(void);
 
-esp_err_t app_start_sender_video_test(void);
 esp_err_t app_start_sender_audio_test(void);
 esp_err_t app_start_ota(void);
 void app_restart_for_ota(void);
@@ -332,7 +352,6 @@ esp_err_t app_set_ai_chat_avatar(uint8_t avatar);
 
 esp_err_t app_set_speaker_volume(uint8_t percent);
 esp_err_t app_set_capture_gain(uint8_t percent);
-esp_err_t app_set_local_video_enabled(bool enabled);
 esp_err_t app_set_local_audio_enabled(bool enabled);
 
 void app_on_boot_button_changed(bool pressed, void *ctx);

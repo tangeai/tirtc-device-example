@@ -24,6 +24,8 @@ static const char *TAG = "tirtc_connect";
 static portMUX_TYPE s_connect_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_tirtc_online;
 static bool s_connecting;
+static bool s_connect_submitted;
+static bool s_connect_cancel_requested;
 static uint32_t s_connect_generation;
 static tirtc_session_config_t s_connect_config;
 static TIRTCCONNECTCALLBACK s_connect_callback;
@@ -72,6 +74,8 @@ void tirtc_connect_cancel(void)
     taskENTER_CRITICAL(&s_connect_lock);
     s_tirtc_online = false;
     s_connecting = false;
+    s_connect_submitted = false;
+    s_connect_cancel_requested = false;
     tirtc_connect_next_generation_locked();
     s_connect_callback = NULL;
     s_connect_user_data = NULL;
@@ -82,16 +86,60 @@ void tirtc_connect_cancel(void)
     taskEXIT_CRITICAL(&s_connect_lock);
 }
 
+bool tirtc_connect_cancel_pending(void)
+{
+    bool canceled = false;
+    bool submitted = false;
+    uint32_t generation = 0;
+
+    taskENTER_CRITICAL(&s_connect_lock);
+    if (s_connecting) {
+        canceled = true;
+        submitted = s_connect_submitted;
+        generation = s_connect_generation;
+        s_connect_callback = NULL;
+        s_connect_user_data = NULL;
+        memset(&s_connect_config, 0, sizeof(s_connect_config));
+        s_connect_has_provided_token = false;
+        s_connect_retry_count = 0;
+        s_connect_provided_token[0] = '\0';
+
+        if (submitted) {
+            /* TiRTC exposes no cancel API before a connection handle exists.
+             * Keep the operation visibly busy until its callback drains it,
+             * so a second TiRtcConnect cannot overlap it. */
+            s_connect_cancel_requested = true;
+        } else {
+            s_connecting = false;
+            s_connect_cancel_requested = false;
+            tirtc_connect_next_generation_locked();
+        }
+    }
+    taskEXIT_CRITICAL(&s_connect_lock);
+
+    if (canceled) {
+        ESP_LOGI(TAG,
+                 "TiRTC active connect cancel requested: gen=%lu submitted=%d",
+                 (unsigned long)generation,
+                 submitted ? 1 : 0);
+    }
+    return submitted;
+}
+
 static void tirtc_connect_finish_attempt(uint32_t generation, int error)
 {
     TIRTCCONNECTCALLBACK callback = NULL;
     void *user_data = NULL;
     bool notify = false;
     bool online = false;
+    bool canceled = false;
 
     taskENTER_CRITICAL(&s_connect_lock);
     if (tirtc_connect_is_current_locked(generation)) {
         s_connecting = false;
+        s_connect_submitted = false;
+        canceled = s_connect_cancel_requested;
+        s_connect_cancel_requested = false;
         callback = s_connect_callback;
         user_data = s_connect_user_data;
         s_connect_callback = NULL;
@@ -100,17 +148,18 @@ static void tirtc_connect_finish_attempt(uint32_t generation, int error)
         s_connect_retry_count = 0;
         s_connect_provided_token[0] = '\0';
         online = s_tirtc_online;
-        notify = online;
+        notify = online && !canceled;
     }
     taskEXIT_CRITICAL(&s_connect_lock);
 
     ESP_LOGW(TAG,
-             "TiRTC active connect attempt finished: gen=%lu error=%d %s notify=%d online=%d",
+             "TiRTC active connect attempt finished: gen=%lu error=%d %s notify=%d online=%d canceled=%d",
              (unsigned long)generation,
              error,
              error == 0 ? "OK" : TiRtcGetErrorStr(error),
              notify ? 1 : 0,
-             online ? 1 : 0);
+             online ? 1 : 0,
+             canceled ? 1 : 0);
     if (notify && callback != NULL) {
         callback(error, NULL, user_data);
     }
@@ -125,6 +174,8 @@ static void tirtc_connect_result_cb(int error, tirtc_conn_t hconn, void *user_da
     bool release_connection = false;
     bool online = false;
     bool connecting = false;
+    bool canceled = false;
+    bool current = false;
     bool retry = false;
     uint32_t retry_count = 0;
     uint32_t current_generation = 0;
@@ -140,16 +191,31 @@ static void tirtc_connect_result_cb(int error, tirtc_conn_t hconn, void *user_da
     online = s_tirtc_online;
     connecting = s_connecting;
     current_generation = s_connect_generation;
-    if (tirtc_connect_is_current_locked(generation) &&
+    current = tirtc_connect_is_current_locked(generation);
+    canceled = current && s_connect_cancel_requested;
+    if (current && canceled) {
+        s_connecting = false;
+        s_connect_submitted = false;
+        s_connect_cancel_requested = false;
+        s_connect_callback = NULL;
+        s_connect_user_data = NULL;
+        s_connect_has_provided_token = false;
+        s_connect_retry_count = 0;
+        s_connect_provided_token[0] = '\0';
+        release_connection = (error == 0 && hconn != NULL);
+    } else if (current &&
         error != 0 &&
         s_connect_has_provided_token &&
         error != TIRTC_E_CACHE_EXPIRED &&
         s_connect_retry_count < TIRTC_CONNECT_PROVIDED_TOKEN_RETRIES) {
         s_connect_retry_count++;
+        s_connect_submitted = false;
         retry_count = s_connect_retry_count;
         retry = true;
-    } else if (tirtc_connect_is_current_locked(generation)) {
+    } else if (current) {
         s_connecting = false;
+        s_connect_submitted = false;
+        s_connect_cancel_requested = false;
         callback = s_connect_callback;
         callback_user_data = s_connect_user_data;
         s_connect_callback = NULL;
@@ -171,7 +237,17 @@ static void tirtc_connect_result_cb(int error, tirtc_conn_t hconn, void *user_da
                  (unsigned long)current_generation,
                  online ? 1 : 0,
                  connecting ? 1 : 0);
-        (void)tirtc_session_disconnect_connection(hconn);
+        if (!tirtc_session_drain_unowned_connection(hconn)) {
+            (void)tirtc_session_disconnect_connection(hconn);
+        }
+        return;
+    }
+
+    if (canceled) {
+        ESP_LOGI(TAG,
+                 "TiRTC active connect canceled after SDK result: gen=%lu error=%d",
+                 (unsigned long)generation,
+                 error);
         return;
     }
 
@@ -212,17 +288,29 @@ static void tirtc_connect_timeout_task(void *arg)
 
     if (tirtc_connect_is_connecting()) {
         bool current = false;
+        bool submitted = false;
 
         taskENTER_CRITICAL(&s_connect_lock);
         current = tirtc_connect_is_current_locked(generation);
+        submitted = current && s_connect_submitted;
         taskEXIT_CRITICAL(&s_connect_lock);
 
         if (current) {
-            ESP_LOGW(TAG,
-                     "TiRTC active connect timeout: gen=%lu timeout_ms=%lu",
-                     (unsigned long)generation,
-                     (unsigned long)TIRTC_CONNECT_RESULT_TIMEOUT_MS);
-            tirtc_connect_finish_attempt(generation, TIRTC_E_TIMEOUTED);
+            if (submitted) {
+                /* There is no SDK cancel primitive for a handle-less
+                 * TiRtcConnect. Clearing s_connecting here would allow the
+                 * next call to overlap the still-running SDK operation. */
+                ESP_LOGW(TAG,
+                         "TiRTC active connect watchdog expired: gen=%lu timeout_ms=%lu action=wait-sdk-result",
+                         (unsigned long)generation,
+                         (unsigned long)TIRTC_CONNECT_RESULT_TIMEOUT_MS);
+            } else {
+                ESP_LOGW(TAG,
+                         "TiRTC active connect timeout before submit: gen=%lu timeout_ms=%lu",
+                         (unsigned long)generation,
+                         (unsigned long)TIRTC_CONNECT_RESULT_TIMEOUT_MS);
+                tirtc_connect_finish_attempt(generation, TIRTC_E_TIMEOUTED);
+            }
         }
     }
 
@@ -299,6 +387,9 @@ static void tirtc_connect_task(void *arg)
     if (tirtc_session_take_sdk_api_lock(TIRTC_SESSION_SDK_API_LOCK_WAIT_TICKS)) {
         taskENTER_CRITICAL(&s_connect_lock);
         current = tirtc_connect_is_current_locked(generation);
+        if (current) {
+            s_connect_submitted = true;
+        }
         taskEXIT_CRITICAL(&s_connect_lock);
 
         if (current) {
@@ -383,6 +474,8 @@ esp_err_t tirtc_connect_start(const tirtc_session_config_t *config,
     }
 
     s_connecting = true;
+    s_connect_submitted = false;
+    s_connect_cancel_requested = false;
     generation = tirtc_connect_next_generation_locked();
     s_connect_config = *config;
     s_connect_callback = callback;
@@ -430,6 +523,8 @@ esp_err_t tirtc_connect_start_with_token(const char *remote_device_id,
     }
 
     s_connecting = true;
+    s_connect_submitted = false;
+    s_connect_cancel_requested = false;
     generation = tirtc_connect_next_generation_locked();
     memset(&s_connect_config, 0, sizeof(s_connect_config));
     strlcpy(s_connect_config.remote_device_id, remote_device_id, sizeof(s_connect_config.remote_device_id));

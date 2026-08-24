@@ -202,9 +202,62 @@ static void network_convert_from_wifi(network_state_t *dst)
 
     dst->configured = wifi_status.configured;
     dst->started = wifi_status.started;
+    dst->associated = wifi_status.associated;
     dst->connected = wifi_status.connected;
+    switch (wifi_status.phase) {
+    case WIFI_CONNECTION_PHASE_NO_CREDENTIALS:
+        dst->phase = NETWORK_CONNECTION_PHASE_NO_CREDENTIALS;
+        break;
+    case WIFI_CONNECTION_PHASE_IDLE:
+        dst->phase = NETWORK_CONNECTION_PHASE_IDLE;
+        break;
+    case WIFI_CONNECTION_PHASE_ASSOCIATING:
+        dst->phase = NETWORK_CONNECTION_PHASE_ASSOCIATING;
+        break;
+    case WIFI_CONNECTION_PHASE_WAITING_IP:
+        dst->phase = NETWORK_CONNECTION_PHASE_WAITING_IP;
+        break;
+    case WIFI_CONNECTION_PHASE_IP_READY:
+        dst->phase = NETWORK_CONNECTION_PHASE_IP_READY;
+        break;
+    case WIFI_CONNECTION_PHASE_RETRY_WAIT:
+        dst->phase = NETWORK_CONNECTION_PHASE_RETRY_WAIT;
+        break;
+    case WIFI_CONNECTION_PHASE_FAILED:
+        dst->phase = NETWORK_CONNECTION_PHASE_FAILED;
+        break;
+    case WIFI_CONNECTION_PHASE_STOPPED:
+    default:
+        dst->phase = NETWORK_CONNECTION_PHASE_STOPPED;
+        break;
+    }
+    dst->attempt_id = wifi_status.attempt_id;
+    dst->phase_elapsed_ms = wifi_status.phase_elapsed_ms;
+    dst->association_time_ms = wifi_status.association_time_ms;
+    dst->dhcp_time_ms = wifi_status.dhcp_time_ms;
     dst->retry_count = wifi_status.retry_count;
     dst->disconnect_reason = wifi_status.disconnect_reason;
+    switch (wifi_status.connect_failure) {
+    case WIFI_CONNECT_FAILURE_TIMEOUT:
+        dst->connect_failure = NETWORK_CONNECT_FAILURE_TIMEOUT;
+        break;
+    case WIFI_CONNECT_FAILURE_AP_NOT_FOUND:
+        dst->connect_failure = NETWORK_CONNECT_FAILURE_AP_NOT_FOUND;
+        break;
+    case WIFI_CONNECT_FAILURE_AUTHENTICATION:
+        dst->connect_failure = NETWORK_CONNECT_FAILURE_AUTHENTICATION;
+        break;
+    case WIFI_CONNECT_FAILURE_ASSOCIATION:
+        dst->connect_failure = NETWORK_CONNECT_FAILURE_ASSOCIATION;
+        break;
+    case WIFI_CONNECT_FAILURE_OTHER:
+        dst->connect_failure = NETWORK_CONNECT_FAILURE_OTHER;
+        break;
+    case WIFI_CONNECT_FAILURE_NONE:
+    default:
+        dst->connect_failure = NETWORK_CONNECT_FAILURE_NONE;
+        break;
+    }
     dst->rssi = wifi_status.rssi;
     strlcpy(dst->ssid, wifi_status.ssid, sizeof(dst->ssid));
     strlcpy(dst->ip_addr, wifi_status.ip_addr, sizeof(dst->ip_addr));
@@ -215,10 +268,17 @@ static bool network_state_equals(const network_state_t *lhs,
 {
     return lhs->configured == rhs->configured &&
            lhs->started == rhs->started &&
+           lhs->associated == rhs->associated &&
            lhs->connected == rhs->connected &&
+           lhs->phase == rhs->phase &&
+           lhs->attempt_id == rhs->attempt_id &&
+           lhs->phase_elapsed_ms == rhs->phase_elapsed_ms &&
+           lhs->association_time_ms == rhs->association_time_ms &&
+           lhs->dhcp_time_ms == rhs->dhcp_time_ms &&
            lhs->rssi == rhs->rssi &&
            lhs->retry_count == rhs->retry_count &&
            lhs->disconnect_reason == rhs->disconnect_reason &&
+           lhs->connect_failure == rhs->connect_failure &&
            strcmp(lhs->ssid, rhs->ssid) == 0 &&
            strcmp(lhs->ip_addr, rhs->ip_addr) == 0;
 }
@@ -227,10 +287,14 @@ static bool network_should_log_state_change(const network_state_t *lhs,
                                                      const network_state_t *rhs)
 {
     return lhs->connected != rhs->connected ||
+           lhs->associated != rhs->associated ||
+           lhs->phase != rhs->phase ||
+           lhs->attempt_id != rhs->attempt_id ||
            lhs->configured != rhs->configured ||
            lhs->started != rhs->started ||
            lhs->retry_count != rhs->retry_count ||
            lhs->disconnect_reason != rhs->disconnect_reason ||
+           lhs->connect_failure != rhs->connect_failure ||
            strcmp(lhs->ip_addr, rhs->ip_addr) != 0 ||
            strcmp(lhs->ssid, rhs->ssid) != 0;
 }
@@ -281,8 +345,11 @@ static void network_monitor_task(void *ctx)
             bool log_change = network_should_log_state_change(&previous, &current);
             if (log_change) {
                 ESP_LOGI(TAG,
-                         "network changed: connected=%d ip=%s ssid=%s",
+                         "network changed: phase=%d associated=%d connected=%d attempt=%u ip=%s ssid=%s",
+                         (int)current.phase,
+                         current.associated,
                          current.connected,
+                         (unsigned)current.attempt_id,
                          current.ip_addr,
                          current.ssid);
                 network_publish_state(&current);
@@ -308,6 +375,7 @@ esp_err_t network_prepare(const network_config_t *config)
         .auto_connect = effective_config->auto_connect,
         .default_ssid = effective_config->default_ssid,
         .default_password = effective_config->default_password,
+        .fallback_dns_ipv4 = effective_config->fallback_dns_ipv4,
     };
     esp_err_t ret = wifi_prepare(&wifi_config);
 
@@ -381,6 +449,16 @@ void network_release(void)
 esp_err_t network_connect(const char *ssid, const char *password)
 {
     esp_err_t ret = wifi_connect(ssid, password);
+
+    network_state_t current = {0};
+    network_convert_from_wifi(&current);
+    network_publish_state(&current);
+    return ret;
+}
+
+esp_err_t network_retry_connection(void)
+{
+    esp_err_t ret = wifi_retry_connection();
 
     network_state_t current = {0};
     network_convert_from_wifi(&current);

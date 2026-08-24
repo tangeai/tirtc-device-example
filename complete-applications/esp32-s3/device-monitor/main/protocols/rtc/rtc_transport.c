@@ -70,6 +70,11 @@ void rtc_transport_set_next_connection_defer_media(bool enabled)
     tirtc_session_set_next_connection_defer_media(enabled);
 }
 
+esp_err_t rtc_transport_allow_deferred_call_media(tirtc_conn_t conn)
+{
+    return tirtc_session_allow_deferred_call_media(conn);
+}
+
 esp_err_t rtc_transport_restart(void)
 {
     return tirtc_session_restart();
@@ -83,6 +88,11 @@ esp_err_t rtc_transport_stop(void)
 esp_err_t rtc_transport_disconnect(void)
 {
     return tirtc_session_disconnect();
+}
+
+bool rtc_transport_get_active_connection(tirtc_conn_t *conn)
+{
+    return tirtc_session_get_active_connection(conn);
 }
 
 void rtc_transport_flush_remote_media(void)
@@ -123,6 +133,11 @@ esp_err_t rtc_transport_set_local_audio_send_enabled(bool enabled)
 esp_err_t rtc_transport_set_remote_audio_stream_id(uint8_t stream_id)
 {
     return tirtc_session_set_remote_audio_stream_id(stream_id);
+}
+
+esp_err_t rtc_transport_set_builtin_audio_format(rtc_transport_builtin_audio_format_t format)
+{
+    return tirtc_session_set_builtin_audio_format(format);
 }
 
 esp_err_t rtc_transport_use_builtin_media(void)

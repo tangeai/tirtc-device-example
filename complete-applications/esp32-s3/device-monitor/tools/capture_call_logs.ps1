@@ -16,10 +16,7 @@ if ([string]::IsNullOrWhiteSpace($Port)) {
 }
 
 if (-not (Get-Command idf.py -ErrorAction SilentlyContinue)) {
-    if ([string]::IsNullOrWhiteSpace($env:IDF_PATH)) {
-        throw "idf.py is unavailable. Set IDF_PATH or activate ESP-IDF before running this script."
-    }
-    $idfExport = Join-Path $env:IDF_PATH "export.ps1"
+    $idfExport = "C:\esp\v5.5.4\esp-idf\export.ps1"
     if (-not (Test-Path -LiteralPath $idfExport)) {
         throw "idf.py is unavailable and ESP-IDF export script was not found: $idfExport"
     }

@@ -8,6 +8,16 @@ endmenu
 
 menu "Debug utilities"
 
+config APP_SERIAL_NET_CLI_ENABLE
+    bool "Enable UART network diagnostics command set"
+    default y
+    help
+        Adds a fixed-buffer AT command parser on the configured console UART.
+        It exposes Wi-Fi association, DHCP, DNS, time, service discovery and
+        binding/online readiness without printing passwords, tokens or keys.
+        Disable this option for production builds that do not need field
+        network diagnostics.
+
 config APP_DEBUG_SCREEN_SERVER_ENABLE
     bool "Enable LAN screen debug web server"
     default n

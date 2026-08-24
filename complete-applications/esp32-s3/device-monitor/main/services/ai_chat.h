@@ -109,6 +109,7 @@ typedef struct {
     bool active;
     bool listening;
     bool cloud_speaking;
+    bool output_playback_pending;
     uint32_t tx_audio_frames;
     uint32_t tx_audio_failures;
     uint32_t rx_commands;

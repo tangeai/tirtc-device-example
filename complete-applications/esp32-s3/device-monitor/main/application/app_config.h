@@ -16,6 +16,10 @@
 #define APP_CONFIG_WIFI_AUTO_CONNECT 1
 #endif
 
+#ifndef APP_CONFIG_WIFI_FALLBACK_DNS_IPV4
+#define APP_CONFIG_WIFI_FALLBACK_DNS_IPV4 "223.5.5.5"
+#endif
+
 #ifndef APP_CONFIG_OTA_DEFAULT_URL
 #define APP_CONFIG_OTA_DEFAULT_URL "https://tirtc-device-ota.tange365.com"
 #endif

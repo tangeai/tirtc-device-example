@@ -11,8 +11,18 @@
 #include "esp_lvgl_port.h"
 
 #include "hardware_board.h"
+#include "platform/app_task_affinity.h"
 
 static const char *TAG = "display_driver";
+
+/*
+ * The default esp_lvgl_port priority (4) is below the RTC/media workers and can
+ * leave touch handling without CPU time during full-duplex audio. Keep LVGL
+ * below the hard real-time playback/capture path (12-14), but above ordinary
+ * application workers so a touch event and one screen flush can make progress.
+ */
+#define DISPLAY_LVGL_TASK_PRIORITY 11
+#define DISPLAY_LVGL_TASK_STACK    (16 * 1024)
 
 static esp_lcd_panel_handle_t s_panel_handle;
 static esp_lcd_panel_io_handle_t s_panel_io_handle;
@@ -159,7 +169,10 @@ esp_err_t display_driver_init(display_driver_handles_t *handles)
     ESP_RETURN_ON_ERROR(hardware_board_init(), TAG, "board init failed");
 
     lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
-    lvgl_cfg.task_stack = 16 * 1024;
+    lvgl_cfg.task_priority = DISPLAY_LVGL_TASK_PRIORITY;
+    lvgl_cfg.task_stack = DISPLAY_LVGL_TASK_STACK;
+    /* esp_lvgl_port uses -1, while FreeRTOS uses tskNO_AFFINITY. */
+    lvgl_cfg.task_affinity = (APP_TASK_CORE_UI == tskNO_AFFINITY) ? -1 : APP_TASK_CORE_UI;
     ESP_RETURN_ON_ERROR(lvgl_port_init(&lvgl_cfg), TAG, "lvgl port init failed");
     ESP_RETURN_ON_ERROR(display_driver_panel_init(), TAG, "panel init failed");
     ESP_RETURN_ON_ERROR(display_driver_touch_init(), TAG, "touch init failed");
