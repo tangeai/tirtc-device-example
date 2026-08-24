@@ -1,87 +1,97 @@
 # 源码构建与配置
 
-这份文档给准备修改 ESP32-S3 设备端示例的开发者使用。目标很直接：在不写入真实凭据、
-不改变正式 SDK 快照的前提下，从公开源码完成一次可解释的构建，并知道接下来该烧录哪些
-文件、从哪里看问题。
+本文面向要修改 ESP32-S3 Device Monitor 源码的开发者。只想体验设备时，直接下载
+`esp32s3-tirtc-device-monitor-full-v1.9.0.bin`，按[烧录与 OTA](FLASH_AND_OTA_CN.md)
+从 `0x0` 烧录即可。
 
-如果只是体验设备，请使用 Release 中的 `esp32s3-tirtc-device-monitor-full-v1.8.1.bin`，
-不必安装 ESP-IDF。完整镜像的下载与烧录见 [烧录与 OTA](FLASH_AND_OTA_CN.md)。
-
-## 1. 硬件和软件
+## 1. 环境与硬件
 
 | 项目 | 要求 |
 | --- | --- |
-| 开发板 | 立创·实战派 ESP32-S3，`LCKFB-SZPI-ESP32-S3-VA` |
-| Flash / PSRAM | 16 MB / 8 MB，Octal PSRAM 80 MHz |
-| 屏幕 | 320 x 240 触摸屏及本工程对应板级驱动 |
-| 音视频 | 板载摄像头、麦克风、扬声器和音频 Codec |
+| 开发板 | 立创·实战派 `LCKFB-SZPI-ESP32-S3-VA` |
+| Flash / PSRAM | 16 MB / 8 MB |
+| 显示 | 320 x 240 触摸屏 |
+| 音频 | 板载麦克风、扬声器和 Codec |
+| 摄像头 | 用于二维码扫描；不是 RTC 视频源 |
 | ESP-IDF | `5.5.4` |
-| 编译器 | `xtensa-esp32s3-elf 14.2.0_20260121` |
-| TiRTC SDK | `2.2.0` |
-| 主机 | Windows PowerShell；建议把仓库放在较短、无特殊字符的路径 |
+| Xtensa 工具链 | `14.2.0_20260121` |
+| TiRTC SDK | `2.3.0 mini` |
 
-普通 ESP32-S3 DevKit 可以编译部分通用代码，但没有这块板子的屏幕、触摸、音频和摄像头，
-不能据此判断完整应用是否正常。
+普通 ESP32-S3 DevKit 可以编译部分通用代码，但缺少目标板显示、触摸和音频外设，不能替代
+本项目的目标板验证。
 
-## 2. 先确认拿到的是同一份源码
+## 2. 核对源码身份
 
-从 Git 仓使用本项目时，先在统一仓根目录确认状态，再进入项目目录：
+从公开仓开始时先固定项目 Tag：
 
 ```powershell
-git rev-parse HEAD
-git status --short
+git clone https://github.com/tangeai/tirtc-device-example.git
+Set-Location .\tirtc-device-example
+git checkout esp32-s3-device-monitor-v1.9.0
 Set-Location .\complete-applications\esp32-s3\device-monitor
 ```
 
-如果下载的是 GitHub 自动生成的源码归档，其中没有 `.git`，跳过前两条 Git 命令，并使用
-同一 Release 的 `release-manifest.json` 核对版本和文件哈希。
+当前版本应为 `1.9.0`，开发来源为：
 
-当前项目版本应为 `1.8.1`，来源和依赖身份见 [版本信息](../VERSION.md) 与
-[来源说明](../SOURCE_PROVENANCE.md)。TiRTC 静态库可以这样核对：
+```text
+Tag:    v1.9.0
+commit: a64422b0efdebe6c303370effafd52bbf51593d1
+tree:   b29d4080a43db0a2b8f2e35f095c5c45f3c1f4c7
+```
+
+TiRTC 静态库核对：
 
 ```powershell
 Get-FileHash .\components\tirtc_sdk\lib\esp32s3\libTiRTC.a -Algorithm SHA256
 ```
 
-预期 SHA-256：
+预期结果：
 
 ```text
-0686e5d7f5bfea18b7b3ee6ae1701061b3afcfb0ef2030642ebebab88af0413d
+43b06d1da421c7d24cc7fdb1385d600ecdffbfd2d3801f7faf0c540fb5cdbaa2
 ```
 
-哈希不一致时先停下来确认文件来源，不要靠修改 `VERSION.md` 把版本“对齐”。
+库大小应为 `8,079,682` bytes。哈希或大小不一致时，先恢复同一个 `2.3.0 mini` 包里的
+头文件、静态库、组件配置和版本说明；不要用修改文档的方式掩盖 SDK 混用。
 
-## 3. 默认配置能做什么
+## 3. 默认配置
 
-公开源码不带 Wi-Fi 密码、设备 ID、设备密钥或服务端密钥。正常体验不需要先改头文件：
+`sdkconfig.defaults` 是公开构建契约。关键值如下：
 
-1. 固件启动后在屏幕上选择 2.4 GHz Wi-Fi。
-2. 设备通过服务发现获取业务入口。
-3. 屏幕显示 6 位验证码后，在 ThingConnect H5 完成绑定。
-4. `device_id/device_key` 写入 NVS，后续自动上线。
-
-关键服务默认值在 `main/application/app_config.h`，微信主动呼叫版本类型在
-`main/services/wechat_voip/wechat_voip_config.h`：
-
-| 配置 | 默认值 | 什么时候需要改 |
+| 配置 | 默认值 | 目的 |
 | --- | --- | --- |
-| `APP_CONFIG_THING_SERVICE_DISCOVERY_URL` | `http://ep-open.tangeopen.com/services` | 接入自己的服务发现环境 |
-| `APP_CONFIG_DEVICE_BINDING_API_BASE` | `https://mqtt-demo.tange-ai.com` | 更换发现失败时的绑定兜底服务 |
-| `APP_CONFIG_DEVICE_BINDING_MQTT_URI` | `mqtts://mqtt-demo.tange-ai.com:8883` | 更换发现失败时的 MQTT 兜底入口 |
-| `APP_CONFIG_OTA_DEFAULT_URL` | `https://tirtc-device-ota.tange365.com` | 使用自己的 OTA 服务 |
-| `APP_CONFIG_WIFI_SSID/PASSWORD` | 空 | 通常保持为空，在设备屏幕上配置 |
-| `APP_CONFIG_WECHAT_VOIP_ACTIVE_CALL_VERSION_TYPE` | `WECHAT_VOIP_VERSION_TRIAL`（`2`） | 选择设备主动呼叫微信时使用的正式版 `0`、开发版 `1` 或体验版 `2` |
-| `CONFIG_APP_DEBUG_SCREEN_SERVER_ENABLE` | 关闭 | 仅局域网 UI 调试时临时开启 |
+| Flash / PSRAM | 16 MB / Octal 80 MHz | 匹配目标板 |
+| CPU | 240 MHz | 匹配实时音频和 UI 负载 |
+| FreeRTOS tick | 1000 Hz | 对齐 TiRTC SDK |
+| main task stack | 16,384 bytes | 容纳启动阶段的完整初始化链 |
+| internal RAM reserve | 98,304 bytes | 留给 DMA、实时控制和同步对象 |
+| external task stack | 开启 | 允许适合的后台任务使用 PSRAM |
+| NVS cache | PSRAM | 降低 internal RAM 压力 |
+| mbedTLS dynamic buffer | 开启，外部内存 | 降低 TLS 峰值 internal RAM 占用 |
+| MQTT outbox | PSRAM | 避免长消息挤占实时内存 |
+| TCPIP task stack / mailbox | 6,144 bytes / 64 | 承载 MQTT、HTTP 和 TiRTC 网络活动 |
+| Task WDT panic | 开启 | 让阻塞问题保留明确失败证据 |
+| 串口诊断 CLI | 开启 | 支持现场网络、RTC、音频和呼叫排障 |
+| 局域网屏幕调试服务 | 关闭 | 不进入默认公开固件 |
 
-这个版本类型只写入设备主动调用 `/v1/voip/device/call` 的请求。微信小程序呼叫设备的
-来电链路不读取它；修改后应重新构建，并从主动呼叫日志确认 `version_type` 的实际值。
+公开源码不含 Wi-Fi 密码、设备 ID、设备密钥或 Token。设备正常启动后在屏幕上配网，通过
+6 位验证码绑定，正式身份由设备写入 NVS。
 
-使用自建服务时，应成组核对服务发现、绑定、MQTT、OTA 和服务端设备身份，避免把测试环境的
-设备身份带到正式环境。真实 Wi-Fi、设备密钥、Token 和用户身份不要写入提交、截图或 Issue。
+服务入口在 `main/application/app_config.h`：
+
+| 配置 | 默认值 |
+| --- | --- |
+| 服务发现 | `http://ep-open.tangeopen.com/services` |
+| 绑定兜底 API | `https://mqtt-demo.tange-ai.com` |
+| MQTT 兜底入口 | `mqtts://mqtt-demo.tange-ai.com:8883` |
+| OTA 服务 | `https://tirtc-device-ota.tange365.com` |
+| Wi-Fi SSID / password | 空，由设备 UI 配置 |
+| 微信主动呼叫版本类型 | 体验版 `2` |
+
+接入自己的环境时，成组核对服务发现、绑定、MQTT、OTA 和设备身份。不要把测试凭据写进
+`sdkconfig.defaults`、源码、日志、截图或 Issue。
 
 ## 4. 建立 ESP-IDF 环境
-
-打开 ESP-IDF `5.5.4` 对应的 PowerShell，进入本项目目录：
 
 ```powershell
 . "$env:IDF_PATH\export.ps1"
@@ -89,16 +99,19 @@ idf.py --version
 xtensa-esp32s3-elf-gcc --version
 ```
 
-版本不对时先切换环境，不要继续复用旧 `build/`。组件管理器会根据 `main/idf_component.yml`
-和 `dependencies.lock` 解析依赖，因此首次构建需要能访问对应组件源。
+确认输出是 ESP-IDF `5.5.4` 和 Xtensa `14.2.0_20260121`。版本不对时先切换环境；不要让
+旧工具链继续使用已有 `build/`。
 
 ## 5. 做一次干净构建
+
+正式验证建议使用从未存在过的构建目录：
 
 ```powershell
 idf.py -B build --no-ccache reconfigure build
 ```
 
-命令成功结束后，至少应看到：
+源码、配置、SDK、ESP-IDF 或编译器变化后，都要删除旧构建目录或换一个全新目录。成功后至少
+应有：
 
 ```text
 build/sample_project.bin
@@ -106,70 +119,91 @@ build/flasher_args.json
 build/bootloader/bootloader.bin
 build/partition_table/partition-table.bin
 build/ota_data_initial.bin
-build/storage.bin
 ```
 
-`build/flasher_args.json` 是本次构建的烧录事实来源。应用镜像必须能放进任一 `0x770000`
-OTA app 分区；看到分区空间不足时，应先处理体积，不能通过随意改分区地址绕过。
+`1.9.0` 不再生成 `storage.bin`。分区表仍保留 `0xf00000` 的 1 MB storage 分区，但正式完整
+镜像将未使用区域保持为 `0xFF`。不要从旧版本构建目录复制 `storage.bin` 混入本版本。
 
-如果只修改了文档，无需重编译。源码、配置、SDK、编译器或 ESP-IDF 版本发生变化时，旧构建
-输出就不再代表当前代码，应清理 `build/` 后重新构建。
+正式公开构建记录：
 
-## 6. 烧录源码构建结果
+| 项目 | 值 |
+| --- | --- |
+| app 大小 | `7599904` bytes |
+| app SHA-256 | `3cdebe0df0946fc7bee65c921f94796c080bc1e03025370b1b76a5cbe560d137` |
+| `0x770000` 分区剩余 | `198880` bytes |
+
+本版本容量余量较紧。构建成功后仍要查看 app 大小；如果增加图片、字体、日志、SDK 或调试
+功能，应把容量复核当作必做步骤，而不是等 OTA 失败后再处理。
+
+## 6. 多地址烧录本地构建
 
 用 Chrome 或 Edge 打开
-[Espressif ESP Tool](https://espressif.github.io/esptool-js/)，连接开发板串口，然后按
-`build/flasher_args.json` 添加文件。当前分区布局为：
+[Espressif ESP Tool](https://espressif.github.io/esptool-js/)，按本次构建的
+`build/flasher_args.json` 添加文件。当前布局为：
 
-| Flash 地址 | 文件 |
+| 地址 | 文件 |
 | --- | --- |
 | `0x0` | `build/bootloader/bootloader.bin` |
 | `0x8000` | `build/partition_table/partition-table.bin` |
 | `0xd000` | `build/ota_data_initial.bin` |
 | `0x10000` | `build/sample_project.bin` |
-| `0xf00000` | `build/storage.bin` |
 
-五个文件的地址不能互换，也不能都写成 `0x0`。更换分区表后，应重新读取本次构建的
-`flasher_args.json`，不要继续照抄上表。
+地址不能互换。修改分区表或构建参数后，以新生成的 `flasher_args.json` 为准，不要继续照抄
+旧表。首次验证建议先擦除 Flash；这会清除 NVS 中的 Wi-Fi、绑定和本地设置。
 
-这组文件会写入启动、分区、OTA、应用和资源区；首次验证建议先擦除 Flash。擦除或写入完整
-镜像会清除 NVS 中的 Wi-Fi、绑定和本地设置，设备重启后需要重新配置。
+## 7. 串口诊断 CLI
 
-烧录完成后按 RESET。需要串口日志时执行：
+默认构建包含 `APP_SERIAL_NET_CLI_ENABLE=y`。用 Monitor 连接设备：
 
 ```powershell
 idf.py -p COMx monitor
 ```
 
-将 `COMx` 替换为实际串口，按 `Ctrl+]` 退出 Monitor。
+输入 `AT+HELP` 获取当前命令表。常用命令：
 
-## 7. 第一次启动看什么
+| 目的 | 命令 |
+| --- | --- |
+| 网络概况 | `AT+NET?`、`AT+WIFI?`、`AT+NETPROBE` |
+| Wi-Fi 扫描与重试 | `AT+WIFISCAN`、`AT+WIFIRETRY` |
+| Socket 和内存 | `AT+SOCKETS?`、`AT+HEAP?` |
+| RTC 与媒体 | `AT+MEDIA?`、`AT+RTCLOG?`、`AT+RTCLINK?` |
+| 音频链路 | `AT+AUDIOPATH?`、`AT+AUDIOCHECK?`、`AT+AECDUMP?` |
+| 呼叫状态 | `AT+CALL?` |
 
-按这个顺序确认，每一步通过后再继续：
+命令不会回显密码、Token 或设备密钥。量产固件不需要现场诊断时运行：
 
-1. 屏幕进入主页，触摸和翻页正常。
-2. 设置页显示版本 `1.8.1`。
-3. 连接 2.4 GHz Wi-Fi，能看到 SSID、IP 和真实信号状态。
-4. 获取 6 位验证码，在 ThingConnect H5 绑定设备。
-5. H5 设备列表出现设备，进入实时查看后验证画面、声音和对讲。
-6. 再分别验证小钛、微信 VoIP、设备互呼和 OTA。
+```powershell
+idf.py menuconfig
+```
 
-完整操作见 [从 Wi-Fi 到各项功能](GETTING_STARTED_CN.md)。构建成功说明源码和依赖能够
-完成编译链接；屏幕、联网和各业务能力要以上述运行现象逐项判断。
+进入 `TiRTC Device Monitor -> Debug utilities`，关闭 `Enable UART network diagnostics
+command set`，保存后从全新目录重新构建。关闭 CLI 会改变最终 app，旧固件哈希随即失效。
 
-## 8. 常见问题
+## 8. 启动检查顺序
+
+1. 串口镜像描述信息和设置页都显示 `1.9.0`。
+2. 屏幕、触摸和主页切换正常。
+3. 连接 2.4 GHz Wi-Fi，看到 IP、时间同步和服务发现结果。
+4. 完成 6 位码绑定并看到正式设备 ID。
+5. Web IPC 验证双向音频；本版本不期待 RTC 视频画面。
+6. 分别进入小钛、微信 VoIP 和设备互呼，确认每次退出后资源可再次申请。
+7. 需要排障时，用 AT 命令先找第一处失败阶段，再决定修改网络、协议、媒体或驱动层。
+
+构建通过说明源码和依赖能够完成编译链接。烧录、串口启动、Wi-Fi、云端在线、业务功能、
+音频主观效果和长时间运行仍需分别验证。
+
+## 9. 常见问题
 
 | 现象 | 处理方式 |
 | --- | --- |
-| 找不到 `idf.py` | 重新执行 ESP-IDF 5.5.4 的 `export.ps1` |
-| 编译器版本不对 | 关闭当前终端，重新打开正确 ESP-IDF 环境，不复用旧 `build/` |
-| Windows 报路径过长 | 把仓库移到较短路径后重新生成 `build/`，不要移动单个生成文件 |
-| TiRTC 静态库缺失或哈希不符 | 恢复公开仓中的正式文件，并对照 `VERSION.md`；不要混用其他平台库 |
-| 组件下载失败 | 检查网络、代理和组件源，再重新执行 `reconfigure build` |
-| app 超过分区 | 先检查新增资源、字体、图片和调试功能，保持 `0x770000` 分区契约 |
-| 网页烧录后不启动 | 核对五个文件、地址和 16 MB Flash，按 RESET 后查看串口启动日志 |
-| 启动后没有原 Wi-Fi 或绑定 | 擦除或完整烧录会清空 NVS，这是预期现象；重新完成首次配置 |
-| 能联网但无法发现业务 | 确认服务发现仍为 `http://ep-open.tangeopen.com/services`，再检查设备时间和公网访问 |
+| 找不到 `idf.py` | 重新加载 ESP-IDF `5.5.4` 的 `export.ps1` |
+| SDK 哈希不符 | 恢复同一个 `2.3.0 mini` 包，不要混用头文件和库 |
+| 组件下载失败 | 检查网络、代理和组件源，再执行 `reconfigure build` |
+| app 超过分区 | 检查新增 SDK、图片、字体和调试功能；不要随意移动 OTA 分区 |
+| Windows 路径过长 | 把仓库放到较短路径，从新目录构建 |
+| 网页烧录后不启动 | 核对四个文件、地址、16 MB Flash 和 RESET 后的启动日志 |
+| H5 没有画面 | `1.9.0` 的 RTC 产品能力是双向音频，这是预期行为 |
+| 能联网但业务发现失败 | 先看 `AT+NET?` 和 `AT+NETPROBE`，再核对服务发现入口和设备时间 |
 
-排障时一次只改一个变量，并保留当前 commit、ESP-IDF 版本、构建命令和首个明确错误。这样
-别人接手日志时，能直接从失败点继续，而不是重新猜一遍环境。
+排障时保留当前 commit、工具链版本、构建命令、首个错误和 AT 查询结果。一次只改一个变量，
+比同时调整多项参数更容易找到真正原因。

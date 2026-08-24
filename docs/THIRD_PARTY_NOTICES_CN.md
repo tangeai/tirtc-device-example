@@ -7,6 +7,14 @@
 - `components/tirtc_sdk/` 或 `sdk/` 中的 TiRTC SDK 头文件与目标平台静态库。
 - 第三方字体、图像、音视频测试素材和生成资源。
 
+ESP32-S3 Device Monitor `1.9.0` 使用 TiRTC SDK `2.3.0 mini` 官方包。SDK BuildInfo 为
+`v2.3.0-1baf7c95`，静态库大小为 `8,079,682` bytes，SHA-256 为
+`43b06d1da421c7d24cc7fdb1385d600ecdffbfd2d3801f7faf0c540fb5cdbaa2`。该项目同时使用
+TGTRP BuildInfo `tagv1.5.11-41c9a257` 和包元数据中的 TGWebRTC ref
+`tag.v1.5.12 / 41c9a25768ffe265c07f17ef78a6439607b19364`。完整身份以项目
+`components/tirtc_sdk/VERSION.md`、`VERSION.md`、`SOURCE_PROVENANCE.md` 和 Release
+manifest 为准；SDK 头文件和静态库保留供应方条款，不因本仓 MIT License 改为 MIT。
+
 ESP32-P4 Device App `1.3.2` 使用 TiRTC `2.3.0` 定制兼容快照。其公开 API 版本不变，
 P4 静态库以 Nano baseline `aaad3da251bac90e0642b51b3279a1f40ca9fa9a` 为基础，并带有从
 `fde4f1c58d2dc28f3d3d04e25dd49bc3a399fea6` 回移的 HTTP DNS cache disable 补丁。

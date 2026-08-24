@@ -4,7 +4,7 @@
 
 1. 最小 TiRTC 集成示例用于理解 SDK 生命周期和基础音视频链路。
 2. 最小系统例子用于观察 ThingConnect、AI 对讲和设备呼叫的协议状态。
-3. 完整应用用于带屏设备、真实音视频硬件和完整业务体验。
+3. 完整应用用于带屏设备、真实音频硬件和完整业务体验；摄像头是否参与 RTC 由各项目说明。
 
 八个项目分别使用独立的“平台 + 项目 + 版本号”Tag。某个项目更新时，只增加该项目的新
 Release，不再用日期批次同时代表整仓内容。当前版本和下载入口见[版本与证据清单](VERSIONS_CN.md)
@@ -46,7 +46,7 @@ Release，不再用日期批次同时代表整仓内容。当前版本和下载�
 | 文档 | 版本 | TiRTC SDK | 解决的问题 |
 | --- | --- | --- | --- |
 | [完整应用总览](../complete-applications/README.md) | - | - | 选择目标开发板 |
-| [ESP32-S3 Device Monitor](../complete-applications/esp32-s3/device-monitor/README.md) | `1.8.1` | `2.2.0` | 绑定、H5、AI、微信、设备呼叫和 OTA |
+| [ESP32-S3 Device Monitor](../complete-applications/esp32-s3/device-monitor/README.md) | `1.9.0` | `2.3.0 mini` | 绑定、H5 双向音频、小钛、微信、设备音频呼叫、二维码扫描和 OTA |
 | [ESP32-P4 Device App](../complete-applications/esp32-p4/device-monitor/README.md) | `1.3.2` | `2.3.0` 定制兼容快照 | Hosted 网络、P4 媒体链路和完整业务 |
 | [G32S10X Device Monitor](../complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | G32S10X 完整设备能力与君正平台适配 |
 | [固件下载与校验](RELEASES_CN.md) | - | - | Release 下载、烧录入口和一致性校验 |

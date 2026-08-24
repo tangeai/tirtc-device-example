@@ -1,5 +1,39 @@
 # 变更记录
 
+## 1.9.0 - 2026-08-24
+
+比较基线：`v1.8.0`（`8211e3bec7a40beff5cfe81dbf9cb8468016e786`）。`1.8.1` 的
+微信主动呼叫体验版配置继续保留。
+
+### SDK 与系统配置
+
+- TiRTC SDK 升级到官方 `2.3.0 mini`，头文件、TGTRP/统计接口、静态库和版本说明来自
+  同一交付包。
+- `libTiRTC.a` 大小为 `8,079,682` bytes，SHA-256 为
+  `43b06d1da421c7d24cc7fdb1385d600ecdffbfd2d3801f7faf0c540fb5cdbaa2`。
+- `sdkconfig.defaults` 收口 FreeRTOS 1 kHz、main task 16 KiB、96 KiB internal RAM reserve、
+  外部任务栈，以及 NVS cache、mbedTLS、MQTT outbox 的 PSRAM 策略。
+- Watchdog panic 保持开启，错误信息在发布构建中可见。
+
+### 音频与生命周期
+
+- 完善 S3 音频采集、播放和 AEC 链路，增加自适应抖动缓冲、缺帧补偿和媒体完整性统计。
+- 增加 checksum failure、missing、duplicate、reordered 等计数，帮助区分网络抖动、队列
+  背压、媒体格式和音频外设问题。
+- 收口 TiRTC 连接、任务栈、断开与资源释放策略，Device Call、小钛、Web IPC 和微信 VoIP
+  继续由应用层统一仲裁。
+- RTC 产品能力固定为双向音频；摄像头只用于联系人二维码扫描，不作为 RTC 视频源。
+
+### 诊断与发布
+
+- 新增默认开启的串口 AT 诊断 CLI，可查看 Wi-Fi、网络探测、Socket、RTC、媒体、音频路径、
+  AEC、呼叫和内存状态；量产不需要时可在 Kconfig 关闭。
+- 来源 Tag `v1.9.0` 已完成开发侧构建。统一公开代码快照
+  `d76e6e3b7f02f112b55ed917daa17f530b3c7a6b` 也已在全新目录完成 ESP-IDF `5.5.4`、
+  禁用 ccache 的正式干净构建，并生成唯一一套 Release 资产。
+- app 分区余量约为 `3%`，属于明确容量风险；正式大小和 SHA-256 以 Release manifest 为准。
+- 构建、烧录、联网、业务功能、音频效果和长稳继续分开记录，不用构建结果替代目标板证据。
+
 ## 1.8.1 - 2026-08-18
 
 比较基线：`v1.8.0`（`8211e3bec7a40beff5cfe81dbf9cb8468016e786`）。

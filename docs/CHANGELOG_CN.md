@@ -1,5 +1,29 @@
 # 版本变更记录
 
+## 2026.08.24：ESP32-S3 Device Monitor 1.9.0
+
+- 开发来源固定为 Tag `v1.9.0`、commit
+  `a64422b0efdebe6c303370effafd52bbf51593d1`、tree
+  `b29d4080a43db0a2b8f2e35f095c5c45f3c1f4c7`。
+- TiRTC SDK 升级到官方 `2.3.0 mini`；`libTiRTC.a` 为 `8,079,682` bytes，SHA-256 为
+  `43b06d1da421c7d24cc7fdb1385d600ecdffbfd2d3801f7faf0c540fb5cdbaa2`。
+- 完善 S3 音频/AEC、媒体抖动缓冲与完整性统计、TiRTC 连接与任务栈策略，以及 Web IPC、
+  小钛、微信 VoIP 和设备互呼的生命周期交接。
+- 产品能力统一为 RTC 双向音频；摄像头只用于联系人二维码扫描。设备呼叫、微信和小钛动作
+  只接受音频类型，不静默降级视频请求。
+- 新增默认开启的串口 AT 诊断 CLI，覆盖网络、Socket、RTC、媒体、音频路径、AEC、呼叫和
+  内存状态；生产固件不需要时可在 Kconfig 关闭后重新构建。
+- 来源工程已完成开发侧构建；统一公开代码快照 `d76e6e3b7f02f112b55ed917daa17f530b3c7a6b`
+  也已在全新目录完成 ESP-IDF `5.5.4`、禁用 ccache 的正式干净构建。app 大小
+  `7599904` bytes、SHA-256
+  `3cdebe0df0946fc7bee65c921f94796c080bc1e03025370b1b76a5cbe560d137`、分区剩余
+  `198880` bytes；容量余量较紧。
+- 完整镜像和 OTA app 只通过 `esp32-s3-device-monitor-v1.9.0` Release 分发；源码 Git
+  历史不保存构建二进制。
+- `1.8.1` 的微信主动呼叫体验版 `wx_version_type=2` 配置继续保留，历史 Tag 和 Release
+  仍可复核。
+- 构建与静态一致性证据和目标板烧录、串口、联网、业务、音频效果、弱网及长稳证据分开记录。
+
 ## 2026.08.18：ESP32-S3 Device Monitor 1.8.1
 
 - 设备主动呼叫微信联系人时，默认使用体验版 `wx_version_type=2`。

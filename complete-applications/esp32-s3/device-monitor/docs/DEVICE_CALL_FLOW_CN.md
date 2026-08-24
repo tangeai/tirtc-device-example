@@ -16,14 +16,13 @@
 
 ## 2. 呼叫类型与动作来源
 
-- 设备呼叫支持 `audio` 和 `video`。呼叫请求会把 `call_type` 传给
-  `POST /v1/call/request`，来电也会校验并保存该字段。
-- 兼容没有 `call_type` 的旧来电时按 `audio` 处理；其他未知值直接拒绝，避免双方以
-  不同媒体模式进入同一房间。
-- 用户可以从设备呼叫页面发起呼叫；小钛也可以按设备 ID 或备注发起音频/视频呼叫。
+- 当前 S3 产品只支持 `call_type=audio`。呼叫请求会把该字段传给
+  `POST /v1/call/request`，来电也会先校验再保存。
+- 兼容没有 `call_type` 的旧来电时按 `audio` 处理；`video` 和其他未知值直接拒绝，避免
+  云端房间、UI 和媒体资源进入不同模式。
+- 用户可以从设备呼叫页面发起音频呼叫；小钛也可以按设备 ID 或备注发起音频呼叫。
   小钛返回 `accepted` 只表示设备接受了应用切换请求，不表示对端已经响铃或接听。
-- 微信 VoIP 使用独立联系人和 WHIP 会话，当前设备侧只发起语音呼叫，不复用设备呼叫的
-  `call_type=video`。
+- 微信 VoIP 使用独立联系人和 WHIP 会话，当前设备侧同样只发起音频呼叫。
 
 ## 3. 主叫流程
 
@@ -36,7 +35,7 @@
 6. 被叫使用业务接口取得 token，并主动 `TiRtcConnect` 到主叫。
 7. 主叫接收到入站 TiRTC 连接，但在收到业务确认前不启动音频。
 8. 被叫发送命令 `0x2000`，负载为 `{"room_id":"..."}`。
-9. 主叫校验 `room_id`，匹配后进入 `IN_CALL` 并按 `call_type` 启动媒体；不匹配
+9. 主叫校验 `room_id`，匹配后进入 `IN_CALL` 并启动双向音频；不匹配
    则断开连接。
 
 关键约束：如果 TiRTC 监听没有 ready，不能先创建云端房间。这样可以避免“云端已接听、本机却因 SDK 启动失败进入 ERROR”的半完成状态。
@@ -48,8 +47,7 @@
 3. ready 后调用 `POST /v1/call/device/info`，请求体包含 `device_id`、`room_id`、`purpose=call`。
 4. 接口成功即代表业务侧已经接听，并会向主叫发送 `callee_answered`。
 5. 被叫使用接口返回的 token 调用 `TiRtcConnect(caller_id, token)`。
-6. P2P 连接成功后发送 `0x2000` 房间确认，进入 `IN_CALL`，启动音频；视频呼叫再按
-   `call_type=video` 启动视频链路。
+6. P2P 连接成功后发送 `0x2000` 房间确认，进入 `IN_CALL` 并启动双向音频。
 
 `POST /v1/call/device/info` 有接听副作用，因此不能在本机 RTC 未 ready 时提前调用。当前实现只使用该正式接口，不再回退到旧的 `/v1/device/info`。
 
@@ -71,7 +69,7 @@
 
 ```text
 stage=rtc_ready_wait_done ... ret=ESP_OK
-stage=call_request_done ... call_type=audio|video ret=ESP_OK
+stage=call_request_done ... call_type=audio ret=ESP_OK
 stage=ringing ...
 stage=callee_answered_rx ... matched=1
 stage=in_call role=caller ... cmd=0x2000
@@ -88,4 +86,8 @@ stage=connected_notice_tx ... cmd=0x2000 ret=ESP_OK
 stage=in_call ... role=callee
 ```
 
-看到 `40305` 时，本次日志中不应再出现 `/v1/call/request`，并且 `CALL_FLOW` 应保持 `active=0 role=none state=idle room=-`。如果仍然创建房间，说明业务建房和 RTC ready 门禁没有生效。构建成功只能证明代码层通过，身份修复、连接、音频和二次呼叫仍需以服务端状态及两台真机日志为准。
+收到视频来电时，应看到 `reason=unsupported_call_type` 并由设备拒绝，不能继续创建本地视频
+资源。看到 `40305` 时，本次日志中不应再出现 `/v1/call/request`，并且 `CALL_FLOW` 应保持
+`active=0 role=none state=idle room=-`。如果仍然创建房间，说明业务建房和 RTC ready 门禁
+没有生效。构建成功只能证明代码层通过，身份修复、连接、音频和二次呼叫仍需以服务端状态
+及两台真机日志为准。
