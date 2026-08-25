@@ -8,10 +8,10 @@
 绑定与在线、TiRTC 实时音频、320 x 240 触摸屏、小钛、微信 VoIP、设备互呼和 OTA 放在
 同一套应用生命周期里，适合直接体验，也适合作为带屏音频设备的工程参考。
 
-当前版本为 `1.9.0`，公开项目 Tag 为 `esp32-s3-device-monitor-v1.9.0`，TiRTC SDK 为
+当前版本为 `1.9.5`，公开项目 Tag 为 `esp32-s3-device-monitor-v1.9.5`，TiRTC SDK 为
 `2.3.0 mini`。
 
-> **1.9.0 产品边界**
+> **1.9.5 产品边界**
 >
 > 本版本的 RTC 业务统一为双向音频：Web IPC、微信 VoIP、设备互呼和小钛发起的呼叫都不
 > 发布或播放 RTC 视频。板载摄像头只用于扫描联系人二维码。这样可以让 UI、业务和协议层
@@ -29,11 +29,11 @@
 ## 直接烧录
 
 从
-[`esp32-s3-device-monitor-v1.9.0` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.9.0)
+[`esp32-s3-device-monitor-v1.9.5` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.9.5)
 下载：
 
 ```text
-esp32s3-tirtc-device-monitor-full-v1.9.0.bin
+esp32s3-tirtc-device-monitor-full-v1.9.5.bin
 SHA256SUMS.txt
 release-manifest.json
 ```
@@ -71,7 +71,7 @@ release-manifest.json
 
 判断每一步时看真实现象：
 
-1. 设置页显示版本 `1.9.0`。
+1. 设置页显示版本 `1.9.5`。
 2. Wi-Fi 页面显示已连接、IP 地址和信号状态。
 3. 设备显示 6 位验证码，绑定后显示正式设备 ID。
 4. H5 能听到设备麦克风音频，按住说话时设备扬声器能播放回传音频。
@@ -83,17 +83,47 @@ release-manifest.json
 
 | 能力 | 设备端行为 |
 | --- | --- |
-| 设备接入 | 服务发现、6 位码绑定、设备身份保存、MQTT 在线和自动重连 |
+| 设备接入 | HTTPS 服务发现、6 位码绑定、设备身份保存、MQTTS 在线和自动重连 |
 | Web IPC | 设备麦克风上行、H5 音频下行；不启用 RTC 视频 |
 | 小钛 | WHIP 音频、字幕、打断、联系人状态查询和音频呼叫动作 |
 | 微信 VoIP | 联系人、备注、设备与微信双向发起的音频通话；主动呼叫使用体验版 `wx_version_type=2` |
-| 设备互呼 | 音频呼叫、来电、接听、拒接、取消、挂断和异常房间恢复 |
+| 网络测试 | 显示平均时延、相邻 RTT 变化的平均抖动和丢包率，并把同一组结构化结果传到 UI 与串口诊断 |
+| 设备互呼 | 音频呼叫、来电铃声、接听、拒接、取消、挂断和异常房间恢复 |
 | 摄像头 | 扫描设备联系人和微信联系人二维码 |
 | OTA | 双 OTA app 分区，在线更新仅替换 app |
 | 诊断 | 串口 AT 命令查看网络、Socket、RTC、音频路径、AEC、媒体统计和呼叫状态 |
 
 多项 RTC 业务共享音频设备和 TiRTC 连接资源。应用层负责会话仲裁与资源交接；MQTT 和设备
 在线属于常驻服务，不随单个页面销毁。
+
+## 网络与 SDK 安全
+
+设备使用 `https://ep-open.tangeopen.com/services` 获取业务地址，只接受 `HTTPS` 和
+`MQTTS` 结果。发现响应或本地覆盖若给出 `http://`、`mqtt://`，应用会拒绝并报错，同时保留
+安全兜底，不会把 Token、设备密钥或控制消息降级到明文传输。
+
+应用 HTTP 和 MQTT 客户端使用 ESP-IDF 证书包。TiRTC SDK 自有的 HTTPS 客户端也校验证书链
+与 hostname，握手或证书校验失败时返回原有 SSL 错误路径，不回退 HTTP。公开静态库在完成
+上述修复后执行 `--strip-debug`，只去除 SDK 内部源码路径和行号级调试信息；成员、符号、代码
+和只读数据契约保持一致。详细版本与哈希见
+[`components/tirtc_sdk/VERSION.md`](components/tirtc_sdk/VERSION.md)。
+
+## 1.9.5 的音频收口
+
+- Web IPC、设备互呼和微信 VoIP 的设备上行线格式均核对为 `8 kHz / 16 bit / mono /`
+  `G.711 A-law`，每包 `20 ms / 160 bytes`；设备互呼的显式 CALL 发送路径使用同一契约。
+- 设备互呼单独使用有界自适应播放缓冲。缓冲水位偏低或偏高时，每个 20 ms 播放周期只
+  调整 4 个 16 kHz 采样帧，约为 `1.25%`，其余 Web IPC、微信和小钛配置不跟随改变。
+- 设备互呼 AEC 使用全双工高性能线性模式，工作区放在 PSRAM；AEC 后增加 100 Hz 高通，
+  并提高通话 AGC 的静态噪声底线，避免把已测得的板端静态残留继续放大。
+- 普通设备来电会播放本地铃声；接听、拒接、对端取消、挂断或身份重置时按状态停止。铃声
+  任务栈和 PCM 缓冲使用 PSRAM，不把大块临时数据挤进 internal RAM。
+
+> **已知音频现象**
+>
+> Web IPC 和设备互呼的当前人耳试听仍可感知轻微“沙沙电流声”。线上格式核对和 20,000 次
+> A-law 编解码自检均未发现异常，这些证据缩小了排查范围，但底噪根因尚未证实。本版本不
+> 宣称该问题已经解决；排查时请保留业务类型、设备角色、音频路径和主观听感记录。
 
 ## 串口诊断 CLI
 
@@ -116,7 +146,7 @@ CLI 使用固定缓冲区，不输出 Wi-Fi 密码、Token 或设备密钥。产
 ```powershell
 git clone https://github.com/tangeai/tirtc-device-example.git
 cd tirtc-device-example
-git checkout esp32-s3-device-monitor-v1.9.0
+git checkout esp32-s3-device-monitor-v1.9.5
 cd complete-applications/esp32-s3/device-monitor
 
 . "$env:IDF_PATH\export.ps1"
@@ -127,21 +157,32 @@ idf.py -B build --no-ccache reconfigure build
 
 | 项目 | 值 |
 | --- | --- |
-| 应用版本 | `1.9.0` |
+| 应用版本 | `1.9.5` |
 | ESP-IDF | `5.5.4` |
 | Xtensa 工具链 | `14.2.0_20260121` |
-| TiRTC SDK | `2.3.0 mini`，BuildInfo `v2.3.0-1baf7c95` |
-| `libTiRTC.a` | `8,079,682` bytes |
-| `libTiRTC.a` SHA-256 | `43b06d1da421c7d24cc7fdb1385d600ecdffbfd2d3801f7faf0c540fb5cdbaa2` |
+| TiRTC SDK | `2.3.0 mini` 基线；active-connect `db7290f`；HTTPS 认证 `13e34c3` |
+| TiRTC BuildInfo | `v2.3.0-db7290f`（BuildInfo 保留基础功能提交身份） |
+| `libTiRTC.a` | `2,125,366` bytes |
+| `libTiRTC.a` SHA-256 | `83556eeee0c6cae45961899a4c5d1255a5d0d33f8e636104a946ce41ff3e20d7` |
 | OTA app 分区 | `0x770000` bytes |
 
-`1.9.0` 的 SDK 和功能增量已在来源工程完成开发侧构建。统一公开代码快照
-`d76e6e3b7f02f112b55ed917daa17f530b3c7a6b` 也已从全新目录完成 ESP-IDF `5.5.4`、
-禁用 ccache 的正式干净构建；对应 app 大小
-`7599904` bytes、SHA-256
-`3cdebe0df0946fc7bee65c921f94796c080bc1e03025370b1b76a5cbe560d137`，分区剩余
-`198880` bytes。当前容量余量较紧，继续增加图片、字体、日志或调试能力前，
-请先重新检查 app 大小。
+来源侧 `1.9.5` 已完成开发构建，但该结果不作为公开固件资产。统一发布从隔离候选的全新检出
+完成一次 ESP-IDF `5.5.4`、禁用 ccache 的正式干净构建。该候选与公开代码提交
+`c27914eafab6f700cecf196da48987200cd54d37` 的 repository tree
+`b0b93ddc0c82ae65130ae6dab17ff6ee6dbfc86a`、项目 tree
+`9fa7f85ce92a0e5fcd27c4a36fabe02609191391` 完全一致。结果如下：
+
+| 正式构建项 | 值 |
+| --- | --- |
+| 构建步骤 | `1767/1767` |
+| app 大小 | `7,608,608` bytes |
+| app SHA-256 | `51a7599942f06556e33ef4820499885d6213ff15fce0f3ed2f11e38e44146503` |
+| app 分区 | `7798784` bytes |
+| 分区剩余 | `190,176` bytes（`2.44%`） |
+
+正式构建确认 app 余量为 `190,176` bytes（`2.44%`），容量已进入需要逐版核对的风险区。
+本次没有复用 `1.9.0` 的大小、哈希或固件；继续增加图片、字体、日志或调试能力前也要先
+确认新 app 没有越过 OTA 分区。
 
 构建输入、配置和多地址烧录见 [源码构建与配置](docs/BUILD_AND_CONFIG_CN.md)。
 
@@ -149,11 +190,15 @@ idf.py -B build --no-ccache reconfigure build
 
 | 项目 | 值 |
 | --- | --- |
-| 开发来源 Tag | `v1.9.0` |
-| 开发来源 commit | `a64422b0efdebe6c303370effafd52bbf51593d1` |
-| 开发来源 tree | `b29d4080a43db0a2b8f2e35f095c5c45f3c1f4c7` |
-| 公开项目 Tag | `esp32-s3-device-monitor-v1.9.0` |
-| 比较基线 | `v1.8.0`，1.8.1 补丁历史继续保留在变更记录中 |
+| 开发来源 Tag | `v1.9.5` |
+| 开发来源 commit | `45db394cae399967a9c3b882d595cdecb80321be` |
+| 开发来源 tree | `4a6760708d4fd2bdb973c4bc77d789d45f2bc2be` |
+| 公开代码 commit | `c27914eafab6f700cecf196da48987200cd54d37` |
+| 公开 repository tree | `b0b93ddc0c82ae65130ae6dab17ff6ee6dbfc86a` |
+| 公开项目 tree | `9fa7f85ce92a0e5fcd27c4a36fabe02609191391` |
+| 532 文件清单 SHA-256 | `4f62119b14935198128abb809142beb3bf91367339ae9f052acecb1d93499b00` |
+| 公开项目 Tag | `esp32-s3-device-monitor-v1.9.5` |
+| 比较基线 | `v1.9.0` / `a64422b0efdebe6c303370effafd52bbf51593d1` |
 
 完整来源、筛选范围和证据分层见 [来源与验证边界](SOURCE_PROVENANCE.md)。
 

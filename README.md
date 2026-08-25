@@ -38,7 +38,7 @@ ESP32 完整镜像会覆盖整片 Flash，并重置 NVS 中原有的 Wi-Fi、绑
 ```bash
 git clone https://github.com/tangeai/tirtc-device-example.git
 cd tirtc-device-example
-git checkout esp32-s3-device-monitor-v1.9.0
+git checkout esp32-s3-device-monitor-v1.9.5
 ```
 
 然后进入下表中的项目目录。每个项目 README 都给出依赖、配置、构建、烧录、成功现象和排障入口。
@@ -64,7 +64,7 @@ git checkout esp32-s3-device-monitor-v1.9.0
 
 | 平台 | 应用 | 版本 | TiRTC SDK | 来源版本 | 公开 Release |
 | --- | --- | --- | --- | --- | --- |
-| ESP32-S3 | [Device Monitor](complete-applications/esp32-s3/device-monitor/README.md) | `1.9.0` | `2.3.0 mini` | Tag `v1.9.0` / commit `a64422b` | [`esp32-s3-device-monitor-v1.9.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.9.0) |
+| ESP32-S3 | [Device Monitor](complete-applications/esp32-s3/device-monitor/README.md) | `1.9.5` | `2.3.0 mini` | Tag `v1.9.5` / commit `45db394` | [`esp32-s3-device-monitor-v1.9.5`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.9.5) |
 | ESP32-P4 | [Device App](complete-applications/esp32-p4/device-monitor/README.md) | `1.3.2` | `2.3.0` 定制兼容快照 | Tag `esp32-p4-device-app-v1.3.2` / commit `bc1ae8f` | [`esp32-p4-device-monitor-v1.3.2`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.2) |
 | G32S10X | [Device Monitor](complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | Tag `v0.1.1` / commit `5630152` | [`g32s10x-device-monitor-v0.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-device-monitor-v0.1.1) |
 
@@ -97,9 +97,16 @@ ESP32-P4 Device App `1.3.2` 提供源码和
 从 `0x0` 烧录；它会清除现有 NVS、Wi-Fi 和绑定信息，具体步骤见
 [固件下载与校验](docs/RELEASES_CN.md)。
 
-ESP32-S3 Device Monitor `1.9.0` 提供 RTC 双向音频、二维码联系人扫描、小钛、微信 VoIP、
-设备互呼和 OTA。固件使用 TiRTC SDK `2.3.0 mini`，完整镜像
-`esp32s3-tirtc-device-monitor-full-v1.9.0.bin` 同样只通过对应 Release 分发。
+ESP32-S3 Device Monitor `1.9.5` 提供 RTC 双向音频、二维码联系人扫描、小钛、微信 VoIP、
+设备互呼和 OTA。本次补充网络时延/抖动/丢包率展示、设备来电铃声，并收口设备互呼的
+AEC、G.711 A-law 与自适应播放缓冲。固件使用 TiRTC SDK `2.3.0 mini`，完整镜像
+`esp32s3-tirtc-device-monitor-full-v1.9.5.bin` 只通过对应 Release 分发。
+
+本版本的服务发现、业务 HTTP、设备 MQTT 和 TiRTC HTTPS 都使用认证传输：只接受
+HTTPS/MQTTS，并校验证书链与主机名；不安全地址会被拒绝并报错，不降级到明文协议。
+
+Web IPC 和设备互呼的当前人耳试听仍可感知轻微“沙沙电流声”。线上格式核对和 A-law
+编解码自检缩小了排查范围，但底噪根因尚未证实；`1.9.5` 不宣称这一问题已经解决。
 
 ## 构建入口
 

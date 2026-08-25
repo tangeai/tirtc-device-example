@@ -24,6 +24,17 @@
   小钛返回 `accepted` 只表示设备接受了应用切换请求，不表示对端已经响铃或接听。
 - 微信 VoIP 使用独立联系人和 WHIP 会话，当前设备侧同样只发起音频呼叫。
 
+### 2.1 设备互呼音频契约
+
+- 设备上行固定为 `8 kHz / 16 bit / mono / G.711 A-law / 20 ms / 160 bytes`。显式 CALL
+  gate 和 built-in microphone 路径使用同一 A-law 编码契约，不能在某条调用路径回退成 PCM。
+- 下行进入 Device Call 专用播放 profile。PSRAM 环形缓冲按水位决定是否微调每次取出的
+  16 kHz PCM 帧数，最大约 `1.25%`；扬声器仍按固定 20 ms 周期写入。
+- 缓冲水位低时慢速消耗，水位高时快速消耗，并设置进入/退出滞回区。它只用于有界回中，
+  不会把丢包伪造成收到的语音，也不改变 Web IPC、微信 VoIP 或小钛的 profile。
+- 采集侧使用全双工高性能线性 AEC，工作区申请在 PSRAM；AEC 后启用 100 Hz 高通，并采用
+  更保守的通话 AGC 静态噪声底线。噪声门保持关闭，以免切掉轻声起音和词尾。
+
 ## 3. 主叫流程
 
 1. 应用层准备音频和 RTC 资源。
@@ -42,8 +53,10 @@
 
 ## 4. 被叫流程
 
-1. MQTT 收到 `call_incoming`，保存 `room_id`、`caller_id` 和 `call_type`，显示接听弹窗。
-2. 用户点击接听后，先确认本机 TiRTC 监听 ready。
+1. MQTT 收到 `call_incoming`，保存 `room_id`、`caller_id` 和 `call_type`，显示接听弹窗并
+   启动本地来电铃声。铃声实时合成，任务栈和 PCM 缓冲使用 PSRAM。
+2. 用户点击接听后，先停止铃声，再确认本机 TiRTC 监听 ready。铃声停止失败会保留真实
+   错误并终止本次接听，不把失败写成成功。
 3. ready 后调用 `POST /v1/call/device/info`，请求体包含 `device_id`、`room_id`、`purpose=call`。
 4. 接口成功即代表业务侧已经接听，并会向主叫发送 `callee_answered`。
 5. 被叫使用接口返回的 token 调用 `TiRtcConnect(caller_id, token)`。
@@ -54,10 +67,13 @@
 ## 5. 结束与异常补偿
 
 - 主叫未接通时取消：`POST /v1/call/cancel`。
-- 被叫拒接：`POST /v1/call/reject`，`reason` 只使用 `busy` 或 `decline`。
+- 被叫拒接：先停止本地铃声，再调用 `POST /v1/call/reject`；`reason` 只使用 `busy` 或
+  `decline`。
 - 已接听或 P2P 建连失败：`POST /v1/call/hangup`，`reason` 只使用 `hangup` 或 `p2p_error`。
 - 通话内主动挂断：先尽量发送 P2P 命令 `0x2001`，再断开连接并异步清理云端房间。
 - 收到 `0x2001` 或 MQTT `room_cancel`：清理本地房间状态并断开 P2P，TiRTC SDK 回到常驻监听状态。
+- `room_cancel` 命中待接来电、用户直接挂断待接来电或设备身份重置时也会停止铃声；铃声
+  状态不能跨到下一次呼叫。
 - 收到共享 RTC 命令 `0x2000` 时先按会话所有者分流；属于微信观察者的命令不会被普通
   设备呼叫状态机消费。
 - `callee_answered` 只表示对端开始 P2P 连接，不等于媒体已经可用；真正进入通话以匹配的 `0x2000` 为准。
@@ -79,6 +95,7 @@ stage=in_call role=caller ... cmd=0x2000
 
 ```text
 stage=incoming_received ...
+call_ringtone: ringtone started ... stack=PSRAM
 stage=rtc_ready_wait_done ... ret=ESP_OK
 stage=token_request_done ... path=/v1/call/device/info ret=ESP_OK
 stage=p2p_connect_submitted ... ret=ESP_OK
@@ -86,8 +103,22 @@ stage=connected_notice_tx ... cmd=0x2000 ret=ESP_OK
 stage=in_call ... role=callee
 ```
 
+用户点击接听、拒接，或主叫取消后，应看到 `call_ringtone: ringtone stopped`。如果铃声停止
+失败，先保留 `stage=ringtone_stop_failed` 的 reason、room 和返回值，不用重启设备掩盖状态。
+
 收到视频来电时，应看到 `reason=unsupported_call_type` 并由设备拒绝，不能继续创建本地视频
 资源。看到 `40305` 时，本次日志中不应再出现 `/v1/call/request`，并且 `CALL_FLOW` 应保持
 `active=0 role=none state=idle room=-`。如果仍然创建房间，说明业务建房和 RTC ready 门禁
 没有生效。构建成功只能证明代码层通过，身份修复、连接、音频和二次呼叫仍需以服务端状态
 及两台真机日志为准。
+
+## 7. 已知音频边界
+
+相同功能代码在版本号收口前完成过双板媒体包核对：约 14 秒、每端约 690 包，线上为
+`media=2`、`flags=0`、`160 bytes / 20 ms`，发送失败、丢弃和下溢计数为 0；A-law 也完成
+20,000 次编解码自检。这些结果支持格式与 Codec 路径核对，不代表 `1.9.5` 最终 Release
+固件已经完成真机回归。
+
+当前 Web IPC 和设备互呼的人耳试听仍可感知轻微“沙沙电流声”。现有证据已经排除明显的
+线上格式不一致和 A-law 自检不稳定，但底噪根因尚未证实。本版本不宣称问题已经解决；后续
+排查要同时保留主被叫角色、业务路径、音量、AEC/缓冲统计和主观听感。

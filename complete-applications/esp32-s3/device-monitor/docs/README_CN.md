@@ -2,6 +2,11 @@
 
 第一次使用请从“用户路径”开始。需要开发或排障时，再进入“开发路径”和“协议路径”。
 
+当前公开版本是 `1.9.5`。网络测试会分别显示平均时延、抖动和丢包率；普通设备来电增加
+本地铃声。服务发现和业务传输统一使用 HTTPS/MQTTS，应用与 TiRTC SDK 都校验证书链和
+hostname。Web IPC 和设备互呼仍可能听到轻微“沙沙电流声”，根因尚未闭环，音频专题保留了
+当前证据与排查边界。
+
 ## 用户路径
 
 | 文档 | 解决的问题 |
@@ -15,10 +20,10 @@
 
 | 文档 | 解决的问题 |
 | --- | --- |
-| [架构分层](architecture/layering.md) | UI、应用、服务、协议、驱动如何分层和持有资源 |
+| [架构分层](architecture/layering.md) | UI、应用、服务、协议、连接、驱动如何分层；网络指标和来电铃声由谁持有 |
 | [源码构建与配置](BUILD_AND_CONFIG_CN.md) | 环境版本、默认配置、干净构建、多地址网页烧录和构建排障 |
 | [OTA 版本规则](release/OTA_VERSIONING_CN.md) | 应用版本、公开 Tag、完整镜像与 OTA app 如何保持一致 |
-| [音频和媒体所有权](architecture/audio_media_ownership.md) | H5、AI、微信 VoIP、设备互呼如何共享音频；二维码扫描如何独立使用摄像头 |
+| [音频和媒体所有权](architecture/audio_media_ownership.md) | H5、AI、微信 VoIP、设备互呼如何共享音频；A-law、AEC、播放缓冲和已知底噪如何排查 |
 | [串口诊断 CLI](BUILD_AND_CONFIG_CN.md#7-串口诊断-cli) | 网络、Socket、RTC、媒体、AEC、呼叫和内存怎么分阶段排查 |
 | [版本信息](../VERSION.md) | 版本、源码快照、SDK、工具链和构建契约 |
 | [变更记录](../CHANGELOG.md) | 当前版本新增能力和兼容性说明 |

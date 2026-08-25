@@ -1,11 +1,47 @@
 # 版本变更记录
 
+## 2026.08.25：ESP32-S3 Device Monitor 1.9.5
+
+- 开发来源固定为 Tag `v1.9.5`、commit
+  `45db394cae399967a9c3b882d595cdecb80321be`、tree
+  `4a6760708d4fd2bdb973c4bc77d789d45f2bc2be`；公开代码提交为
+  `c27914eafab6f700cecf196da48987200cd54d37`。正式构建输入与该提交的 repository tree
+  `b0b93ddc0c82ae65130ae6dab17ff6ee6dbfc86a`、项目 tree
+  `9fa7f85ce92a0e5fcd27c4a36fabe02609191391` 完全一致。
+- 网络测试增加平均时延、相邻 RTT 平均抖动和丢包率三项结构化指标，并贯穿网络层、应用
+  快照、UI 和串口诊断。
+- 普通设备来电增加本地合成铃声；接听、拒接、取消、挂断和身份重置按状态停止，任务栈和
+  PCM 缓冲使用 PSRAM。
+- Web IPC、设备互呼和微信 VoIP 的设备上行统一核对为
+  `8 kHz / 16 bit / mono / G.711 A-law / 20 ms / 160 bytes`，显式 CALL gate 使用同一
+  A-law 契约。
+- 设备互呼独立增加约 `1.25%` 的有界播放速率微调；AEC 使用全双工高性能线性模式和 PSRAM
+  工作区，AEC 后增加 100 Hz 高通，并采用更保守的通话 AGC 噪声底线。
+- TiRTC SDK 以 active-connect `db7290f` 为功能基础，并加入 `13e34c3` 的 HTTPS 服务端认证
+  修复。SDK 自有 HTTP 客户端强制验证证书链和 hostname，不回退明文 HTTP。
+- 服务发现、业务 HTTP 和 TiRTC 入口只接受 HTTPS，设备 MQTT 只接受 MQTTS；不安全发现
+  结果会被拒绝并报错，不覆盖安全兜底。微信主动呼叫保持体验版 `wx_version_type=2`。
+- 公开 `libTiRTC.a` 为 `2,125,366` bytes，SHA-256 为
+  `83556eeee0c6cae45961899a4c5d1255a5d0d33f8e636104a946ce41ff3e20d7`。`--strip-debug`
+  只移除 SDK 内部调试路径，BuildInfo 保持 `v2.3.0-db7290f`。
+- 已从与公开代码提交 tree 完全一致的隔离候选执行一次禁用 ccache 的干净构建，完成
+  `1767/1767`，app 为
+  `7,608,608` bytes、SHA-256 `51a7599942f06556e33ef4820499885d6213ff15fce0f3ed2f11e38e44146503`、分区剩余
+  `190,176` bytes（`2.44%`）；完整镜像和 OTA app
+  只通过 `esp32-s3-device-monitor-v1.9.5` Release 分发。
+- 正式构建确认 app 分区余量为 `190,176` bytes（`2.44%`），属于明确容量风险；`1.9.0`
+  的二进制、大小和哈希没有复用。
+- 当前 Web IPC 和设备互呼的人耳试听仍可感知轻微“沙沙电流声”。线上格式与 A-law 自检未见
+  异常，但底噪根因尚未证实，本版本不宣称该问题已经解决。
+- SDK TLS 修复已核对到源码、对象、归档和 APP 链接。目标板上的有效证书成功、错误证书或
+  错误主机名失败，以及正式固件烧录、联网、完整业务、音频主观效果和长稳仍按独立证据记录。
+
 ## 2026.08.24：ESP32-S3 Device Monitor 1.9.0
 
 - 开发来源固定为 Tag `v1.9.0`、commit
   `a64422b0efdebe6c303370effafd52bbf51593d1`、tree
   `b29d4080a43db0a2b8f2e35f095c5c45f3c1f4c7`。
-- TiRTC SDK 升级到官方 `2.3.0 mini`；`libTiRTC.a` 为 `8,079,682` bytes，SHA-256 为
+- TiRTC SDK 升级到官方 `2.3.0 mini`；`libTiRTC.a` 为 `8,081,578` bytes，SHA-256 为
   `43b06d1da421c7d24cc7fdb1385d600ecdffbfd2d3801f7faf0c540fb5cdbaa2`。
 - 完善 S3 音频/AEC、媒体抖动缓冲与完整性统计、TiRTC 连接与任务栈策略，以及 Web IPC、
   小钛、微信 VoIP 和设备互呼的生命周期交接。

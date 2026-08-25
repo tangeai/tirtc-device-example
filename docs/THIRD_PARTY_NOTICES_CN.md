@@ -7,10 +7,13 @@
 - `components/tirtc_sdk/` 或 `sdk/` 中的 TiRTC SDK 头文件与目标平台静态库。
 - 第三方字体、图像、音视频测试素材和生成资源。
 
-ESP32-S3 Device Monitor `1.9.0` 使用 TiRTC SDK `2.3.0 mini` 官方包。SDK BuildInfo 为
-`v2.3.0-1baf7c95`，静态库大小为 `8,079,682` bytes，SHA-256 为
-`43b06d1da421c7d24cc7fdb1385d600ecdffbfd2d3801f7faf0c540fb5cdbaa2`。该项目同时使用
-TGTRP BuildInfo `tagv1.5.11-41c9a257` 和包元数据中的 TGWebRTC ref
+ESP32-S3 Device Monitor `1.9.5` 使用 TiRTC SDK `2.3.0 mini` 官方基础包及项目修复快照。SDK BuildInfo 为
+`v2.3.0-db7290f`，静态库大小为 `2,125,366` bytes，SHA-256 为
+`83556eeee0c6cae45961899a4c5d1255a5d0d33f8e636104a946ce41ff3e20d7`。该快照以
+active-connect `db7290f2404b15f2ab8567dd221853ca2ec054ab` 为功能基础，并包含
+`13e34c3e3e3dc6776be4713b5c1e3c17bd282766` 的 HTTPS 服务端认证修复。公开归档使用
+`--strip-debug` 移除 SDK 内部源码路径和行号级调试信息，BuildInfo、成员、全局符号以及运行
+代码和只读数据契约保持一致。该项目同时使用 TGTRP BuildInfo `tagv1.5.11-41c9a257` 和包元数据中的 TGWebRTC ref
 `tag.v1.5.12 / 41c9a25768ffe265c07f17ef78a6439607b19364`。完整身份以项目
 `components/tirtc_sdk/VERSION.md`、`VERSION.md`、`SOURCE_PROVENANCE.md` 和 Release
 manifest 为准；SDK 头文件和静态库保留供应方条款，不因本仓 MIT License 改为 MIT。

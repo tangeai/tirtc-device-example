@@ -1,6 +1,6 @@
 # 音频和媒体所有权
 
-`1.9.0` 的 RTC 产品能力是双向音频。Web IPC、小钛、微信 VoIP 和设备互呼共享同一套物理
+`1.9.5` 的 RTC 产品能力是双向音频。Web IPC、小钛、微信 VoIP 和设备互呼共享同一套物理
 麦克风、扬声器和 TiRTC 运行时，但每条业务拥有自己的会话状态、流号、队列和退出路径。
 摄像头不属于 RTC 媒体资源，只由二维码扫描流程短时申请。
 
@@ -11,7 +11,7 @@
 | Web IPC | TiRTC built-in media | 主麦克风 callback | local audio stream | 进入查看页必须恢复 built-in owner，不继承 AI/VoIP 外部音频状态 |
 | 小钛 | AI Chat 服务 | 麦克风 observer | WHIP command/audio frame | `start_session` 成功后才上行；退出按 generation 取消旧回调 |
 | 微信 VoIP | WeChat VoIP 服务 | 麦克风 observer | external audio | 入会后标记 external audio；挂断、失败和超时都要解除 |
-| 设备互呼 | Device Call + TiRTC session | 主麦克风 callback | local audio stream | 只支持 `call_type=audio`；房间和 `0x2000` 确认后启动媒体 |
+| 设备互呼 | Device Call + TiRTC session | 主麦克风 callback | local audio stream | 只支持 `call_type=audio`；显式 CALL gate 使用 A-law；房间和 `0x2000` 确认后启动媒体 |
 
 `APP_PRODUCT_RTC_VIDEO_ENABLED=0` 同时约束本地视频发送、远端视频订阅、关键帧请求和相关
 任务创建。任何业务都不能绕过产品能力在自己的服务层重新开启视频。
@@ -32,6 +32,39 @@ TiRTC 下行 -> 格式校验/解码 -> 抖动缓冲 -> 播放队列 -> 扬声器
 - 媒体完整性统计分别记录 checksum failure、missing、duplicate 和 reordered，避免只用“有声”
   或“无声”猜测网络与播放问题。
 - 大块抖动队列和非 DMA 音频存储优先放入 PSRAM；DMA、同步对象和实时控制保留 internal RAM。
+
+### 设备上行线格式
+
+| 业务 | 线上格式 | 帧长 |
+| --- | --- | --- |
+| Web IPC | `8 kHz / 16 bit / mono / G.711 A-law` | `20 ms / 160 bytes` |
+| 设备互呼 | `8 kHz / 16 bit / mono / G.711 A-law` | `20 ms / 160 bytes` |
+| 微信 VoIP | `8 kHz / 16 bit / mono / G.711 A-law` | `20 ms / 160 bytes` |
+
+`SUBSCRIBED` 是 built-in microphone 路径，`CALL` 是显式采集发送路径。二者在应用选择 A-law
+后必须走同一个编码器和媒体类型，不能因为业务入口不同而让其中一条退回 PCM。
+
+### Device Call 专用播放配置
+
+设备互呼使用独立的 `MEDIA_SINK_AUDIO_PROFILE_DEVICE_CALL`：
+
+- 起播和目标水位由 PSRAM PCM 环形缓冲承载；轻微乱序、回调成批到达和时间戳缺口分别
+  统计，缺失段只做有界静音补偿，不重复整段语音制造音调噪声。
+- 水位低于目标区间时，每个 20 ms 输出周期少消费 4 个 16 kHz PCM 帧；水位高于目标区间
+  时多消费 4 帧，约为 `1.25%`。进入与退出使用滞回，干净网络回到 `1.0x`。
+- 扬声器仍收到固定 20 ms 数据。速率微调只改变从环形缓冲取出的源帧数，不改变 TiRTC 包、
+  时间戳或其他业务的播放时钟。
+- AEC 使用全双工高性能线性模式，工作区申请在 PSRAM。AEC 输出后增加 100 Hz 一阶高通，
+  通话 AGC 的静态噪声底线提高到已测板端残留之上；噪声门保持关闭。
+
+这些策略用于把缓冲水位拉回稳定区间，并降低对静态残留的继续放大。它们不能证明网络没有
+丢包，也不能单独证明主观音质已经达到目标。
+
+### 来电铃声所有权
+
+普通设备 `call_incoming` 到达后，由 Device Call 服务启动本地合成铃声。铃声任务栈和 PCM
+缓冲使用 PSRAM；接听、拒接、对端取消、用户挂断或身份重置时停止。铃声不属于远端媒体流，
+不能进入 AEC/通话 profile 后继续播放，也不能跨会话留下后台任务。
 
 ## 生命周期门禁
 
@@ -63,6 +96,7 @@ TiRTC 下行 -> 格式校验/解码 -> 抖动缓冲 -> 播放队列 -> 扬声器
 | 下行 | remote packet、格式和完整性统计 | 区分没收到、格式不符、丢失或乱序 |
 | 缓冲 | jitter depth、trim、queue drop、play drop | 区分网络抖动和本地背压 |
 | 播放 | speaker level、播放 callback、AEC reference | 确认扬声器和远端参考同步 |
+| 来电铃声 | `call_ringtone` start/stop、CALL_FLOW 状态 | 确认铃声只存在于待接阶段并在终态停止 |
 
 串口可先使用：
 
@@ -85,6 +119,7 @@ CLI 默认开启，但它只展示真实状态，不会绕过状态机。量产�
 - `main/protocols/tirtc/tirtc_session.c`：media profile、built-in/external audio、发送与订阅。
 - `main/services/rtc_media_bridge.c`：远端音频格式、解码和本地播放桥接。
 - `main/services/media_sink.c`：抖动缓冲、完整性统计和播放队列。
+- `main/services/device_call/device_call_ringtone.c`：普通设备来电铃声与停止边界。
 - `main/drivers/audio/audio_echo_cancel.c`：AEC 处理和诊断。
 - `main/debug/serial_net_cli/serial_net_cli.c`：只读状态和受控诊断命令。
 
@@ -93,3 +128,7 @@ CLI 默认开启，但它只展示真实状态，不会绕过状态机。量产�
 静态检查可以证明 owner、产品能力和函数调用关系一致；构建可以证明代码能够编译链接。真实
 回声抑制、弱网听感、双向通话、重复切换和长稳必须在目标板上分别验证，并保留对应日志和
 主观听感记录。
+
+当前 Web IPC 和设备互呼的人耳试听仍可感知轻微“沙沙电流声”。线上格式核对与 20,000 次
+A-law 编解码自检没有发现异常，说明明显的格式不一致和 Codec 自检不稳定不是现有首要证据；
+底噪根因仍未证实，`1.9.5` 不宣称已经修复。
