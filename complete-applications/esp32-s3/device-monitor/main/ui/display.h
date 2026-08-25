@@ -23,6 +23,7 @@
 #define DISPLAY_CALL_CONTACT_DEVICE_ID_LENGTH 12
 #define DISPLAY_CALL_CONTACT_DEVICE_ID_MAX 64
 #define DISPLAY_CALL_CONTACT_REMARK_MAX 64
+#define DISPLAY_CALL_STATUS_MESSAGE_MAX 96
 #define DISPLAY_WECHAT_CONTACT_MAX  4
 #define DISPLAY_WECHAT_OPEN_ID_MAX  96
 #define DISPLAY_WECHAT_REMARK_MAX   ((64 * 4) + 1)
@@ -68,6 +69,12 @@ typedef enum {
     DISPLAY_CALL_STATE_IN_CALL,
     DISPLAY_CALL_STATE_ERROR,
 } display_call_state_t;
+
+typedef enum {
+    DISPLAY_CALL_ROLE_NONE = 0,
+    DISPLAY_CALL_ROLE_CALLER,
+    DISPLAY_CALL_ROLE_CALLEE,
+} display_call_role_t;
 
 typedef enum {
     DISPLAY_DEVICE_BINDING_STATE_DISABLED = 0,
@@ -183,6 +190,10 @@ typedef struct {
     char binding_code[DISPLAY_BINDING_CODE_MAX_LEN];
     char binding_message[DISPLAY_BINDING_MESSAGE_MAX_LEN];
     display_call_state_t call_state;
+    display_call_role_t call_role;
+    int call_last_error;
+    char call_peer_device_id[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX];
+    char call_message[DISPLAY_CALL_STATUS_MESSAGE_MAX];
     bool call_contacts_ready;
     bool call_contacts_refreshing;
     int call_contacts_last_error;
@@ -283,10 +294,8 @@ typedef struct {
     display_uuid_update_cb_t on_set_device_uuid;
     display_simple_action_cb_t on_wifi_scan;
     display_simple_action_cb_t on_ping_test;
-    display_simple_action_cb_t on_start_rtc;
     display_simple_action_cb_t on_disconnect_rtc;
     display_simple_action_cb_t on_hangup_call;
-    display_simple_action_cb_t on_start_sender_audio_test;
     display_simple_action_cb_t on_start_ota;
     display_simple_action_cb_t on_restart_for_ota;
     display_toggle_action_cb_t on_set_local_audio_enabled;

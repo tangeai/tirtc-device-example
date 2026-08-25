@@ -17,6 +17,7 @@ app_control_state_t app_state_get_control(void);
 app_id_t app_get_active_app(void);
 bool app_is_door_open(void);
 esp_err_t app_configure_tirtc(void);
+esp_err_t app_prepare_call_session_resources(void);
 esp_err_t app_acquire_call_session_resources(void);
 void app_release_call_session_resources(void);
 esp_err_t app_suspend_call_scan_resources(void);

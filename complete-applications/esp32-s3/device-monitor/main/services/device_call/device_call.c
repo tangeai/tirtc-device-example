@@ -40,12 +40,7 @@ static const char *CALL_FLOW_TAG = "CALL_FLOW";
 #define DEVICE_CALL_CONNECT_TIMEOUT_MS     40000U
 #define DEVICE_CALL_POLL_INTERVAL_MS       100U
 #define DEVICE_CALL_ONLINE_READY_TIMEOUT_MS 30000U
-
-typedef enum {
-    DEVICE_CALL_ROLE_NONE = 0,
-    DEVICE_CALL_ROLE_CALLER,
-    DEVICE_CALL_ROLE_CALLEE,
-} device_call_role_t;
+#define DEVICE_CALL_BACKGROUND_IDLE_TIMEOUT_MS 12000U
 
 typedef enum {
     DEVICE_CALL_ACTION_CANCEL = 0,
@@ -667,22 +662,81 @@ static bool device_call_transport_is_connected(void)
     return stats.active_connection;
 }
 
+static esp_err_t device_call_wait_for_background_idle(void)
+{
+    uint32_t elapsed_ms = 0;
+    bool busy = false;
+
+    do {
+        device_call_lock();
+        busy = s_call.room_recovery_running ||
+               s_call.contacts_refresh_running ||
+               s_call.contact_mutation_running;
+        device_call_unlock();
+        if (!busy) {
+            if (elapsed_ms != 0U) {
+                ESP_LOGI(CALL_FLOW_TAG,
+                         "stage=background_idle_wait_done elapsed_ms=%u ret=ESP_OK",
+                         (unsigned)elapsed_ms);
+            }
+            return ESP_OK;
+        }
+        if (elapsed_ms == 0U) {
+            ESP_LOGI(CALL_FLOW_TAG,
+                     "stage=background_idle_wait_begin timeout_ms=%u",
+                     (unsigned)DEVICE_CALL_BACKGROUND_IDLE_TIMEOUT_MS);
+        }
+        vTaskDelay(pdMS_TO_TICKS(DEVICE_CALL_POLL_INTERVAL_MS));
+        elapsed_ms += DEVICE_CALL_POLL_INTERVAL_MS;
+    } while (elapsed_ms < DEVICE_CALL_BACKGROUND_IDLE_TIMEOUT_MS);
+
+    ESP_LOGW(CALL_FLOW_TAG,
+             "stage=background_idle_wait_done elapsed_ms=%u ret=ESP_ERR_TIMEOUT",
+             (unsigned)elapsed_ms);
+    return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t device_call_wait_for_online(uint32_t generation)
+{
+    uint32_t elapsed_ms = 0;
+
+    ESP_LOGI(CALL_FLOW_TAG,
+             "stage=online_ready_wait_begin gen=%lu timeout_ms=%u",
+             (unsigned long)generation,
+             (unsigned)DEVICE_CALL_ONLINE_READY_TIMEOUT_MS);
+    while (elapsed_ms < DEVICE_CALL_ONLINE_READY_TIMEOUT_MS) {
+        if (!device_call_generation_matches(generation)) {
+            ESP_LOGW(CALL_FLOW_TAG,
+                     "stage=online_ready_wait_done gen=%lu ret=%s reason=generation_changed",
+                     (unsigned long)generation,
+                     esp_err_to_name(ESP_ERR_INVALID_STATE));
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (device_online_is_online()) {
+            ESP_LOGI(CALL_FLOW_TAG,
+                     "stage=online_ready_wait_done gen=%lu elapsed_ms=%u ret=ESP_OK",
+                     (unsigned long)generation,
+                     (unsigned)elapsed_ms);
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(DEVICE_CALL_POLL_INTERVAL_MS));
+        elapsed_ms += DEVICE_CALL_POLL_INTERVAL_MS;
+    }
+    ESP_LOGW(CALL_FLOW_TAG,
+             "stage=online_ready_wait_done gen=%lu elapsed_ms=%u ret=ESP_ERR_TIMEOUT",
+             (unsigned long)generation,
+             (unsigned)elapsed_ms);
+    return ESP_ERR_TIMEOUT;
+}
+
 static esp_err_t device_call_wait_for_rtc_ready(uint32_t generation)
 {
     ESP_LOGI(CALL_FLOW_TAG,
              "stage=rtc_ready_wait_begin gen=%lu timeout_ms=%u",
              (unsigned long)generation,
              (unsigned)DEVICE_CALL_RTC_READY_TIMEOUT_MS);
-    esp_err_t ret = rtc_transport_prepare_sdk();
-    if (ret != ESP_OK) {
-        ESP_LOGW(CALL_FLOW_TAG,
-                 "stage=rtc_ready_wait_done gen=%lu ret=%s reason=prepare_sdk",
-                 (unsigned long)generation,
-                 esp_err_to_name(ret));
-        return ret;
-    }
-
     uint32_t elapsed_ms = 0;
+    uint32_t next_prepare_ms = 0;
     while (elapsed_ms < DEVICE_CALL_RTC_READY_TIMEOUT_MS) {
         rtc_transport_stats_t stats = {0};
 
@@ -710,6 +764,18 @@ static esp_err_t device_call_wait_for_rtc_ready(uint32_t generation)
                      (unsigned)elapsed_ms,
                      (unsigned)stats.state);
             return ESP_FAIL;
+        }
+        if (elapsed_ms >= next_prepare_ms) {
+            esp_err_t prepare_ret = rtc_transport_prepare_sdk();
+            if (prepare_ret != ESP_OK && prepare_ret != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(CALL_FLOW_TAG,
+                         "stage=rtc_ready_wait_done gen=%lu elapsed_ms=%u ret=%s reason=prepare_sdk",
+                         (unsigned long)generation,
+                         (unsigned)elapsed_ms,
+                         esp_err_to_name(prepare_ret));
+                return prepare_ret;
+            }
+            next_prepare_ms = elapsed_ms + 500U;
         }
         vTaskDelay(pdMS_TO_TICKS(DEVICE_CALL_POLL_INTERVAL_MS));
         elapsed_ms += DEVICE_CALL_POLL_INTERVAL_MS;
@@ -1491,6 +1557,14 @@ static void device_call_request_task(void *arg)
              (unsigned long)ctx->generation,
              ctx->target_device_id,
              ctx->call_type);
+
+    ret = device_call_wait_for_online(ctx->generation);
+    if (ret != ESP_OK) {
+        device_call_request_failed(ctx, ret, "device online not ready");
+        free(ctx);
+        platform_task_reaper_delete_current_with_caps(TAG);
+        return;
+    }
 
     /*
      * The caller is the TiRTC listener.  Creating the cloud room before the
@@ -3157,7 +3231,12 @@ esp_err_t device_call_reconcile_room_async(void)
     uint32_t generation = 0;
 
     device_call_lock();
-    if (!s_call.initialized || !s_call.enabled || !s_call.ingress_enabled) {
+    if (!s_call.initialized || !s_call.enabled || !s_call.ingress_enabled ||
+        s_call.request_running || s_call.accept_running ||
+        s_call.state == DEVICE_CALL_STATE_OUTGOING ||
+        s_call.state == DEVICE_CALL_STATE_INCOMING ||
+        s_call.state == DEVICE_CALL_STATE_CONNECTING ||
+        s_call.state == DEVICE_CALL_STATE_IN_CALL) {
         device_call_unlock();
         return ESP_ERR_INVALID_STATE;
     }
@@ -3202,6 +3281,7 @@ esp_err_t device_call_start(void)
     bool register_listener = false;
     bool register_observer = false;
     bool mqtt_connected = false;
+    bool outgoing_request_pending = false;
     uint32_t start_generation = 0;
 
     device_call_lock();
@@ -3256,12 +3336,13 @@ esp_err_t device_call_start(void)
         return ESP_ERR_INVALID_STATE;
     }
     s_call.ingress_enabled = true;
+    outgoing_request_pending = s_call.request_running;
     device_call_unlock();
 
     mqtt_connected = thing_mqtt_client_is_connected();
     esp_err_t room_ret = ESP_ERR_INVALID_STATE;
     esp_err_t contacts_ret = ESP_ERR_INVALID_STATE;
-    if (mqtt_connected) {
+    if (mqtt_connected && !outgoing_request_pending) {
         room_ret = device_call_reconcile_room_async();
         if (room_ret != ESP_OK) {
             ESP_LOGW(TAG, "call room recovery not scheduled: %s", esp_err_to_name(room_ret));
@@ -3271,6 +3352,12 @@ esp_err_t device_call_start(void)
         if (contacts_ret != ESP_OK) {
             ESP_LOGW(TAG, "initial device contact refresh not scheduled: %s", esp_err_to_name(contacts_ret));
         }
+    } else if (mqtt_connected) {
+        /* A call queued before formal MQTT comes online already owns the next
+         * HTTPS operation. Avoid racing it with cold-start room/contact HTTP.
+         * The request path still closes a stale room on service code 40202. */
+        ESP_LOGI(CALL_FLOW_TAG,
+                 "stage=service_bootstrap_deferred reason=outgoing_call_pending");
     } else {
         ESP_LOGI(TAG, "device call recovery deferred until formal MQTT is online");
     }
@@ -3363,13 +3450,6 @@ esp_err_t device_call_request_with_type(const char *target_device_id, const char
     if (strlen(target_device_id) >= sizeof(ctx->target_device_id)) {
         return ESP_ERR_INVALID_SIZE;
     }
-    if (!device_online_is_online()) {
-        ESP_LOGW(CALL_FLOW_TAG,
-                 "stage=request_rejected peer=%s reason=device_offline",
-                 target_device_id);
-        return ESP_ERR_INVALID_STATE;
-    }
-
     device_call_lock();
     service_hooks_ready = s_call.initialized && s_call.enabled && s_call.ingress_enabled &&
                            s_call.listener_registered && s_call.observer_registered;
@@ -3386,6 +3466,15 @@ esp_err_t device_call_request_with_type(const char *target_device_id, const char
                      esp_err_to_name(start_ret));
             return start_ret;
         }
+    }
+
+    esp_err_t background_ret = device_call_wait_for_background_idle();
+    if (background_ret != ESP_OK) {
+        ESP_LOGW(CALL_FLOW_TAG,
+                 "stage=request_rejected peer=%s reason=background_busy ret=%s",
+                 target_device_id,
+                 esp_err_to_name(background_ret));
+        return background_ret;
     }
 
     ctx = calloc(1, sizeof(*ctx));
@@ -3731,6 +3820,7 @@ void device_call_get_snapshot(device_call_snapshot_t *snapshot)
     memset(snapshot, 0, sizeof(*snapshot));
     device_call_lock();
     snapshot->state = s_call.state;
+    snapshot->role = s_call.role;
     snapshot->pending_incoming = s_call.pending_incoming;
     strlcpy(snapshot->room_id, s_call.room_id, sizeof(snapshot->room_id));
     strlcpy(snapshot->peer_device_id, s_call.peer_device_id, sizeof(snapshot->peer_device_id));
@@ -3746,7 +3836,12 @@ esp_err_t device_call_refresh_contacts_async(void)
     uint32_t generation = 0;
 
     device_call_lock();
-    if (!s_call.initialized || !s_call.enabled || !s_call.ingress_enabled) {
+    if (!s_call.initialized || !s_call.enabled || !s_call.ingress_enabled ||
+        s_call.request_running || s_call.accept_running ||
+        s_call.state == DEVICE_CALL_STATE_OUTGOING ||
+        s_call.state == DEVICE_CALL_STATE_INCOMING ||
+        s_call.state == DEVICE_CALL_STATE_CONNECTING ||
+        s_call.state == DEVICE_CALL_STATE_IN_CALL) {
         device_call_unlock();
         return ESP_ERR_INVALID_STATE;
     }

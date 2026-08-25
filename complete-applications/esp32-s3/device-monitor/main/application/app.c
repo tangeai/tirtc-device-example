@@ -2909,7 +2909,7 @@ static esp_err_t app_start_app_services(app_id_t app_id)
 	}
 }
 
-esp_err_t app_acquire_call_session_resources(void)
+esp_err_t app_prepare_call_session_resources(void)
 {
 	esp_err_t ret = ESP_OK;
 
@@ -2923,8 +2923,25 @@ esp_err_t app_acquire_call_session_resources(void)
 	}
 	ret = app_apply_call_audio_profile();
 	if (ret == ESP_OK) {
-		ret = app_prepare_rtc_after_time_sync("call-session");
+		return ESP_OK;
 	}
+
+	ESP_LOGW(TAG, "call audio prepare failed, releasing acquired resources: %s", esp_err_to_name(ret));
+	esp_err_t rollback_ret = app_switch_resources(app_resource_mask_for_app(APP_ID_CALL));
+	if (rollback_ret != ESP_OK) {
+		ESP_LOGW(TAG, "call audio resource rollback failed: %s", esp_err_to_name(rollback_ret));
+	}
+	return ret;
+}
+
+esp_err_t app_acquire_call_session_resources(void)
+{
+	esp_err_t ret = app_prepare_call_session_resources();
+
+	if (ret != ESP_OK) {
+		return ret;
+	}
+	ret = app_prepare_rtc_after_time_sync("call-session");
 	if (ret == ESP_OK) {
 		return ESP_OK;
 	}
@@ -3394,16 +3411,6 @@ esp_err_t app_start_ping_test(void)
 	return network_start_ping(target);
 }
 
-esp_err_t app_start_rtc(void)
-{
-	if (!network_is_connected()) {
-		return ESP_ERR_INVALID_STATE;
-	}
-
-	ESP_RETURN_ON_ERROR(app_prepare_rtc_after_time_sync("manual-start"), TAG, "prepare rtc failed");
-	return ESP_OK;
-}
-
 esp_err_t app_disconnect_rtc(void)
 {
 	esp_err_t ret = rtc_transport_disconnect();
@@ -3672,11 +3679,6 @@ esp_err_t app_set_rtc_server_env(app_rtc_server_env_t env)
 
 	app_request_rtc_reconfigure_after_settings_change("server");
 	return ESP_OK;
-}
-
-esp_err_t app_start_sender_audio_test(void)
-{
-	return sender_test_start(SENDER_TEST_MODE_AUDIO);
 }
 
 esp_err_t app_start_ota(void)

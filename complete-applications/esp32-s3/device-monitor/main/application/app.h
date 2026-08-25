@@ -25,6 +25,7 @@
 #define APP_CALL_CONTACT_DEVICE_ID_MAX 64
 #define APP_CALL_CONTACT_REMARK_MAX 64
 #define APP_CALL_CONTACT_CREATED_AT_MAX 48
+#define APP_CALL_STATUS_MESSAGE_MAX 96
 #define APP_WECHAT_CONTACT_MAX   4
 #define APP_WECHAT_OPEN_ID_MAX   96
 #define APP_WECHAT_REMARK_MAX    ((64 * 4) + 1)
@@ -210,9 +211,19 @@ typedef enum {
 	APP_CALL_STATE_ERROR,
 } app_call_state_t;
 
+typedef enum {
+	APP_CALL_ROLE_NONE = 0,
+	APP_CALL_ROLE_CALLER,
+	APP_CALL_ROLE_CALLEE,
+} app_call_role_t;
+
 typedef struct {
 	app_call_state_t state;
+	app_call_role_t role;
 	bool pending_incoming;
+	esp_err_t last_error;
+	char peer_device_id[APP_CALL_CONTACT_DEVICE_ID_MAX];
+	char message[APP_CALL_STATUS_MESSAGE_MAX];
 } app_call_snapshot_t;
 
 typedef struct {
@@ -298,7 +309,6 @@ esp_err_t app_request_wifi_scan(void);
 esp_err_t app_update_device_uuid(const char *uuid);
 esp_err_t app_start_ping_test(void);
 
-esp_err_t app_start_rtc(void);
 esp_err_t app_disconnect_rtc(void);
 esp_err_t app_update_rtc_config_field(app_rtc_config_field_t field, const char *value);
 esp_err_t app_update_rtc_device_credentials(const char *device_id, const char *device_secret);
@@ -343,7 +353,6 @@ esp_err_t app_wechat_hangup_call(void);
 esp_err_t app_wechat_accept_call(void);
 esp_err_t app_wechat_reject_call(void);
 
-esp_err_t app_start_sender_audio_test(void);
 esp_err_t app_start_ota(void);
 void app_restart_for_ota(void);
 

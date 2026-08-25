@@ -98,6 +98,7 @@ esp_err_t app_refresh_call_contacts(void)
 void app_get_call_contacts(app_call_contacts_snapshot_t *snapshot)
 {
 	device_call_contacts_snapshot_t cloud = {0};
+	device_call_snapshot_t call = {0};
 
 	if (snapshot == NULL) {
 		return;
@@ -105,6 +106,7 @@ void app_get_call_contacts(app_call_contacts_snapshot_t *snapshot)
 
 	memset(snapshot, 0, sizeof(*snapshot));
 	device_call_get_contacts_snapshot(&cloud);
+	device_call_get_snapshot(&call);
 	snapshot->ready = cloud.ready;
 	snapshot->refreshing = cloud.refreshing;
 	snapshot->last_error = cloud.last_error;
@@ -115,7 +117,8 @@ void app_get_call_contacts(app_call_contacts_snapshot_t *snapshot)
 	app_call_contacts_append_by_presence(snapshot, &cloud, false);
 	app_call_contacts_copy_pending(snapshot, &cloud);
 
-	if (!cloud.ready && !cloud.refreshing && device_online_is_online()) {
+	if (!cloud.ready && !cloud.refreshing && device_online_is_online() &&
+	    (call.state == DEVICE_CALL_STATE_IDLE || call.state == DEVICE_CALL_STATE_ERROR)) {
 		(void)device_call_refresh_contacts_async();
 	}
 }

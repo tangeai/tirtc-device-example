@@ -21,6 +21,12 @@ typedef enum {
     DEVICE_CALL_STATE_ERROR,
 } device_call_state_t;
 
+typedef enum {
+    DEVICE_CALL_ROLE_NONE = 0,
+    DEVICE_CALL_ROLE_CALLER,
+    DEVICE_CALL_ROLE_CALLEE,
+} device_call_role_t;
+
 typedef void (*device_call_session_ended_cb_t)(void *ctx);
 typedef bool (*device_call_incoming_allowed_cb_t)(void *ctx);
 
@@ -34,6 +40,7 @@ typedef struct {
 
 typedef struct {
     device_call_state_t state;
+    device_call_role_t role;
     bool pending_incoming;
     char room_id[96];
     char peer_device_id[128];

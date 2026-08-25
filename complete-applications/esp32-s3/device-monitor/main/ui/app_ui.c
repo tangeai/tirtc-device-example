@@ -248,6 +248,19 @@ static display_call_state_t app_ui_to_display_call_state(app_call_state_t state)
     }
 }
 
+static display_call_role_t app_ui_to_display_call_role(app_call_role_t role)
+{
+    switch (role) {
+    case APP_CALL_ROLE_CALLER:
+        return DISPLAY_CALL_ROLE_CALLER;
+    case APP_CALL_ROLE_CALLEE:
+        return DISPLAY_CALL_ROLE_CALLEE;
+    case APP_CALL_ROLE_NONE:
+    default:
+        return DISPLAY_CALL_ROLE_NONE;
+    }
+}
+
 static app_id_t app_ui_from_display_app(display_app_id_t app_id)
 {
     switch (app_id) {
@@ -291,12 +304,6 @@ static esp_err_t app_ui_on_ping_test(void *ctx)
     return app_start_ping_test();
 }
 
-static esp_err_t app_ui_on_start_rtc(void *ctx)
-{
-    (void)ctx;
-    return app_start_rtc();
-}
-
 static esp_err_t app_ui_on_disconnect_rtc(void *ctx)
 {
     (void)ctx;
@@ -307,12 +314,6 @@ static esp_err_t app_ui_on_hangup_call(void *ctx)
 {
     (void)ctx;
     return app_hangup_call();
-}
-
-static esp_err_t app_ui_on_start_sender_audio_test(void *ctx)
-{
-    (void)ctx;
-    return app_start_sender_audio_test();
 }
 
 static esp_err_t app_ui_on_set_local_audio_enabled(bool enabled, void *ctx)
@@ -342,7 +343,9 @@ static esp_err_t app_ui_on_call_contact(const char *device_id, void *ctx)
         return ret;
     }
 
-    return app_call_contact(device_id);
+    /* Audio/RTC cold start can take hundreds of milliseconds. Keep it on the
+     * application lifecycle task so the LVGL input path remains responsive. */
+    return app_request_call_contact(device_id);
 }
 
 static esp_err_t app_ui_on_add_call_contact(const char *device_id, void *ctx)
@@ -650,10 +653,8 @@ void app_ui_configure_display_actions(display_actions_t *actions)
         .on_set_device_uuid = app_ui_on_set_device_uuid,
         .on_wifi_scan = app_ui_on_wifi_scan,
         .on_ping_test = app_ui_on_ping_test,
-        .on_start_rtc = app_ui_on_start_rtc,
         .on_disconnect_rtc = app_ui_on_disconnect_rtc,
         .on_hangup_call = app_ui_on_hangup_call,
-        .on_start_sender_audio_test = app_ui_on_start_sender_audio_test,
         .on_start_ota = app_ui_on_start_ota,
         .on_restart_for_ota = app_ui_on_restart_for_ota,
         .on_set_local_audio_enabled = app_ui_on_set_local_audio_enabled,
@@ -813,6 +814,14 @@ void app_ui_fill_display_status(display_status_t *status, void *ctx)
             snapshot->binding.message,
             sizeof(status->binding_message));
     status->call_state = app_ui_to_display_call_state(snapshot->call.state);
+    status->call_role = app_ui_to_display_call_role(snapshot->call.role);
+    status->call_last_error = snapshot->call.last_error;
+    strlcpy(status->call_peer_device_id,
+            snapshot->call.peer_device_id,
+            sizeof(status->call_peer_device_id));
+    strlcpy(status->call_message,
+            snapshot->call.message,
+            sizeof(status->call_message));
     status->call_contacts_ready = snapshot->call_contacts.ready;
     status->call_contacts_refreshing = snapshot->call_contacts.refreshing;
     status->call_contacts_last_error = snapshot->call_contacts.last_error;

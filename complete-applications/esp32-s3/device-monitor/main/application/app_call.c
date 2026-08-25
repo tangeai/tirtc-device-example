@@ -10,6 +10,7 @@
 
 #include "app_internal.h"
 #include "device_call.h"
+#include "device_online.h"
 #include "network.h"
 #include "qr_scanner.h"
 #include "rtc_transport.h"
@@ -157,7 +158,16 @@ esp_err_t app_call_contact_with_type(const char *device_id, const char *call_typ
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_err_t resource_ret = app_acquire_call_session_resources();
+    /*
+     * A full-flash boot can expose the call UI before the formal MQTT identity
+     * and TiRTC listener finish their cold start. Prepare the audio path now so
+     * codec/AEC startup overlaps that wait, while device_call owns the bounded
+     * online/RTC wait and cancellation state from this point onward.
+     */
+    bool online_ready = device_online_is_online();
+    esp_err_t resource_ret = online_ready ?
+        app_acquire_call_session_resources() :
+        app_prepare_call_session_resources();
     if (resource_ret != ESP_OK) {
         ESP_LOGW(CALL_FLOW_TAG,
                  "stage=app_call_rejected peer=%s reason=resource_acquire ret=%s",
@@ -167,8 +177,9 @@ esp_err_t app_call_contact_with_type(const char *device_id, const char *call_typ
         return resource_ret;
     }
     ESP_LOGI(CALL_FLOW_TAG,
-             "stage=app_call_resources_ready peer=%s",
-             device_id);
+             "stage=app_call_resources_ready peer=%s online_ready=%d",
+             device_id,
+             online_ready ? 1 : 0);
     esp_err_t ret = device_call_request_with_type(device_id, call_type);
     if (ret != ESP_OK) {
         app_release_call_session_resources();

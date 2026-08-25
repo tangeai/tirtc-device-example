@@ -37,6 +37,19 @@ static app_call_state_t app_snapshot_call_state_from_service(device_call_state_t
 	}
 }
 
+static app_call_role_t app_snapshot_call_role_from_service(device_call_role_t role)
+{
+	switch (role) {
+	case DEVICE_CALL_ROLE_CALLER:
+		return APP_CALL_ROLE_CALLER;
+	case DEVICE_CALL_ROLE_CALLEE:
+		return APP_CALL_ROLE_CALLEE;
+	case DEVICE_CALL_ROLE_NONE:
+	default:
+		return APP_CALL_ROLE_NONE;
+	}
+}
+
 static ai_chat_snapshot_t *app_snapshot_ai_chat_buffer(void)
 {
 	static ai_chat_snapshot_t *ai;
@@ -132,7 +145,13 @@ static void app_snapshot_fill_rtc(app_snapshot_t *snapshot, app_control_state_t 
 	device_call_snapshot_t call = {0};
 	device_call_get_snapshot(&call);
 	snapshot->call.state = app_snapshot_call_state_from_service(call.state);
+	snapshot->call.role = app_snapshot_call_role_from_service(call.role);
 	snapshot->call.pending_incoming = call.pending_incoming;
+	snapshot->call.last_error = call.last_error;
+	strlcpy(snapshot->call.peer_device_id,
+		call.peer_device_id,
+		sizeof(snapshot->call.peer_device_id));
+	strlcpy(snapshot->call.message, call.message, sizeof(snapshot->call.message));
 	snapshot->rtc.connected = rtc.active_connection;
 	snapshot->rtc.call_active = rtc.call_active;
 	snapshot->rtc.incoming_call_pending = rtc.incoming_call_pending || call.pending_incoming;
