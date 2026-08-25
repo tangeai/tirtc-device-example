@@ -23,7 +23,7 @@
 
 - 显示和触摸由 `drivers/display/display_driver.*` 初始化，UI 只接收 LVGL 句柄。
 - 麦克风和扬声器由 `drivers/audio/audio_device.*` 暴露；底层 `audio.*` 负责 Codec/I2S PCM。
-- AEC 位于 `drivers/audio/audio_echo_cancel.*`。`1.9.5` 的设备互呼 profile 使用全双工
+- AEC 位于 `drivers/audio/audio_echo_cancel.*`。设备互呼 profile 使用全双工
   高性能线性模式，工作区从 PSRAM 申请；Web IPC、微信和小钛不能隐式继承这套参数。
 - 摄像头由 `drivers/camera/camera_driver.*` 暴露，只服务二维码扫描。
   `main/product_capabilities.h` 阻止 RTC 业务把它当作视频源。
@@ -55,6 +55,12 @@
 当前产品启用 RTC 音频并禁用 RTC 视频。Web IPC、小钛、微信 VoIP 和设备呼叫都必须在应用
 和协议边界遵守该能力；视频请求明确拒绝，不静默改成音频。
 
+设备呼叫的冷启动责任链也遵守分层：UI 只发起请求并显示应用快照；应用层准备音频并负责
+失败时释放资源；Device Call 服务等待正式上线和 TiRTC ready。正式在线最长等待 `30` 秒，
+RTC ready 最长等待 `50` 秒并每 `500 ms` 推进准备。发起呼叫前，呼叫请求最多等待 `12` 秒，
+让已经运行的房间恢复、联系人刷新或联系人变更任务结束；超时仍忙则拒绝本次呼叫。呼叫活跃
+后不再启动新的房间恢复或联系人刷新，结束后恢复。UI 不通过手动启动 RTC 或清状态绕过这条链路。
+
 ## RTC 与音频边界
 
 应用和调试代码使用 `rtc_transport.*`。TiRTC connection handle、command word、WHIP 请求和
@@ -64,7 +70,7 @@ Web IPC、设备呼叫和微信 VoIP 的设备上行统一使用
 `8 kHz / 16 bit / mono / G.711 A-law / 20 ms / 160 bytes`。协议层负责把 built-in
 microphone 与显式 CALL gate 映射到同一线上格式；UI 和业务层不参与编码。
 
-远端音频由 `services/media_sink.c` 按当前业务 profile 处理。`1.9.5` 的有界 `1.25%` 播放
+远端音频由 `services/media_sink.c` 按当前业务 profile 处理。有界 `1.25%` 播放
 速率微调只属于 Device Call；Web IPC、微信和小钛保持各自缓冲策略。页面不能为了让声音暂时
 连续而自行调队列、补帧或清状态。
 

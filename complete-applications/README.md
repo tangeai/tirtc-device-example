@@ -13,15 +13,15 @@
 
 | 平台 | 项目 | 版本 | 入口 |
 | --- | --- | --- | --- |
-| ESP32-S3 | Device Monitor | `1.9.5` | [README](esp32-s3/device-monitor/README.md) |
+| ESP32-S3 | Device Monitor | `1.9.6` | [README](esp32-s3/device-monitor/README.md) |
 | ESP32-P4 | Device App | `1.3.2` | [README](esp32-p4/device-monitor/README.md) |
 | G32S10X | Device Monitor | `0.1.1` | [README](g32s10x/device-monitor/README.md) |
 
 ESP32-P4 Device App `1.3.2` 提供源码和 `0x0` 完整镜像。所有正式构建产物只通过
 [GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases) 分发，不进入 Git 历史。
 
-ESP32-S3 Device Monitor `1.9.5` 是带屏双向音频设备应用：Web IPC、小钛、微信 VoIP 和
+ESP32-S3 Device Monitor `1.9.6` 是带屏双向音频设备应用：Web IPC、小钛、微信 VoIP 和
 设备互呼使用真实麦克风与扬声器，摄像头只用于二维码扫描。它使用 TiRTC SDK
-`2.3.0 mini`，增加网络质量三项指标和设备来电铃声；服务发现、业务 HTTP、设备 MQTT 和
-TiRTC HTTPS 均使用认证传输。Release 提供 `0x0` 完整镜像与 OTA app。
+`2.3.0 mini`，改善冷启动呼叫准备、呼叫状态、联系人名称输入和音量触摸反馈；服务发现、
+业务 HTTP、设备 MQTT 和 TiRTC HTTPS 均使用认证传输。Release 提供 `0x0` 完整镜像与 OTA app。
 当前 Web IPC 和设备互呼仍可能听到轻微“沙沙电流声”，根因尚未闭环，详见项目 README。

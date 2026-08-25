@@ -7,7 +7,7 @@
 - `components/tirtc_sdk/` 或 `sdk/` 中的 TiRTC SDK 头文件与目标平台静态库。
 - 第三方字体、图像、音视频测试素材和生成资源。
 
-ESP32-S3 Device Monitor `1.9.5` 使用 TiRTC SDK `2.3.0 mini` 官方基础包及项目修复快照。SDK BuildInfo 为
+ESP32-S3 Device Monitor `1.9.6` 继续使用 TiRTC SDK `2.3.0 mini` 官方基础包及项目修复快照。SDK BuildInfo 为
 `v2.3.0-db7290f`，静态库大小为 `2,125,366` bytes，SHA-256 为
 `83556eeee0c6cae45961899a4c5d1255a5d0d33f8e636104a946ce41ff3e20d7`。该快照以
 active-connect `db7290f2404b15f2ab8567dd221853ca2ec054ab` 为功能基础，并包含

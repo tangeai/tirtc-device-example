@@ -46,7 +46,7 @@ Release，不再用日期批次同时代表整仓内容。当前版本和下载�
 | 文档 | 版本 | TiRTC SDK | 解决的问题 |
 | --- | --- | --- | --- |
 | [完整应用总览](../complete-applications/README.md) | - | - | 选择目标开发板 |
-| [ESP32-S3 Device Monitor](../complete-applications/esp32-s3/device-monitor/README.md) | `1.9.5` | `2.3.0 mini` | 绑定、H5 双向音频、网络质量、小钛、微信、设备音频呼叫、二维码扫描和 OTA |
+| [ESP32-S3 Device Monitor](../complete-applications/esp32-s3/device-monitor/README.md) | `1.9.6` | `2.3.0 mini` | 绑定、H5 双向音频、冷启动呼叫、联系人键盘、小钛、微信、二维码扫描和 OTA |
 | [ESP32-P4 Device App](../complete-applications/esp32-p4/device-monitor/README.md) | `1.3.2` | `2.3.0` 定制兼容快照 | Hosted 网络、P4 媒体链路和完整业务 |
 | [G32S10X Device Monitor](../complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | G32S10X 完整设备能力与君正平台适配 |
 | [固件下载与校验](RELEASES_CN.md) | - | - | Release 下载、烧录入口和一致性校验 |

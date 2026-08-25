@@ -8,10 +8,10 @@
 绑定与在线、TiRTC 实时音频、320 x 240 触摸屏、小钛、微信 VoIP、设备互呼和 OTA 放在
 同一套应用生命周期里，适合直接体验，也适合作为带屏音频设备的工程参考。
 
-当前版本为 `1.9.5`，公开项目 Tag 为 `esp32-s3-device-monitor-v1.9.5`，TiRTC SDK 为
+当前版本为 `1.9.6`，公开项目 Tag 为 `esp32-s3-device-monitor-v1.9.6`，TiRTC SDK 为
 `2.3.0 mini`。
 
-> **1.9.5 产品边界**
+> **1.9.6 产品边界**
 >
 > 本版本的 RTC 业务统一为双向音频：Web IPC、微信 VoIP、设备互呼和小钛发起的呼叫都不
 > 发布或播放 RTC 视频。板载摄像头只用于扫描联系人二维码。这样可以让 UI、业务和协议层
@@ -29,11 +29,11 @@
 ## 直接烧录
 
 从
-[`esp32-s3-device-monitor-v1.9.5` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.9.5)
+[`esp32-s3-device-monitor-v1.9.6` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.9.6)
 下载：
 
 ```text
-esp32s3-tirtc-device-monitor-full-v1.9.5.bin
+esp32s3-tirtc-device-monitor-full-v1.9.6.bin
 SHA256SUMS.txt
 release-manifest.json
 ```
@@ -71,7 +71,7 @@ release-manifest.json
 
 判断每一步时看真实现象：
 
-1. 设置页显示版本 `1.9.5`。
+1. 设置页显示版本 `1.9.6`。
 2. Wi-Fi 页面显示已连接、IP 地址和信号状态。
 3. 设备显示 6 位验证码，绑定后显示正式设备 ID。
 4. H5 能听到设备麦克风音频，按住说话时设备扬声器能播放回传音频。
@@ -108,7 +108,19 @@ release-manifest.json
 和只读数据契约保持一致。详细版本与哈希见
 [`components/tirtc_sdk/VERSION.md`](components/tirtc_sdk/VERSION.md)。
 
-## 1.9.5 的音频收口
+## 1.9.6 的体验收口
+
+- 首次完整烧录后也可以直接发起设备呼叫。应用先准备音频资源，再在后台等待正式上线和
+  TiRTC 监听就绪；界面保持可操作，超过等待上限时显示明确失败结果。
+- 通话页会显示主叫或被叫角色、联系人名称、设备 ID 和当前阶段，区分正在准备、等待接听、
+  建立连接与通话中。对方取消、拒接、挂断、连接超时或断开后，结果会短暂保留。
+- 联系人名称改为输入框和屏幕键盘编辑。完成输入后按 `OK`，再保存联系人，不再局限于固定
+  备注列表。
+- 音量 `+/-` 在按下时立即生效，并扩大触摸区域；静音仍需完整点击确认，降低误触概率。
+- RTC 由应用生命周期自动维护。设置页不再提供 TiRTC 测试、手动启动 RTC 和 sender audio
+  test 入口。
+
+## 持续保留的音频契约
 
 - Web IPC、设备互呼和微信 VoIP 的设备上行线格式均核对为 `8 kHz / 16 bit / mono /`
   `G.711 A-law`，每包 `20 ms / 160 bytes`；设备互呼的显式 CALL 发送路径使用同一契约。
@@ -146,7 +158,7 @@ CLI 使用固定缓冲区，不输出 Wi-Fi 密码、Token 或设备密钥。产
 ```powershell
 git clone https://github.com/tangeai/tirtc-device-example.git
 cd tirtc-device-example
-git checkout esp32-s3-device-monitor-v1.9.5
+git checkout esp32-s3-device-monitor-v1.9.6
 cd complete-applications/esp32-s3/device-monitor
 
 . "$env:IDF_PATH\export.ps1"
@@ -157,7 +169,7 @@ idf.py -B build --no-ccache reconfigure build
 
 | 项目 | 值 |
 | --- | --- |
-| 应用版本 | `1.9.5` |
+| 应用版本 | `1.9.6` |
 | ESP-IDF | `5.5.4` |
 | Xtensa 工具链 | `14.2.0_20260121` |
 | TiRTC SDK | `2.3.0 mini` 基线；active-connect `db7290f`；HTTPS 认证 `13e34c3` |
@@ -166,22 +178,22 @@ idf.py -B build --no-ccache reconfigure build
 | `libTiRTC.a` SHA-256 | `83556eeee0c6cae45961899a4c5d1255a5d0d33f8e636104a946ce41ff3e20d7` |
 | OTA app 分区 | `0x770000` bytes |
 
-来源侧 `1.9.5` 已完成开发构建，但该结果不作为公开固件资产。统一发布从隔离候选的全新检出
+来源侧 `1.9.6` 有开发侧增量构建记录，但该结果不作为公开固件资产。统一发布从隔离候选的全新检出
 完成一次 ESP-IDF `5.5.4`、禁用 ccache 的正式干净构建。该候选与公开代码提交
-`c27914eafab6f700cecf196da48987200cd54d37` 的 repository tree
-`b0b93ddc0c82ae65130ae6dab17ff6ee6dbfc86a`、项目 tree
-`9fa7f85ce92a0e5fcd27c4a36fabe02609191391` 完全一致。结果如下：
+`ccae5fd495109244a679c5ffe1e17f98d6589f52` 的 repository tree
+`a0fde688fb4dbd2b7803fde487046f4de6cccd0d`、项目 tree
+`d5d5a8fb3f818106b77eeccc2599482943260be9` 完全一致。结果如下：
 
 | 正式构建项 | 值 |
 | --- | --- |
 | 构建步骤 | `1767/1767` |
-| app 大小 | `7,608,608` bytes |
-| app SHA-256 | `51a7599942f06556e33ef4820499885d6213ff15fce0f3ed2f11e38e44146503` |
+| app 大小 | `7,611,216` bytes |
+| app SHA-256 | `fa87ae46ffa93bd01da6deffade8cf23b22022f19040815b3b305ce7a56f0eec` |
 | app 分区 | `7798784` bytes |
-| 分区剩余 | `190,176` bytes（`2.44%`） |
+| 分区剩余 | `187,568` bytes（`2.41%`） |
 
-正式构建确认 app 余量为 `190,176` bytes（`2.44%`），容量已进入需要逐版核对的风险区。
-本次没有复用 `1.9.0` 的大小、哈希或固件；继续增加图片、字体、日志或调试能力前也要先
+正式构建确认 app 余量为 `187,568` bytes（`2.41%`），容量已进入需要逐版核对的风险区。
+本次没有复用 `1.9.5` 的大小、哈希或固件；继续增加图片、字体、日志或调试能力前也要先
 确认新 app 没有越过 OTA 分区。
 
 构建输入、配置和多地址烧录见 [源码构建与配置](docs/BUILD_AND_CONFIG_CN.md)。
@@ -190,15 +202,14 @@ idf.py -B build --no-ccache reconfigure build
 
 | 项目 | 值 |
 | --- | --- |
-| 开发来源 Tag | `v1.9.5` |
-| 开发来源 commit | `45db394cae399967a9c3b882d595cdecb80321be` |
-| 开发来源 tree | `4a6760708d4fd2bdb973c4bc77d789d45f2bc2be` |
-| 公开代码 commit | `c27914eafab6f700cecf196da48987200cd54d37` |
-| 公开 repository tree | `b0b93ddc0c82ae65130ae6dab17ff6ee6dbfc86a` |
-| 公开项目 tree | `9fa7f85ce92a0e5fcd27c4a36fabe02609191391` |
-| 532 文件清单 SHA-256 | `4f62119b14935198128abb809142beb3bf91367339ae9f052acecb1d93499b00` |
-| 公开项目 Tag | `esp32-s3-device-monitor-v1.9.5` |
-| 比较基线 | `v1.9.0` / `a64422b0efdebe6c303370effafd52bbf51593d1` |
+| 开发来源 Tag | `v1.9.6`（Tag object `c251806b8904672bac07ea16cca2f3099e2426e4`） |
+| 开发来源 commit | `cdb5d7bec9c955227a1259281686e30377332fb3` |
+| 开发来源 tree | `2b032dc07ada0a2e15cfb82e320ac69b53272374` |
+| 公开代码 commit | `ccae5fd495109244a679c5ffe1e17f98d6589f52` |
+| 公开 repository tree | `a0fde688fb4dbd2b7803fde487046f4de6cccd0d` |
+| 公开项目 tree | `d5d5a8fb3f818106b77eeccc2599482943260be9` |
+| 公开项目 Tag | `esp32-s3-device-monitor-v1.9.6` |
+| 比较基线 | `v1.9.5` / `45db394cae399967a9c3b882d595cdecb80321be` |
 
 完整来源、筛选范围和证据分层见 [来源与验证边界](SOURCE_PROVENANCE.md)。
 
