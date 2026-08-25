@@ -63,9 +63,18 @@ typedef struct {
     uint32_t generation;
 } device_binding_cancel_ctx_t;
 
+typedef struct {
+    uint32_t generation;
+    const char *code;
+} device_binding_mqtt_ready_ctx_t;
+
 static device_binding_runtime_t s_binding;
 
 static esp_err_t device_binding_clear_pending_session(void);
+static void device_binding_set_state(device_binding_state_t state,
+                                     esp_err_t last_error,
+                                     const char *message);
+static void device_binding_set_code(const char *code);
 
 static uint32_t device_binding_active_generation(void)
 {
@@ -100,6 +109,31 @@ static bool device_binding_cancel_cb(void *ctx)
     const device_binding_cancel_ctx_t *cancel_ctx = (const device_binding_cancel_ctx_t *)ctx;
 
     return cancel_ctx != NULL && device_binding_cancelled(cancel_ctx->generation);
+}
+
+static void device_binding_mqtt_ready_changed(bool ready, void *ctx)
+{
+    const device_binding_mqtt_ready_ctx_t *ready_ctx =
+        (const device_binding_mqtt_ready_ctx_t *)ctx;
+
+    if (ready_ctx == NULL || ready_ctx->code == NULL ||
+        device_binding_cancelled(ready_ctx->generation)) {
+        return;
+    }
+
+    if (ready) {
+        device_binding_set_code(ready_ctx->code);
+        device_binding_set_state(DEVICE_BINDING_STATE_WAITING_USER,
+                                 ESP_OK,
+                                 "waiting user bind");
+        ESP_LOGI(TAG, "binding verification code ready: mqtt subscribed");
+        return;
+    }
+
+    device_binding_set_code(NULL);
+    device_binding_set_state(DEVICE_BINDING_STATE_REPORTING,
+                             ESP_OK,
+                             "binding listener reconnecting");
 }
 
 static esp_err_t device_binding_delay_or_cancel(uint32_t generation, uint32_t delay_ms)
@@ -470,7 +504,9 @@ static esp_err_t device_binding_run(void)
                                                   true);
         binding_wait_timeout_ms = wait_timeout_ms;
         if (device_binding_cancelled(cancel_ctx.generation)) {
-            (void)device_binding_clear_pending_session();
+            /* A refresh may race with the just-completed NVS save. Finish a
+             * second erase before the replacement generation can restore it. */
+            (void)device_binding_clear_pending_session_and_wait();
             return ESP_ERR_INVALID_STATE;
         }
         if (ret != ESP_OK) {
@@ -482,9 +518,17 @@ static esp_err_t device_binding_run(void)
     if (device_binding_cancelled(cancel_ctx.generation)) {
         return ESP_ERR_INVALID_STATE;
     }
-    device_binding_set_code(report.code);
-    device_binding_set_state(DEVICE_BINDING_STATE_WAITING_USER, ESP_OK, "waiting user bind");
-    ESP_LOGI(TAG, "binding verification code ready");
+    /* The code becomes actionable only after the broker confirms the command
+     * subscription. Exposing it earlier can lose a one-shot auth_grant on a
+     * fresh boot because the MQTT session uses a clean temporary client. */
+    device_binding_mqtt_ready_ctx_t ready_ctx = {
+        .generation = cancel_ctx.generation,
+        .code = report.code,
+    };
+    device_binding_set_code(NULL);
+    device_binding_set_state(DEVICE_BINDING_STATE_REPORTING,
+                             ESP_OK,
+                             "prepare binding listener");
 
     binding_mqtt_client_config_t mqtt_config = {
         .broker_uri = s_binding.config.mqtt_uri,
@@ -494,6 +538,8 @@ static esp_err_t device_binding_run(void)
         .wait_timeout_ms = binding_wait_timeout_ms,
         .should_cancel = device_binding_cancel_cb,
         .cancel_ctx = &cancel_ctx,
+        .on_ready_changed = device_binding_mqtt_ready_changed,
+        .ready_ctx = &ready_ctx,
     };
 
     ret = binding_mqtt_client_wait_auth_grant(&mqtt_config, &grant);

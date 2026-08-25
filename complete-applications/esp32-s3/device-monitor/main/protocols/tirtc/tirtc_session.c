@@ -36,8 +36,8 @@ static const char *TIRTC_SDK_LOG_TAG = "tirtc_sdk";
 #define TIRTC_SESSION_REMOTE_AUDIO_MAX_PAYLOAD 8192U
 #define TIRTC_SESSION_BAD_REMOTE_AUDIO_LOG_INTERVAL_MS 5000U
 #define TIRTC_SESSION_SHA256_HEX_LEN 65U
-#define TIRTC_SESSION_IPC_AUDIO_SAMPLE_RATE_HZ 8000U
-#define TIRTC_SESSION_IPC_AUDIO_STACK_ALAW_BYTES 512U
+#define TIRTC_SESSION_ALAW_SAMPLE_RATE_HZ 8000U
+#define TIRTC_SESSION_BUILTIN_AUDIO_STACK_ALAW_BYTES 512U
 #define TIRTC_SESSION_CLIENT_ID_CONFLICT_RETRY_DELAY_US (60ULL * 1000ULL * 1000ULL)
 
 #define TIRTC_RESERVED_CMD_REQUEST_KEY_FRAME_NEW   0x0400U
@@ -1395,6 +1395,26 @@ static uint32_t tirtc_session_get_unix_time_s(void)
 }
 #endif
 
+static void tirtc_session_queue_peer_connect_error(int error)
+{
+    tirtc_session_event_t rtc_event = {
+        .type = TIRTC_SESSION_EVENT_CONN_ERROR,
+        .payload.conn = {
+            .conn = NULL,
+            .error = error,
+        },
+    };
+
+    /* TiRtcConnect reports a terminal failure with a NULL handle. Route that
+     * result through the normal worker/observer path so the owning service can
+     * end its business generation without doing blocking work in the SDK
+     * callback. There is no application-owned connection to disconnect here. */
+    if (!tirtc_session_enqueue_teardown_event(&rtc_event)) {
+        tirtc_session_note_event("peer error drop");
+        ESP_LOGE(TAG, "rtc teardown queue failed after peer connect error: err=%d", error);
+    }
+}
+
 static void tirtc_session_on_peer_connect_result(int error, tirtc_conn_t hconn, void *user_data)
 {
     uint32_t peer_generation = (uint32_t)(uintptr_t)user_data;
@@ -1458,12 +1478,10 @@ static void tirtc_session_on_peer_connect_result(int error, tirtc_conn_t hconn, 
         tirtc_session_set_last_error(error);
         tirtc_session_note_event("peer connect fail");
         ESP_LOGW(TAG, "rtc peer connect failed: %s (%d)", TiRtcGetErrorStr(error), error);
-        /*
-         * Failed TiRtcConnect returns no application-owned handle. The SDK owns
-         * its transport cleanup after this callback returns. Do not cycle the
-         * listening runtime here, because doing so mixes connection and SDK
-         * lifecycle ownership and can overlap listener generations.
-         */
+        /* The SDK owns failed active-connect handles that were never exposed to
+         * the application. Its asynchronous failure cleanup runs after this
+         * callback, while the listening runtime remains started and reusable. */
+        tirtc_session_queue_peer_connect_error(error);
         return;
     }
 
@@ -1472,6 +1490,7 @@ static void tirtc_session_on_peer_connect_result(int error, tirtc_conn_t hconn, 
         tirtc_session_set_last_error(TIRTC_E_INVALID_PARAMETER);
         tirtc_session_note_event("peer conn empty");
         ESP_LOGW(TAG, "rtc peer connect returned empty handle");
+        tirtc_session_queue_peer_connect_error(TIRTC_E_INVALID_PARAMETER);
         return;
     }
 
@@ -3942,33 +3961,13 @@ static esp_err_t tirtc_session_copy_payload(const void *data, size_t data_len, u
     return ESP_OK;
 }
 
-static void tirtc_session_normalize_service_endpoint(tirtc_session_config_t *config)
+static esp_err_t tirtc_session_validate_service_endpoint(const tirtc_session_config_t *config)
 {
-    const char *sdk_version = TiRtcGetVersion();
-
     if (config == NULL || strncmp(config->service_endpoint, "https://", 8) != 0) {
-        return;
+        ESP_LOGE(TAG, "plaintext TiRTC service endpoint rejected");
+        return ESP_ERR_INVALID_ARG;
     }
-    if (sdk_version == NULL ||
-        (strcmp(sdk_version, "v2.2.0") != 0 && strcmp(sdk_version, "2.2.0") != 0)) {
-        return;
-    }
-
-    char compatible_endpoint[TIRTC_SESSION_ENDPOINT_MAX_LEN] = {0};
-    int written = snprintf(compatible_endpoint,
-                           sizeof(compatible_endpoint),
-                           "http://%s",
-                           config->service_endpoint + 8);
-    if (written <= 0 || written >= (int)sizeof(compatible_endpoint)) {
-        ESP_LOGW(TAG, "rtc sdk v2.2.0 endpoint compatibility conversion failed");
-        return;
-    }
-
-    ESP_LOGW(TAG,
-             "rtc sdk %s does not support HTTPS service endpoints; use %s",
-             sdk_version,
-             compatible_endpoint);
-    strlcpy(config->service_endpoint, compatible_endpoint, sizeof(config->service_endpoint));
+    return ESP_OK;
 }
 
 static esp_err_t tirtc_session_prepare_sdk_with_lock(void)
@@ -4647,12 +4646,13 @@ static bool tirtc_session_audio_format_to_pcm_flags(const tirtc_session_audio_fo
     return false;
 }
 
-static esp_err_t tirtc_session_encode_ipc_audio_alaw(const uint8_t *data,
-                                                     size_t data_len,
-                                                     const tirtc_session_audio_format_t *format,
-                                                     uint8_t *encoded_data,
-                                                     size_t encoded_capacity,
-                                                     size_t *encoded_len)
+static esp_err_t tirtc_session_encode_builtin_audio_alaw(const uint8_t *data,
+                                                         size_t data_len,
+                                                         const tirtc_session_audio_format_t *format,
+                                                         audio_alaw_stream_encoder_t *encoder,
+                                                         uint8_t *encoded_data,
+                                                         size_t encoded_capacity,
+                                                         size_t *encoded_len)
 {
     if (data == NULL || data_len == 0U || format == NULL || encoded_data == NULL || encoded_len == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -4663,7 +4663,7 @@ static esp_err_t tirtc_session_encode_ipc_audio_alaw(const uint8_t *data,
         return ESP_ERR_NOT_SUPPORTED;
     }
 
-    if (format->sample_rate_hz == TIRTC_SESSION_IPC_AUDIO_SAMPLE_RATE_HZ) {
+    if (format->sample_rate_hz == TIRTC_SESSION_ALAW_SAMPLE_RATE_HZ) {
         return audio_alaw_encode_to(data,
                                     data_len,
                                     encoded_data,
@@ -4671,16 +4671,17 @@ static esp_err_t tirtc_session_encode_ipc_audio_alaw(const uint8_t *data,
                                     encoded_len);
     }
 
-    if (format->sample_rate_hz != (TIRTC_SESSION_IPC_AUDIO_SAMPLE_RATE_HZ * 2U) ||
+    if (format->sample_rate_hz != (TIRTC_SESSION_ALAW_SAMPLE_RATE_HZ * 2U) ||
         (data_len & 0x3U) != 0U) {
         return ESP_ERR_NOT_SUPPORTED;
     }
 
-    return audio_alaw_encode_16k_mono_to_8k(data,
-                                            data_len,
-                                            encoded_data,
-                                            encoded_capacity,
-                                            encoded_len);
+    return audio_alaw_stream_encode_16k_mono_to_8k(encoder,
+                                                   data,
+                                                   data_len,
+                                                   encoded_data,
+                                                   encoded_capacity,
+                                                   encoded_len);
 }
 
 static void tirtc_session_send_local_audio_packet(const uint8_t *data,
@@ -4688,13 +4689,14 @@ static void tirtc_session_send_local_audio_packet(const uint8_t *data,
                                                  const tirtc_session_audio_format_t *format,
                                                  uint64_t pts_us,
                                                  tirtc_session_audio_tx_gate_t gate,
-                                                 tirtc_conn_t expected_conn)
+                                                 tirtc_conn_t expected_conn,
+                                                 audio_alaw_stream_encoder_t *alaw_encoder)
 {
     tirtc_conn_t conn = NULL;
     uint8_t stream_id = TIRTC_SESSION_INVALID_STREAM_ID;
     uint8_t media = TIRTC_AUDIO_PCM;
     uint8_t flags = 0;
-    uint8_t alaw_stack[TIRTC_SESSION_IPC_AUDIO_STACK_ALAW_BYTES];
+    uint8_t alaw_stack[TIRTC_SESSION_BUILTIN_AUDIO_STACK_ALAW_BYTES];
     const uint8_t *send_data = data;
     size_t send_data_len = data_len;
     uint32_t input_level = 0;
@@ -4713,27 +4715,35 @@ static void tirtc_session_send_local_audio_packet(const uint8_t *data,
     builtin_audio_format = s_builtin_audio_format;
     taskEXIT_CRITICAL(&s_rtc_lock);
 
+    /*
+     * SUBSCRIBED is the built-in microphone path used by IPC and the current
+     * device-call owner. CALL is the explicit captured-audio API. Keep both on
+     * the same wire codec as WeChat VoIP so either route cannot silently fall
+     * back to PCM when the application selected A-law.
+     */
     if ((gate == TIRTC_SESSION_AUDIO_TX_GATE_SUBSCRIBED ||
+         gate == TIRTC_SESSION_AUDIO_TX_GATE_CALL ||
          gate == TIRTC_SESSION_AUDIO_TX_GATE_TEST_ALAW) &&
         builtin_audio_format == TIRTC_SESSION_BUILTIN_AUDIO_FORMAT_ALAW_8K) {
         esp_err_t encode_ret =
-            tirtc_session_encode_ipc_audio_alaw(data,
-                                                data_len,
-                                                format,
-                                                alaw_stack,
-                                                sizeof(alaw_stack),
-                                                &send_data_len);
+            tirtc_session_encode_builtin_audio_alaw(data,
+                                                    data_len,
+                                                    format,
+                                                    alaw_encoder,
+                                                    alaw_stack,
+                                                    sizeof(alaw_stack),
+                                                    &send_data_len);
         if (encode_ret != ESP_OK) {
             if (format != NULL) {
                 ESP_LOGW(TAG,
-                         "unsupported ipc audio format: %lu Hz %u bit %u ch len=%u ret=%s",
+                         "unsupported built-in A-law input: %lu Hz %u bit %u ch len=%u ret=%s",
                          (unsigned long)format->sample_rate_hz,
                          format->bits_per_sample,
                          format->channels,
                          (unsigned)data_len,
                          esp_err_to_name(encode_ret));
             } else {
-                ESP_LOGW(TAG, "missing ipc audio format");
+                ESP_LOGW(TAG, "missing built-in A-law input format");
             }
             return;
         }
@@ -4845,9 +4855,10 @@ static void tirtc_session_send_local_audio_packet(const uint8_t *data,
         taskEXIT_CRITICAL(&s_rtc_lock);
         if (log_first_packet) {
             ESP_LOGI(TAG,
-                     "local audio first packet stream=%u media=%u flags=%u payload=%u input=%lu peer_audio=%d forced=%d",
+                     "local audio first packet stream=%u media=%u(%s) flags=%u payload=%u input=%lu peer_audio=%d forced=%d",
                      stream_id,
                      media,
+                     tirtc_session_media_name(media),
                      flags,
                      (unsigned)send_data_len,
                      (unsigned long)input_level,
@@ -5188,6 +5199,8 @@ static void tirtc_session_local_audio_tx_task(void *ctx)
 {
     (void)ctx;
     tirtc_session_local_audio_packet_t packet = {0};
+    audio_alaw_stream_encoder_t alaw_encoder = {0};
+    uint32_t alaw_encoder_generation = UINT32_MAX;
 
     while (xQueueReceive(s_local_audio_tx_queue, &packet, portMAX_DELAY) == pdTRUE) {
         uint64_t now_us = esp_timer_get_time();
@@ -5196,12 +5209,17 @@ static void tirtc_session_local_audio_tx_task(void *ctx)
                                now_us - packet.pts_us <= TIRTC_SESSION_AUDIO_TX_MAX_AGE_US;
 
         if (packet.generation == current_generation && packet_is_fresh) {
+            if (alaw_encoder_generation != packet.generation) {
+                audio_alaw_stream_encoder_reset(&alaw_encoder);
+                alaw_encoder_generation = packet.generation;
+            }
             tirtc_session_send_local_audio_packet(packet.data,
                                                  packet.data_len,
                                                  &packet.format,
                                                  packet.pts_us != 0 ? packet.pts_us : now_us,
                                                  packet.gate,
-                                                 packet.expected_conn);
+                                                 packet.expected_conn,
+                                                 &alaw_encoder);
         } else {
             uint32_t age_ms = 0;
             if (packet.pts_us != 0 && now_us > packet.pts_us) {
@@ -6355,9 +6373,11 @@ esp_err_t tirtc_session_configure(const tirtc_session_config_t *config)
     if (config == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    ESP_RETURN_ON_ERROR(tirtc_session_validate_service_endpoint(config),
+                        TAG,
+                        "rtc service endpoint validation failed");
 
     normalized_config = *config;
-    tirtc_session_normalize_service_endpoint(&normalized_config);
 
     if (tirtc_connect_is_connecting()) {
         return ESP_ERR_INVALID_STATE;
@@ -7096,6 +7116,7 @@ esp_err_t tirtc_session_disconnect(void)
     tirtc_conn_t conn = NULL;
     bool was_sdk_started = false;
     bool connect_draining = false;
+    bool newly_detached = false;
 
     /*
      * Disconnect is a lifecycle release operation. Identity reset and app
@@ -7125,10 +7146,24 @@ esp_err_t tirtc_session_disconnect(void)
         return ESP_OK;
     }
 
-    ESP_RETURN_ON_FALSE(tirtc_session_begin_connection_shutdown(conn, 0, &was_sdk_started, NULL),
+    ESP_RETURN_ON_FALSE(tirtc_session_begin_connection_shutdown(conn,
+                                                                0,
+                                                                &was_sdk_started,
+                                                                &newly_detached),
                         ESP_ERR_INVALID_STATE,
                         TAG,
                         "rtc connection shutdown not tracked");
+
+    /* try_get_active_conn() and begin_connection_shutdown() are deliberately
+     * separate operations because the latter also owns media teardown. Two
+     * callers can therefore observe the same active handle before either one
+     * detaches it. Only the caller that performs the active -> closing
+     * transition may enqueue TiRtcDisconnect(); later callers join the same
+     * teardown instead of asking the SDK to destroy one handle twice. */
+    if (!newly_detached) {
+        tirtc_session_note_event("disconnect joined");
+        return ESP_OK;
+    }
 
     if (!tirtc_session_enqueue_disconnect_request(conn, true, was_sdk_started)) {
         tirtc_session_note_event("disconnect drop");

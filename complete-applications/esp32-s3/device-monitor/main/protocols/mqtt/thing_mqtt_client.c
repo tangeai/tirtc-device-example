@@ -406,6 +406,10 @@ esp_err_t thing_mqtt_client_start(const thing_mqtt_client_config_t *config)
         config->mqtt_token == NULL || config->mqtt_token[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
     }
+    if (strncmp(config->broker_uri, "mqtts://", 8) != 0) {
+        ESP_LOGE(TAG, "plaintext device MQTT transport rejected");
+        return ESP_ERR_INVALID_ARG;
+    }
 
     lock_runtime();
     if (s_thing_mqtt.client != NULL) {

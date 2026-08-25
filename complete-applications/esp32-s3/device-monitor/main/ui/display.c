@@ -106,6 +106,7 @@ static lv_obj_t *s_wechat_delete_confirm_box;
 static bool s_call_alert_wechat;
 static char s_call_contact_request_peer[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX];
 static char s_call_contact_request_suppressed_peer[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX];
+static bool s_call_contact_request_dismissed;
 static uint8_t s_call_delete_pending_index = UINT8_MAX;
 static char s_call_delete_pending_device_id[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX];
 static char s_wechat_delete_pending_open_id[DISPLAY_WECHAT_OPEN_ID_MAX];
@@ -417,6 +418,7 @@ static lv_obj_t *s_network_dns_value_label;
 static lv_obj_t *s_network_wan_value_label;
 static lv_obj_t *s_network_service_row;
 static lv_obj_t *s_network_service_value_label;
+static lv_obj_t *s_network_jitter_value_label;
 static lv_obj_t *s_network_loss_value_label;
 static lv_obj_t *s_network_result_box;
 static lv_obj_t *s_network_result_label;
@@ -604,8 +606,9 @@ static void display_call_remark_back_btn_cb(lv_event_t *event);
 static void display_call_remark_save_btn_cb(lv_event_t *event);
 static void display_call_delete_cancel_btn_cb(lv_event_t *event);
 static void display_call_delete_confirm_btn_cb(lv_event_t *event);
-static void display_call_contact_request_reject_btn_cb(lv_event_t *event);
+static void display_call_contact_request_close_btn_cb(lv_event_t *event);
 static void display_call_contact_request_accept_btn_cb(lv_event_t *event);
+static void display_call_pending_contact_response_btn_cb(lv_event_t *event);
 static void display_call_hangup_btn_cb(lv_event_t *event);
 static void display_call_volume_btn_cb(lv_event_t *event);
 static void display_wechat_child_back_btn_cb(lv_event_t *event);
@@ -1283,8 +1286,32 @@ static bool display_call_contacts_match_status(const display_status_t *status)
     return true;
 }
 
+static bool display_call_pending_contacts_match_status(const display_status_t *status)
+{
+    if (status == NULL) {
+        return s_call_pending_contact_count == 0U;
+    }
+
+    uint8_t pending_count = status->call_pending_contact_count > DISPLAY_CALL_CONTACT_COUNT ?
+        DISPLAY_CALL_CONTACT_COUNT : status->call_pending_contact_count;
+    if (s_call_pending_contact_count != pending_count) {
+        return false;
+    }
+    for (uint8_t index = 0; index < pending_count; ++index) {
+        if (strcmp(s_call_pending_contacts[index].device_id,
+                   status->call_pending_contacts[index].device_id) != 0 ||
+            strcmp(s_call_pending_contacts[index].created_at,
+                   status->call_pending_contacts[index].created_at) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool display_sync_call_contacts_from_status(const display_status_t *status)
 {
+    bool pending_changed = !display_call_pending_contacts_match_status(status);
+
     if (display_call_contacts_match_status(status)) {
         return false;
     }
@@ -1306,6 +1333,9 @@ static bool display_sync_call_contacts_from_status(const display_status_t *statu
         for (uint8_t index = 0; index < pending_count; ++index) {
             s_call_pending_contacts[index] = status->call_pending_contacts[index];
         }
+    }
+    if (pending_changed) {
+        s_call_contact_request_dismissed = false;
     }
     return true;
 }
@@ -2003,41 +2033,56 @@ static void display_hide_call_contact_request(void)
     s_call_contact_request_peer[0] = '\0';
 }
 
-static void display_submit_call_contact_response(bool accept)
+static esp_err_t display_submit_call_contact_response(const char *device_id, bool accept)
 {
     char peer[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX] = {0};
 
-    strlcpy(peer, s_call_contact_request_peer, sizeof(peer));
+    strlcpy(peer, device_id != NULL ? device_id : "", sizeof(peer));
     if (peer[0] == '\0' || s_actions.on_respond_call_contact == NULL) {
         display_show_wifi_alert("添加联系人", "添加接口不可用");
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
 
+    ESP_LOGI(CALL_FLOW_TAG,
+             "stage=contact_response_submit peer=%s action=%s",
+             peer,
+             accept ? "accept" : "reject");
     esp_err_t ret = s_actions.on_respond_call_contact(peer, accept, s_actions.ctx);
     if (ret != ESP_OK) {
+        ESP_LOGW(CALL_FLOW_TAG,
+                 "stage=contact_response_rejected peer=%s action=%s ret=%s",
+                 peer,
+                 accept ? "accept" : "reject",
+                 esp_err_to_name(ret));
         display_show_wifi_alert("添加联系人",
                                 ret == ESP_ERR_INVALID_STATE ?
                                 "联系人服务忙，请稍后再试" : "添加失败");
-        return;
+        return ret;
     }
 
     strlcpy(s_call_contact_request_suppressed_peer,
             peer,
             sizeof(s_call_contact_request_suppressed_peer));
+    s_call_contact_request_dismissed = false;
     display_hide_call_contact_request();
+    return ESP_OK;
 }
 
-static void display_call_contact_request_reject_btn_cb(lv_event_t *event)
+static void display_call_contact_request_close_btn_cb(lv_event_t *event)
 {
     if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
-        display_submit_call_contact_response(false);
+        ESP_LOGI(CALL_FLOW_TAG,
+                 "stage=contact_request_popup_dismiss peer=%s",
+                 s_call_contact_request_peer[0] != '\0' ? s_call_contact_request_peer : "-");
+        s_call_contact_request_dismissed = true;
+        display_hide_call_contact_request();
     }
 }
 
 static void display_call_contact_request_accept_btn_cb(lv_event_t *event)
 {
     if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
-        display_submit_call_contact_response(true);
+        (void)display_submit_call_contact_response(s_call_contact_request_peer, true);
     }
 }
 
@@ -2057,6 +2102,10 @@ static void display_show_call_contact_request(const char *device_id)
 
     display_hide_call_contact_request();
     strlcpy(s_call_contact_request_peer, device_id, sizeof(s_call_contact_request_peer));
+    ESP_LOGI(CALL_FLOW_TAG,
+             "stage=contact_request_popup_show peer=%s pending=%u",
+             s_call_contact_request_peer,
+             (unsigned)s_call_pending_contact_count);
 
     s_call_contact_request_box = lv_obj_create(lv_scr_act());
     lv_obj_remove_style_all(s_call_contact_request_box);
@@ -2109,7 +2158,7 @@ static void display_show_call_contact_request(const char *device_id)
                                              "关闭",
                                              lv_color_hex(0xE44747),
                                              12,
-                                             display_call_contact_request_reject_btn_cb);
+                                             display_call_contact_request_close_btn_cb);
     accept_btn = display_create_figma_button(card,
                                              126,
                                              78,
@@ -2151,11 +2200,23 @@ static void display_update_call_contact_request(const display_status_t *status)
         display_hide_call_contact_request();
     }
 
+    if (status->call_pending_contact_count == 0U) {
+        s_call_contact_request_dismissed = false;
+    } else if (s_call_contact_request_dismissed) {
+        display_hide_call_contact_request();
+        return;
+    }
+
     bool call_busy = status->call_state != DISPLAY_CALL_STATE_IDLE ||
                      status->wechat_call_state != DISPLAY_WECHAT_CALL_STATE_IDLE ||
                      status->rtc_incoming_call_pending ||
                      status->wechat_incoming_call_pending;
     if (call_busy) {
+        if (s_call_contact_request_box != NULL) {
+            ESP_LOGI(CALL_FLOW_TAG,
+                     "stage=contact_request_popup_deferred reason=call_busy pending=%u",
+                     (unsigned)status->call_pending_contact_count);
+        }
         display_hide_call_contact_request();
         return;
     }
@@ -5789,6 +5850,73 @@ static void display_create_call_contact_row(lv_obj_t *parent, uint8_t index, lv_
                         (void *)(uintptr_t)index);
 }
 
+static void display_create_call_pending_contact_row(lv_obj_t *parent,
+                                                    uint8_t index,
+                                                    lv_coord_t y)
+{
+    if (parent == NULL || index >= s_call_pending_contact_count) {
+        return;
+    }
+
+    lv_obj_t *row = display_create_figma_box(parent,
+                                             8,
+                                             y,
+                                             304,
+                                             50,
+                                             lv_color_hex(0xFFF9ED),
+                                             lv_color_hex(0xF2D18B),
+                                             7);
+    display_create_figma_text(row,
+                              s_call_pending_contacts[index].device_id,
+                              10,
+                              6,
+                              140,
+                              lv_color_hex(0x10233B),
+                              12,
+                              LV_TEXT_ALIGN_LEFT);
+    display_create_figma_text(row,
+                              s_call_pending_contacts[index].created_at,
+                              10,
+                              27,
+                              140,
+                              lv_color_hex(0x65768A),
+                              10,
+                              LV_TEXT_ALIGN_LEFT);
+
+    lv_obj_t *reject_btn = display_create_figma_button(row,
+                                                       158,
+                                                       8,
+                                                       58,
+                                                       34,
+                                                       lv_color_hex(0xFFF0F0),
+                                                       lv_color_hex(0xF15A5A),
+                                                       "X",
+                                                       lv_color_hex(0xE44747),
+                                                       14,
+                                                       NULL);
+    lv_obj_t *accept_btn = display_create_figma_button(row,
+                                                       222,
+                                                       8,
+                                                       72,
+                                                       34,
+                                                       lv_color_hex(0x21C783),
+                                                       lv_color_hex(0x21C783),
+                                                       "确认添加",
+                                                       lv_color_hex(0xFFFFFF),
+                                                       10,
+                                                       NULL);
+    lv_obj_set_style_radius(reject_btn, 7, 0);
+    lv_obj_set_style_radius(accept_btn, 7, 0);
+    lv_obj_add_event_cb(reject_btn,
+                        display_call_pending_contact_response_btn_cb,
+                        LV_EVENT_CLICKED,
+                        (void *)(uintptr_t)((uint32_t)index << 1));
+    lv_obj_add_event_cb(accept_btn,
+                        display_call_pending_contact_response_btn_cb,
+                        LV_EVENT_CLICKED,
+                        (void *)(uintptr_t)(((uint32_t)index << 1) | 1U));
+}
+
 static void display_create_wechat_contact_row(lv_obj_t *parent, uint8_t index, lv_coord_t y)
 {
     lv_color_t button_fill = lv_color_hex(0xDDF8EA);
@@ -6953,7 +7081,7 @@ static void display_build_binding_code_dialog(lv_obj_t *overlay)
 {
     lv_obj_t *code_panel = NULL;
     lv_obj_t *qr_card = NULL;
-    const char *binding_platform_url = APP_CONFIG_DEVICE_BINDING_API_BASE;
+    const char *binding_platform_url = APP_CONFIG_DEVICE_BINDING_PORTAL_URL;
 
     s_binding_code_dialog = display_create_figma_box(overlay,
                                                      22,
@@ -7606,6 +7734,31 @@ static void display_call_confirm_add_btn_cb(lv_event_t *event)
     display_invalidate_call_list_page();
     display_show_call_list_page();
     display_show_wifi_alert("Add Contact", "Contact request submitted.");
+}
+
+static void display_call_pending_contact_response_btn_cb(lv_event_t *event)
+{
+    uintptr_t action_data = (uintptr_t)lv_event_get_user_data(event);
+    uint8_t contact_index = (uint8_t)(action_data >> 1);
+    bool accept = (action_data & 1U) != 0U;
+    char device_id[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX] = {0};
+
+    if (contact_index >= s_call_pending_contact_count ||
+        s_call_pending_contacts[contact_index].device_id[0] == '\0') {
+        display_show_wifi_alert("添加联系人", "联系人不存在");
+        return;
+    }
+
+    strlcpy(device_id,
+            s_call_pending_contacts[contact_index].device_id,
+            sizeof(device_id));
+    if (display_submit_call_contact_response(device_id, accept) == ESP_OK) {
+        lv_obj_t *button = lv_event_get_target(event);
+        if (button != NULL) {
+            lv_obj_add_state(button, LV_STATE_DISABLED);
+            lv_obj_clear_flag(button, LV_OBJ_FLAG_CLICKABLE);
+        }
+    }
 }
 
 static void display_call_contact_call_btn_cb(lv_event_t *event)
@@ -8883,41 +9036,20 @@ static void display_update_ai_chat_settings_page(const display_status_t *status)
     display_update_ai_avatar_choice_buttons(status->ai_chat_avatar);
 }
 
-static bool display_read_uint_after(const char *text, const char *needle, uint32_t *value)
-{
-    const char *cursor = NULL;
-
-    if (text == NULL || needle == NULL || value == NULL) {
-        return false;
-    }
-
-    cursor = strstr(text, needle);
-    if (cursor == NULL) {
-        return false;
-    }
-    cursor += strlen(needle);
-    while (*cursor != '\0' && (*cursor < '0' || *cursor > '9')) {
-        ++cursor;
-    }
-    if (*cursor == '\0') {
-        return false;
-    }
-
-    *value = (uint32_t)strtoul(cursor, NULL, 10);
-    return true;
-}
-
 static void display_update_network_test_page(const display_status_t *status)
 {
-    uint32_t latency_ms = 0;
-    uint32_t success_percent = 0;
     char wifi_text[48] = {0};
     char latency_text[24] = {0};
+    char jitter_text[24] = {0};
     char loss_text[24] = {0};
+    bool has_attempt = false;
     bool has_latency = false;
-    bool has_success = false;
+    bool has_jitter = false;
+    bool has_result = false;
     bool service_ok = false;
     bool service_warn = false;
+    bool jitter_warn = false;
+    bool loss_warn = false;
     bool network_ok = false;
     const lv_color_t ok_text = lv_color_hex(0x0B6B45);
     const lv_color_t ok_fill = lv_color_hex(0xEAF8F1);
@@ -8935,6 +9067,7 @@ static void display_update_network_test_page(const display_status_t *status)
         s_network_wan_value_label == NULL ||
         s_network_service_row == NULL ||
         s_network_service_value_label == NULL ||
+        s_network_jitter_value_label == NULL ||
         s_network_loss_value_label == NULL ||
         s_network_result_box == NULL ||
         s_network_result_label == NULL ||
@@ -8964,16 +9097,40 @@ static void display_update_network_test_page(const display_status_t *status)
                                 status->network_connected ? lv_color_hex(0x0D8A59) : lv_color_hex(0xF59E0B),
                                 0);
 
-    has_latency = display_read_uint_after(status->ping_summary, "Ping", &latency_ms);
-    has_success = display_read_uint_after(status->ping_summary, "Success", &success_percent);
-    service_ok = has_latency && latency_ms <= 120U;
-    service_warn = has_latency && latency_ms > 120U;
-    network_ok = has_success && success_percent == 100U;
+    has_attempt = status->ping_transmitted > 0U;
+    has_latency = status->ping_received > 0U;
+    has_jitter = status->ping_received > 1U;
+    has_result = status->ping_valid;
+    service_ok = has_latency && status->ping_latency_avg_ms <= 120U;
+    service_warn = has_latency && status->ping_latency_avg_ms > 120U;
+    jitter_warn = has_jitter && status->ping_jitter_ms > 30U;
+    loss_warn = has_attempt && status->ping_loss_percent > 0U;
+    network_ok = has_result && service_ok && has_jitter && !jitter_warn && !loss_warn;
+
+    if (has_latency) {
+        snprintf(latency_text, sizeof(latency_text), "%lu ms",
+                 (unsigned long)status->ping_latency_avg_ms);
+    } else {
+        strlcpy(latency_text, "--", sizeof(latency_text));
+    }
+    if (has_jitter) {
+        snprintf(jitter_text, sizeof(jitter_text), "%lu ms",
+                 (unsigned long)status->ping_jitter_ms);
+    } else {
+        strlcpy(jitter_text, "--", sizeof(jitter_text));
+    }
+    if (has_attempt) {
+        snprintf(loss_text, sizeof(loss_text), "%lu%%",
+                 (unsigned long)status->ping_loss_percent);
+    } else {
+        strlcpy(loss_text, "--", sizeof(loss_text));
+    }
 
     if (status->ping_running) {
         display_text_set(s_network_wan_value_label, "测试中");
-        display_text_set(s_network_service_value_label, "测试中");
-        display_text_set(s_network_loss_value_label, "--");
+        display_text_set(s_network_service_value_label, has_latency ? latency_text : "测试中");
+        display_text_set(s_network_jitter_value_label, jitter_text);
+        display_text_set(s_network_loss_value_label, loss_text);
         display_text_set(s_network_result_label, "正在测试网络");
         display_text_set(s_network_result_detail_label, "请稍候");
         lv_obj_set_style_bg_color(s_network_service_row, lv_color_hex(0xE7F1FB), 0);
@@ -8985,6 +9142,7 @@ static void display_update_network_test_page(const display_status_t *status)
     } else if (!status->network_connected) {
         display_text_set(s_network_wan_value_label, "等待");
         display_text_set(s_network_service_value_label, "等待");
+        display_text_set(s_network_jitter_value_label, "--");
         display_text_set(s_network_loss_value_label, "--");
         display_text_set(s_network_result_label, "网络未连接");
         display_text_set(s_network_result_detail_label, "先连接 Wi-Fi");
@@ -8994,20 +9152,16 @@ static void display_update_network_test_page(const display_status_t *status)
         lv_obj_set_style_border_color(s_network_result_box, warn_text, 0);
         display_text_set_color(s_network_result_label, warn_text, 0);
         display_text_set_color(s_network_result_detail_label, lv_color_hex(0x64758A), 0);
-    } else if (has_latency || has_success) {
-        snprintf(latency_text, sizeof(latency_text), has_latency ? "%lu ms" : "--", (unsigned long)latency_ms);
-        if (has_success && success_percent <= 100U) {
-            snprintf(loss_text, sizeof(loss_text), "%lu%%", (unsigned long)(100U - success_percent));
-        } else {
-            strlcpy(loss_text, "--", sizeof(loss_text));
-        }
-        display_text_set(s_network_wan_value_label, has_success && success_percent > 0 ? "正常" : "异常");
+    } else if (has_result) {
+        display_text_set(s_network_wan_value_label, has_latency ? "正常" : "异常");
         display_text_set(s_network_service_value_label, latency_text);
+        display_text_set(s_network_jitter_value_label, jitter_text);
         display_text_set(s_network_loss_value_label, loss_text);
-        display_text_set(s_network_result_label,
-                          has_success && success_percent == 100U ? "基础网络正常" : "网络质量波动");
+        display_text_set(s_network_result_label, network_ok ? "基础网络正常" : "网络质量波动");
         display_text_set(s_network_result_detail_label,
-                          has_latency && latency_ms > 120U ? "服务延迟略高" : "服务响应正常");
+                         service_warn ? "服务延迟略高" :
+                         (jitter_warn || loss_warn || !has_latency || !has_jitter) ?
+                             "网络质量波动" : "服务响应正常");
         lv_obj_set_style_bg_color(s_network_service_row,
                                   service_ok ? ok_fill : (service_warn ? warn_fill : neutral_fill),
                                   0);
@@ -9022,11 +9176,12 @@ static void display_update_network_test_page(const display_status_t *status)
                                     network_ok ? ok_text : warn_text,
                                     0);
         display_text_set_color(s_network_result_detail_label,
-                                    service_warn ? warn_text : ok_text,
-                                    0);
+                               network_ok ? ok_text : warn_text,
+                               0);
     } else {
         display_text_set(s_network_wan_value_label, "未测试");
         display_text_set(s_network_service_value_label, "--");
+        display_text_set(s_network_jitter_value_label, "--");
         display_text_set(s_network_loss_value_label, "--");
         display_text_set(s_network_result_label, "基础网络待测");
         display_text_set(s_network_result_detail_label, "点击重测");
@@ -9039,14 +9194,20 @@ static void display_update_network_test_page(const display_status_t *status)
     }
 
     display_text_set_color(s_network_wan_value_label,
-                                status->network_connected ? lv_color_hex(0x0D8A59) : lv_color_hex(0xF59E0B),
-                                0);
+                           status->network_connected && (!has_result || has_latency) ?
+                               lv_color_hex(0x0D8A59) : lv_color_hex(0xF59E0B),
+                           0);
     display_text_set_color(s_network_service_value_label,
-                                service_warn ? warn_text : lv_color_hex(0x0D8A59),
-                                0);
+                           service_warn || (has_result && !has_latency) ?
+                               warn_text : (has_latency ? lv_color_hex(0x0D8A59) : lv_color_hex(0x64758A)),
+                           0);
+    display_text_set_color(s_network_jitter_value_label,
+                           jitter_warn || (has_result && !has_jitter) ?
+                               warn_text : (has_jitter ? lv_color_hex(0x0D8A59) : lv_color_hex(0x64758A)),
+                           0);
     display_text_set_color(s_network_loss_value_label,
-                                has_success && success_percent < 100U ? lv_color_hex(0xF59E0B) : lv_color_hex(0x0D8A59),
-                                0);
+                           loss_warn ? warn_text : (has_attempt ? lv_color_hex(0x0D8A59) : lv_color_hex(0x64758A)),
+                           0);
 }
 
 static void display_update_tirtc_config_page(const display_status_t *status)
@@ -10286,6 +10447,7 @@ static void display_build_call_scan_page(lv_obj_t *screen)
 static void display_build_call_list_page(lv_obj_t *screen)
 {
     lv_obj_t *header = NULL;
+    lv_coord_t next_y = 4;
 
     s_call_list_page = lv_obj_create(screen);
     display_prepare_figma_page(s_call_list_page);
@@ -10305,10 +10467,39 @@ static void display_build_call_list_page(lv_obj_t *screen)
     lv_obj_set_scroll_dir(s_call_list_content, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(s_call_list_content, LV_SCROLLBAR_MODE_AUTO);
 
-    for (uint8_t index = 0; index < s_call_contact_count; ++index) {
-        display_create_call_contact_row(s_call_list_content, index, 4 + ((lv_coord_t)index * 50));
+    if (s_call_pending_contact_count > 0U) {
+        (void)display_create_figma_text(s_call_list_content,
+                                        "添加联系人",
+                                        8,
+                                        next_y,
+                                        304,
+                                        lv_color_hex(0x9A6700),
+                                        12,
+                                        LV_TEXT_ALIGN_LEFT);
+        next_y += 20;
+        for (uint8_t index = 0; index < s_call_pending_contact_count; ++index) {
+            display_create_call_pending_contact_row(s_call_list_content, index, next_y);
+            next_y += 56;
+        }
+        next_y += 2;
     }
-    if (s_call_contact_count == 0U) {
+
+    if (s_call_contact_count > 0U && s_call_pending_contact_count > 0U) {
+        (void)display_create_figma_text(s_call_list_content,
+                                        "联系人列表",
+                                        8,
+                                        next_y,
+                                        304,
+                                        lv_color_hex(0x64758A),
+                                        12,
+                                        LV_TEXT_ALIGN_LEFT);
+        next_y += 20;
+    }
+    for (uint8_t index = 0; index < s_call_contact_count; ++index) {
+        display_create_call_contact_row(s_call_list_content, index, next_y);
+        next_y += 50;
+    }
+    if (s_call_contact_count == 0U && s_call_pending_contact_count == 0U) {
         (void)display_create_figma_text(s_call_list_content,
                                         "No contacts",
                                         8,
@@ -10838,12 +11029,13 @@ static void display_build_network_test_page(lv_obj_t *screen)
                                                            12,
                                                            LV_TEXT_ALIGN_LEFT);
 
-    display_create_check_row(s_network_test_page, 63, "网关", "等待", lv_color_hex(0xFFFFFF), lv_color_hex(0xF59E0B), &s_network_gateway_value_label);
-    display_create_check_row(s_network_test_page, 91, "DNS", "等待", lv_color_hex(0xFFFFFF), lv_color_hex(0xF59E0B), &s_network_dns_value_label);
-    display_create_check_row(s_network_test_page, 119, "外网", "未测试", lv_color_hex(0xFFFFFF), lv_color_hex(0xF59E0B), &s_network_wan_value_label);
+    display_create_check_row(s_network_test_page, 60, "网关", "等待", lv_color_hex(0xFFFFFF), lv_color_hex(0xF59E0B), &s_network_gateway_value_label);
+    display_create_check_row(s_network_test_page, 84, "DNS", "等待", lv_color_hex(0xFFFFFF), lv_color_hex(0xF59E0B), &s_network_dns_value_label);
+    display_create_check_row(s_network_test_page, 108, "外网", "未测试", lv_color_hex(0xFFFFFF), lv_color_hex(0xF59E0B), &s_network_wan_value_label);
     s_network_service_row =
-        display_create_check_row(s_network_test_page, 147, "TiRTC 服务", "--", lv_color_hex(0xFFFFFF), lv_color_hex(0xF59E0B), &s_network_service_value_label);
-    display_create_check_row(s_network_test_page, 175, "丢包", "--", lv_color_hex(0xFFFFFF), lv_color_hex(0x0D8A59), &s_network_loss_value_label);
+        display_create_check_row(s_network_test_page, 132, "TiRTC 服务", "--", lv_color_hex(0xFFFFFF), lv_color_hex(0xF59E0B), &s_network_service_value_label);
+    display_create_check_row(s_network_test_page, 156, "Jitter", "--", lv_color_hex(0xFFFFFF), lv_color_hex(0x0D8A59), &s_network_jitter_value_label);
+    display_create_check_row(s_network_test_page, 180, "丢包", "--", lv_color_hex(0xFFFFFF), lv_color_hex(0x0D8A59), &s_network_loss_value_label);
 
     result = display_create_figma_box(s_network_test_page,
                                       8,

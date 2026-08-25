@@ -58,6 +58,9 @@ typedef struct {
     uint32_t concealed_ms;
     uint32_t clock_recovery_events;
     uint32_t clock_recovery_frames;
+    uint32_t clock_recovery_fast_events;
+    uint32_t clock_recovery_fast_frames;
+    int8_t playout_rate_mode;
     bool playback_pacing_enabled;
     uint32_t pacing_wait_events;
     uint32_t pacing_wait_ms;

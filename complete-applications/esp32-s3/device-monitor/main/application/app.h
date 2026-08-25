@@ -15,7 +15,6 @@
 #define APP_SSID_MAX_LEN         33
 #define APP_IP_ADDR_MAX_LEN      16
 #define APP_WIFI_SCAN_MAX        NETWORK_SCAN_RESULT_MAX
-#define APP_PING_SUMMARY_MAX     NETWORK_PING_SUMMARY_MAX
 #define APP_TEST_STATUS_MAX      96
 #define APP_AI_CHAT_CAPTION_MAX  256
 #define APP_AI_CHAT_MESSAGE_MAX  100
@@ -93,7 +92,12 @@ typedef struct {
 	uint16_t scan_count;
 	app_wifi_scan_result_t scan_results[APP_WIFI_SCAN_MAX];
 	bool ping_running;
-	char ping_summary[APP_PING_SUMMARY_MAX];
+	bool ping_valid;
+	uint32_t ping_transmitted;
+	uint32_t ping_received;
+	uint32_t ping_latency_avg_ms;
+	uint32_t ping_jitter_ms;
+	uint32_t ping_loss_percent;
 } app_network_snapshot_t;
 
 typedef struct {

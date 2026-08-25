@@ -39,6 +39,7 @@ static const char *TAG = "media_sink";
 #define MEDIA_SINK_AUDIO_SOURCE_DELTA_MAX_MS 10000
 #define MEDIA_SINK_AUDIO_SOURCE_GAP_CONFIRM_PACKETS 10
 #define MEDIA_SINK_AUDIO_BULK_TARGET_MS 240
+#define MEDIA_SINK_AUDIO_PLAYOUT_RELEASE_MARGIN_MS 20
 
 typedef struct {
     uint32_t realtime_prebuffer_ms;
@@ -49,7 +50,11 @@ typedef struct {
     uint32_t underflow_grace_max_ms;
     uint32_t underflow_concealment_max_ms;
     uint32_t source_gap_fill_max_ms;
-    uint8_t clock_recovery_extra_frames;
+    uint8_t playout_slow_frames;
+    uint8_t playout_fast_frames;
+    uint32_t playout_low_margin_ms;
+    uint32_t playout_high_margin_ms;
+    uint32_t playout_startup_hold_ms;
     uint32_t slow_play_us;
     uint8_t drain_burst_max;
     bool absorb_network_bursts;
@@ -137,6 +142,8 @@ typedef struct {
     uint32_t concealed_ms;
     uint32_t clock_recovery_events;
     uint32_t clock_recovery_frames;
+    uint32_t clock_recovery_fast_events;
+    uint32_t clock_recovery_fast_frames;
     uint32_t pacing_wait_events;
     uint32_t pacing_wait_ms;
     uint32_t pacing_wait_max_ms;
@@ -144,6 +151,7 @@ typedef struct {
     uint32_t pacing_late_ms;
     uint32_t pacing_late_max_ms;
     uint8_t stable_windows;
+    int8_t playout_rate_mode;
     bool source_timestamp_valid;
     bool fast_start_pending;
     bool talkspurt_hint_valid;
@@ -338,7 +346,11 @@ static const media_sink_audio_tuning_t s_audio_tunings[] = {
         .underflow_grace_max_ms = 0,
         .underflow_concealment_max_ms = 0,
         .source_gap_fill_max_ms = 0,
-        .clock_recovery_extra_frames = 0,
+        .playout_slow_frames = 0,
+        .playout_fast_frames = 0,
+        .playout_low_margin_ms = 0,
+        .playout_high_margin_ms = 0,
+        .playout_startup_hold_ms = 0,
         .slow_play_us = 25000,
         .drain_burst_max = 0,
         .absorb_network_bursts = false,
@@ -348,13 +360,12 @@ static const media_sink_audio_tuning_t s_audio_tunings[] = {
         .pace_playback_clock = false,
     },
     [MEDIA_SINK_AUDIO_PROFILE_DEVICE_CALL] = {
-        /* Device-to-device callbacks show occasional 63-70 ms delivery holes
-         * even while the sender PCM clock remains within one frame. Starting
-         * from 100 ms left too little margin for one 20 ms I2S write and task
-         * scheduling, producing a short concealment event. Keep another two
-         * frames in the PSRAM PCM ring; this changes only device-call startup
-         * latency and does not alter IPC, WeChat, or AI playback policy. */
-        .realtime_prebuffer_ms = 120,
+        /* Measured 100 +/- 50 ms, 3% loss relay runs produced first-stage
+         * delivery holes up to 277 ms before adaptive jitter history existed.
+         * Hold 320 ms in the PSRAM ring at device-call startup; bounded rate
+         * recovery below drains that one-time reserve after the link settles.
+         * IPC, WeChat, and AI keep their independent startup policies. */
+        .realtime_prebuffer_ms = 320,
         .realtime_target_ms = 140,
         /* Clean calls still start from 140 ms. Under the measured relay
          * profile (100 +/- 50 ms, 3% loss), recovered media reaches the app
@@ -364,11 +375,11 @@ static const media_sink_audio_tuning_t s_audio_tunings[] = {
         .jitter_boost_max_ms = 520,
         .adaptive_target_boost_max_ms = 480,
         /* Recovered device-call media arrives in 300-500 ms callback bursts.
-         * An 80 ms trim window converted those recoverable bursts into another
-         * 300-1200 ms of local speech loss. Keep up to 200 ms above the
-         * adaptive target in the PSRAM ring before trimming; the bounded
-         * tradeoff is at most 120 ms more latency than the previous policy. */
-        .trim_hysteresis_ms = 200,
+         * The startup reserve hold exposed a measured 560 ms burst while the
+         * adaptive target was still 368 ms; a 200 ms ceiling then deleted
+         * 140 ms of valid speech. Keep that recoverable burst in the existing
+         * 10 s PSRAM ring and let bounded fast playout recenter it. */
+        .trim_hysteresis_ms = 400,
         .underflow_grace_max_ms = 0,
         /* Keep I2S running across a short loss, but never replay a complete
          * 20 ms speech chunk. Repetition turns periodic packet holes into a
@@ -379,7 +390,19 @@ static const media_sink_audio_tuning_t s_audio_tunings[] = {
          * with silence PLC instead of consuming received PCM faster than it
          * was produced. Large discontinuities remain talkspurt boundaries. */
         .source_gap_fill_max_ms = 240,
-        .clock_recovery_extra_frames = 0,
+        /* Keep the speaker clock at 20 ms while steering only the amount of
+         * PCM consumed from the PSRAM ring. Four 16 kHz frames are 1.25%,
+         * small enough to avoid an audible pitch step but large enough to
+         * recenter a burst-shifted buffer before it underflows or is trimmed.
+         * The 60 ms dead bands keep clean-Wi-Fi calls at exactly 1.0x. */
+        .playout_slow_frames = 4,
+        .playout_fast_frames = 4,
+        .playout_low_margin_ms = 60,
+        .playout_high_margin_ms = 60,
+        /* Do not spend the startup reserve before the jitter estimate has
+         * observed the first weak-network delivery burst. Only fast recovery
+         * is held; slow recovery still protects a falling ring immediately. */
+        .playout_startup_hold_ms = 8000,
         .slow_play_us = 25000,
         /* Weak-network recovery delivers several 20 ms packets in one RTC
          * callback burst. Move that burst out of the bounded packet queue and
@@ -417,7 +440,11 @@ static const media_sink_audio_tuning_t s_audio_tunings[] = {
         .underflow_grace_max_ms = 200,
         .underflow_concealment_max_ms = 0,
         .source_gap_fill_max_ms = 0,
-        .clock_recovery_extra_frames = 0,
+        .playout_slow_frames = 0,
+        .playout_fast_frames = 0,
+        .playout_low_margin_ms = 0,
+        .playout_high_margin_ms = 0,
+        .playout_startup_hold_ms = 0,
         .slow_play_us = 30000,
         .drain_burst_max = 2,
         .absorb_network_bursts = false,
@@ -439,7 +466,11 @@ static const media_sink_audio_tuning_t s_audio_tunings[] = {
         .underflow_grace_max_ms = 0,
         .underflow_concealment_max_ms = 0,
         .source_gap_fill_max_ms = 0,
-        .clock_recovery_extra_frames = 0,
+        .playout_slow_frames = 0,
+        .playout_fast_frames = 0,
+        .playout_low_margin_ms = 0,
+        .playout_high_margin_ms = 0,
+        .playout_startup_hold_ms = 0,
         .slow_play_us = 25000,
         .drain_burst_max = 8,
         .absorb_network_bursts = true,
@@ -675,6 +706,7 @@ static void media_sink_audio_mark_playback_idle(void)
     s_audio_adaptive.arrival_jitter_peak_ms = 0;
     s_audio_adaptive.stable_windows = 0;
     s_audio_adaptive.source_timestamp_valid = false;
+    s_audio_adaptive.playout_rate_mode = 0;
     s_audio_adaptive.fast_start_pending =
         tuning.fast_start_on_talkspurt &&
         (!s_audio_adaptive.talkspurt_hint_valid || s_audio_adaptive.talkspurt_active);
@@ -695,6 +727,7 @@ static void media_sink_audio_mark_talkspurt_idle(void)
     s_audio_adaptive.first_source_timestamp_ms = 0;
     s_audio_adaptive.source_timestamp_valid = false;
     s_audio_adaptive.stable_windows = 0;
+    s_audio_adaptive.playout_rate_mode = 0;
     s_audio_adaptive.fast_start_pending =
         tuning.fast_start_on_talkspurt && s_audio_adaptive.talkspurt_active;
     taskEXIT_CRITICAL(&s_sink_lock);
@@ -1431,43 +1464,121 @@ static bool media_sink_prepare_audio_concealment(size_t chunk_bytes,
     return true;
 }
 
-static size_t media_sink_expand_audio_chunk(int16_t *samples,
-                                            size_t source_bytes,
-                                            const audio_format_t *format,
-                                            uint8_t extra_frames)
+static int8_t media_sink_audio_playout_adjustment_frames(
+    const media_sink_audio_tuning_t *tuning,
+    uint32_t buffered_ms,
+    uint32_t target_ms,
+    bool allow_fast)
+{
+    if (tuning == NULL || tuning->playout_slow_frames == 0U ||
+        tuning->playout_fast_frames == 0U) {
+        return 0;
+    }
+
+    uint32_t low_enter_ms = target_ms > tuning->playout_low_margin_ms ?
+                                target_ms - tuning->playout_low_margin_ms : 0U;
+    uint32_t low_release_ms = target_ms > MEDIA_SINK_AUDIO_PLAYOUT_RELEASE_MARGIN_MS ?
+                                  target_ms - MEDIA_SINK_AUDIO_PLAYOUT_RELEASE_MARGIN_MS : 0U;
+    uint32_t high_enter_ms = target_ms + tuning->playout_high_margin_ms;
+    uint32_t high_release_ms = target_ms + MEDIA_SINK_AUDIO_PLAYOUT_RELEASE_MARGIN_MS;
+    int8_t mode = 0;
+    bool enabled = false;
+
+    taskENTER_CRITICAL(&s_sink_lock);
+    enabled = s_audio_profile == MEDIA_SINK_AUDIO_PROFILE_DEVICE_CALL &&
+              !s_audio_integrity.sequence_valid;
+    mode = enabled ? s_audio_adaptive.playout_rate_mode : 0;
+    if (mode < 0) {
+        if (buffered_ms >= low_release_ms) {
+            mode = 0;
+        }
+    } else if (mode > 0) {
+        if (buffered_ms <= high_release_ms) {
+            mode = 0;
+        }
+    } else if (buffered_ms <= low_enter_ms) {
+        mode = -1;
+    } else if (allow_fast && buffered_ms >= high_enter_ms) {
+        mode = 1;
+    }
+    s_audio_adaptive.playout_rate_mode = mode;
+    taskEXIT_CRITICAL(&s_sink_lock);
+
+    if (mode < 0) {
+        return -(int8_t)tuning->playout_slow_frames;
+    }
+    if (mode > 0) {
+        return (int8_t)tuning->playout_fast_frames;
+    }
+    return 0;
+}
+
+static size_t media_sink_resample_audio_chunk(int16_t *samples,
+                                              size_t source_bytes,
+                                              size_t output_bytes,
+                                              const audio_format_t *format)
 {
     if (samples == NULL || format == NULL || format->bits_per_sample != 16U ||
-        format->channels == 0U || extra_frames == 0U) {
+        format->channels == 0U || output_bytes > s_audio_pcm_chunk_buffer_size) {
         return source_bytes;
     }
 
     const size_t frame_bytes = sizeof(int16_t) * format->channels;
     const size_t source_frames = source_bytes / frame_bytes;
-    const size_t output_frames = source_frames + extra_frames;
-    const size_t output_bytes = output_frames * frame_bytes;
+    const size_t output_frames = output_bytes / frame_bytes;
 
-    if (source_frames < 2U || output_bytes > s_audio_pcm_chunk_buffer_size) {
+    if (source_frames < 2U || output_frames < 2U ||
+        source_frames * frame_bytes != source_bytes ||
+        output_frames * frame_bytes != output_bytes) {
         return source_bytes;
     }
+    if (source_frames == output_frames) {
+        return output_bytes;
+    }
 
-    /* Expand backwards so the in-place interpolation never overwrites an
-     * input frame that a later output frame still needs. */
-    for (size_t output_frame = output_frames; output_frame-- > 0U;) {
-        uint64_t position_num =
-            (uint64_t)output_frame * (source_frames - 1U);
-        size_t left_frame = (size_t)(position_num / (output_frames - 1U));
-        uint32_t fraction_num = (uint32_t)(position_num % (output_frames - 1U));
-        for (uint8_t channel = 0; channel < format->channels; ++channel) {
-            size_t left_index = left_frame * format->channels + channel;
-            size_t right_frame = left_frame + 1U < source_frames ?
-                                     left_frame + 1U : left_frame;
-            size_t right_index = right_frame * format->channels + channel;
-            int32_t left = samples[left_index];
-            int32_t right = samples[right_index];
-            int32_t value = left +
-                (int32_t)(((int64_t)(right - left) * fraction_num) /
-                          (int64_t)(output_frames - 1U));
-            samples[output_frame * format->channels + channel] = (int16_t)value;
+    /* Expansion runs backwards and contraction runs forwards so this can use
+     * the existing PSRAM chunk buffer in place. The I2S side still receives
+     * exactly one 20 ms chunk; only the amount consumed from the jitter ring
+     * changes by 1.25 percent. */
+    if (output_frames > source_frames) {
+        for (size_t output_frame = output_frames; output_frame-- > 0U;) {
+            uint64_t position_num =
+                (uint64_t)output_frame * (source_frames - 1U);
+            size_t left_frame = (size_t)(position_num / (output_frames - 1U));
+            uint32_t fraction_num =
+                (uint32_t)(position_num % (output_frames - 1U));
+            for (uint8_t channel = 0; channel < format->channels; ++channel) {
+                size_t left_index = left_frame * format->channels + channel;
+                size_t right_frame = left_frame + 1U < source_frames ?
+                                         left_frame + 1U : left_frame;
+                size_t right_index = right_frame * format->channels + channel;
+                int32_t left = samples[left_index];
+                int32_t right = samples[right_index];
+                samples[output_frame * format->channels + channel] =
+                    (int16_t)(left +
+                              (int32_t)(((int64_t)(right - left) * fraction_num) /
+                                        (int64_t)(output_frames - 1U)));
+            }
+        }
+    } else {
+        for (size_t output_frame = 0; output_frame < output_frames; ++output_frame) {
+            uint64_t position_num =
+                (uint64_t)output_frame * (source_frames - 1U);
+            size_t left_frame = (size_t)(position_num / (output_frames - 1U));
+            uint32_t fraction_num =
+                (uint32_t)(position_num % (output_frames - 1U));
+            for (uint8_t channel = 0; channel < format->channels; ++channel) {
+                size_t left_index = left_frame * format->channels + channel;
+                size_t right_frame = left_frame + 1U < source_frames ?
+                                         left_frame + 1U : left_frame;
+                size_t right_index = right_frame * format->channels + channel;
+                int32_t left = samples[left_index];
+                int32_t right = samples[right_index];
+                samples[output_frame * format->channels + channel] =
+                    (int16_t)(left +
+                              (int32_t)(((int64_t)(right - left) * fraction_num) /
+                                        (int64_t)(output_frames - 1U)));
+            }
         }
     }
     return output_bytes;
@@ -1903,6 +2014,7 @@ static void media_sink_audio_task(void *ctx)
     bool plc_valid = false;
     uint32_t concealed_ms = 0;
     TickType_t playback_deadline_tick = 0;
+    TickType_t playback_started_tick = 0;
     bool playback_clock_valid = false;
     uint32_t playback_generation = media_sink_get_generation();
     uint32_t playback_talkspurt_generation = media_sink_audio_talkspurt_generation();
@@ -1926,6 +2038,9 @@ static void media_sink_audio_task(void *ctx)
         if (current_talkspurt_generation != playback_talkspurt_generation) {
             playback_talkspurt_generation = current_talkspurt_generation;
             rebuffering_after_underflow = false;
+            taskENTER_CRITICAL(&s_sink_lock);
+            s_audio_adaptive.playout_rate_mode = 0;
+            taskEXIT_CRITICAL(&s_sink_lock);
             media_sink_audio_reset_playback_clock(&playback_deadline_tick,
                                                   &playback_clock_valid);
         }
@@ -2017,6 +2132,7 @@ static void media_sink_audio_task(void *ctx)
             (buffered_bytes >= prebuffer_bytes ||
              drain_completed_talkspurt)) {
             playback_started = true;
+            playback_started_tick = xTaskGetTickCount();
             media_sink_audio_set_playback_active(true);
             rebuffering_after_underflow = false;
             fade_in_pending = tuning.absorb_network_bursts;
@@ -2063,6 +2179,7 @@ static void media_sink_audio_task(void *ctx)
              conceal_underflow)) {
             uint8_t *play_chunk = NULL;
             size_t played_media_bytes = 0;
+            size_t consume_bytes = play_chunk_bytes;
             uint32_t buffered_ms_before_play =
                 media_sink_audio_duration_ms_for_bytes(buffered_bytes, playback_format);
             uint32_t played_media_ms = 0;
@@ -2074,6 +2191,7 @@ static void media_sink_audio_task(void *ctx)
             esp_err_t play_ret = ESP_OK;
             bool integrity_valid = false;
             uint32_t integrity_sequence = 0;
+            int8_t playout_adjustment_frames = 0;
 
             if (conceal_underflow) {
                 if (!media_sink_prepare_audio_concealment(play_chunk_bytes,
@@ -2083,35 +2201,74 @@ static void media_sink_audio_task(void *ctx)
                     play_ret = ESP_ERR_INVALID_STATE;
                 }
             } else {
-                play_ret = media_sink_pop_audio_pcm_chunk(play_chunk_bytes,
+                if (!drain_completed_talkspurt) {
+                    uint32_t current_target_ms =
+                        media_sink_audio_latency_target_ms(source_packet_ms);
+                    bool allow_fast = tuning.playout_startup_hold_ms == 0U ||
+                                      playback_started_tick == 0U ||
+                                      (xTaskGetTickCount() - playback_started_tick) >=
+                                          pdMS_TO_TICKS(tuning.playout_startup_hold_ms);
+                    playout_adjustment_frames =
+                        media_sink_audio_playout_adjustment_frames(
+                            &tuning,
+                            buffered_ms_before_play,
+                            current_target_ms,
+                            allow_fast);
+                    size_t frame_bytes = media_sink_audio_frame_bytes(playback_format);
+                    size_t output_frames = frame_bytes > 0U ?
+                                               play_chunk_bytes / frame_bytes : 0U;
+                    int32_t source_frames =
+                        (int32_t)output_frames + playout_adjustment_frames;
+                    if (source_frames >= 2 && frame_bytes > 0U) {
+                        size_t adjusted_bytes = (size_t)source_frames * frame_bytes;
+                        if (adjusted_bytes <= s_audio_pcm_chunk_buffer_size &&
+                            adjusted_bytes <= buffered_bytes) {
+                            consume_bytes = adjusted_bytes;
+                        } else {
+                            playout_adjustment_frames = 0;
+                        }
+                    } else {
+                        playout_adjustment_frames = 0;
+                    }
+                }
+
+                play_ret = media_sink_pop_audio_pcm_chunk(consume_bytes,
                                                           drain_completed_talkspurt,
                                                           &play_chunk,
                                                           &played_media_bytes,
                                                           playback_generation,
                                                           &integrity_valid,
                                                           &integrity_sequence);
+                if (play_ret == ESP_OK && played_media_bytes == consume_bytes &&
+                    playout_adjustment_frames != 0) {
+                    playback_write_bytes = media_sink_resample_audio_chunk(
+                        (int16_t *)play_chunk,
+                        played_media_bytes,
+                        play_chunk_bytes,
+                        playback_format);
+                    if (playback_write_bytes != play_chunk_bytes) {
+                        play_ret = ESP_ERR_INVALID_SIZE;
+                    } else {
+                        taskENTER_CRITICAL(&s_sink_lock);
+                        if (playout_adjustment_frames < 0) {
+                            s_audio_adaptive.clock_recovery_events++;
+                            s_audio_adaptive.clock_recovery_frames +=
+                                (uint32_t)(-playout_adjustment_frames);
+                        } else {
+                            s_audio_adaptive.clock_recovery_fast_events++;
+                            s_audio_adaptive.clock_recovery_fast_frames +=
+                                (uint32_t)playout_adjustment_frames;
+                        }
+                        taskEXIT_CRITICAL(&s_sink_lock);
+                        /* Statistics and final-tail detection describe the
+                         * fixed 20 ms hardware output, not ring consumption. */
+                        played_media_bytes = play_chunk_bytes;
+                    }
+                }
                 if (play_ret == ESP_OK && played_media_bytes == play_chunk_bytes) {
                     memcpy(s_audio_pcm_plc_buffer, play_chunk, play_chunk_bytes);
                     plc_valid = true;
                     concealed_ms = 0;
-                    uint32_t current_target_ms =
-                        media_sink_audio_latency_target_ms(source_packet_ms);
-                    uint32_t low_watermark_ms = current_target_ms / 2U;
-                    if (tuning.clock_recovery_extra_frames > 0U &&
-                        buffered_ms_before_play <= low_watermark_ms) {
-                        playback_write_bytes = media_sink_expand_audio_chunk(
-                            (int16_t *)play_chunk,
-                            play_chunk_bytes,
-                            playback_format,
-                            tuning.clock_recovery_extra_frames);
-                        if (playback_write_bytes > play_chunk_bytes) {
-                            taskENTER_CRITICAL(&s_sink_lock);
-                            s_audio_adaptive.clock_recovery_events++;
-                            s_audio_adaptive.clock_recovery_frames +=
-                                tuning.clock_recovery_extra_frames;
-                            taskEXIT_CRITICAL(&s_sink_lock);
-                        }
-                    }
                 }
             }
 
@@ -2317,6 +2474,7 @@ void media_sink_set_remote_audio_talkspurt(bool active)
         s_audio_adaptive.last_source_timestamp_ms = 0;
         s_audio_adaptive.source_timestamp_valid = false;
         s_audio_adaptive.stable_windows = 0;
+        s_audio_adaptive.playout_rate_mode = 0;
         s_audio_adaptive.talkspurt_started = true;
         s_audio_adaptive.talkspurt_generation++;
         s_audio_adaptive.arrival_jitter_ewma_ms = 0;
@@ -2375,6 +2533,11 @@ bool media_sink_get_audio_diagnostics(media_sink_audio_diagnostics_t *diagnostic
     diagnostics->concealed_ms = s_audio_adaptive.concealed_ms;
     diagnostics->clock_recovery_events = s_audio_adaptive.clock_recovery_events;
     diagnostics->clock_recovery_frames = s_audio_adaptive.clock_recovery_frames;
+    diagnostics->clock_recovery_fast_events =
+        s_audio_adaptive.clock_recovery_fast_events;
+    diagnostics->clock_recovery_fast_frames =
+        s_audio_adaptive.clock_recovery_fast_frames;
+    diagnostics->playout_rate_mode = s_audio_adaptive.playout_rate_mode;
     diagnostics->playback_pacing_enabled =
         s_audio_tunings[s_audio_profile].pace_playback_clock;
     diagnostics->pacing_wait_events = s_audio_adaptive.pacing_wait_events;

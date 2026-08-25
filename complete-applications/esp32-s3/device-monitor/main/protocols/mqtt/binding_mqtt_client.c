@@ -33,8 +33,24 @@ typedef struct {
     bool receiving_cmd;
     binding_mqtt_auth_grant_t grant;
     esp_err_t last_error;
+    binding_mqtt_ready_cb_t on_ready_changed;
+    void *ready_ctx;
+    int subscribe_msg_id;
     int ack_msg_id;
+    bool ready;
 } binding_mqtt_runtime_t;
+
+static void binding_mqtt_set_ready(binding_mqtt_runtime_t *runtime, bool ready)
+{
+    if (runtime == NULL || runtime->ready == ready) {
+        return;
+    }
+
+    runtime->ready = ready;
+    if (runtime->on_ready_changed != NULL) {
+        runtime->on_ready_changed(ready, runtime->ready_ctx);
+    }
+}
 
 static bool binding_mqtt_has_start_heap(void)
 {
@@ -328,9 +344,20 @@ static void binding_mqtt_event_handler(void *handler_args,
     case MQTT_EVENT_CONNECTED:
     {
         int msg_id = esp_mqtt_client_subscribe(runtime->client, runtime->cmd_topic, 1);
+        runtime->subscribe_msg_id = msg_id;
         ESP_LOGI(TAG, "binding mqtt connected: topic=%s msg_id=%d", runtime->cmd_topic, msg_id);
+        if (msg_id < 0) {
+            runtime->last_error = ESP_FAIL;
+            xEventGroupSetBits(runtime->events, BINDING_MQTT_ERROR_BIT);
+        }
         break;
     }
+    case MQTT_EVENT_SUBSCRIBED:
+        if (runtime->subscribe_msg_id >= 0 && event->msg_id == runtime->subscribe_msg_id) {
+            ESP_LOGI(TAG, "binding mqtt subscribed: topic=%s msg_id=%d", runtime->cmd_topic, event->msg_id);
+            binding_mqtt_set_ready(runtime, true);
+        }
+        break;
     case MQTT_EVENT_DATA:
         binding_mqtt_handle_data(runtime, event);
         break;
@@ -342,10 +369,12 @@ static void binding_mqtt_event_handler(void *handler_args,
         }
         break;
     case MQTT_EVENT_ERROR:
+        binding_mqtt_set_ready(runtime, false);
         runtime->last_error = ESP_FAIL;
         xEventGroupSetBits(runtime->events, BINDING_MQTT_ERROR_BIT);
         break;
     case MQTT_EVENT_DISCONNECTED:
+        binding_mqtt_set_ready(runtime, false);
         break;
     default:
         break;
@@ -367,8 +396,15 @@ esp_err_t binding_mqtt_client_wait_auth_grant(const binding_mqtt_client_config_t
         config->temp_token == NULL || config->temp_token[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
     }
+    if (strncmp(config->broker_uri, "mqtts://", 8) != 0) {
+        ESP_LOGE(TAG, "plaintext binding MQTT transport rejected");
+        return ESP_ERR_INVALID_ARG;
+    }
 
     memset(grant, 0, sizeof(*grant));
+    runtime.on_ready_changed = config->on_ready_changed;
+    runtime.ready_ctx = config->ready_ctx;
+    runtime.subscribe_msg_id = -1;
     runtime.ack_msg_id = -1;
     if (strlen(config->temp_client_id) >= sizeof(client_id)) {
         return ESP_ERR_INVALID_SIZE;
@@ -456,6 +492,7 @@ esp_err_t binding_mqtt_client_wait_auth_grant(const binding_mqtt_client_config_t
              esp_err_to_name(ret),
              grant->has_credentials ? 1 : 0);
 
+    binding_mqtt_set_ready(&runtime, false);
     (void)esp_mqtt_client_stop(runtime.client);
     esp_mqtt_client_destroy(runtime.client);
     vEventGroupDelete(runtime.events);

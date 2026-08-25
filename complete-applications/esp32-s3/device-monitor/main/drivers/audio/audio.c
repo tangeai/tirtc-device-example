@@ -32,7 +32,13 @@ static const char *TAG = "audio";
 #define AUDIO_CAPTURE_AUTO_GAIN_TARGET_PEAK 4096U
 #define AUDIO_CAPTURE_NEAR_END_AUTO_GAIN_TARGET_PEAK 8192U
 #define AUDIO_CAPTURE_AUTO_GAIN_NOISE_FLOOR_PEAK 80U
-#define AUDIO_CAPTURE_CALL_AUTO_GAIN_NOISE_FLOOR_PEAK 160U
+/*
+ * Two target boards measured a post-AEC idle peak of 231..319 samples.  Keep
+ * that stationary residue below the call AGC knee so it is not lifted by the
+ * 3x distant-speech gain.  This is deliberately an AGC floor, not a noise
+ * gate: samples remain continuous and speech starts/word endings are not cut.
+ */
+#define AUDIO_CAPTURE_CALL_AUTO_GAIN_NOISE_FLOOR_PEAK 384U
 #define AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT 200U
 /*
  * This is a policy ceiling, not a fixed gain. The frame peak controller still
@@ -47,6 +53,9 @@ static const char *TAG = "audio";
 #define AUDIO_CAPTURE_NOISE_GATE_OPEN_PEAK 240U
 #define AUDIO_CAPTURE_NOISE_GATE_CLOSE_PEAK 120U
 #define AUDIO_CAPTURE_NOISE_GATE_ATTENUATION_PERCENT 20U
+#define AUDIO_CAPTURE_HIGH_PASS_CUTOFF_HZ 100U
+/* exp(-2*pi*100/16000) in Q15 for a low-cost first-order DC/rumble blocker. */
+#define AUDIO_CAPTURE_HIGH_PASS_ALPHA_Q15 31506
 #define AUDIO_CAPTURE_LEVEL_LOG_INTERVAL_MS 1000U
 #define AUDIO_CAPTURE_LEVEL_DBFS_FLOOR_X10 (-960)
 #define AUDIO_AEC_REFERENCE_CLIP_PEAK       30000U
@@ -167,6 +176,7 @@ static audio_stats_t s_audio_stats = {
     .echo_suppression = AUDIO_ECHO_SUPPRESSION_BALANCED,
     .far_end_upload_gain_percent = AUDIO_DEFAULT_CAPTURE_GAIN_PERCENT,
     .far_end_auto_gain_max_percent = AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT,
+    .capture_high_pass_filter_enabled = false,
     .capture_noise_gate_enabled = true,
 };
 static esp_err_t s_audio_output_prepare_last_err = ESP_OK;
@@ -187,6 +197,7 @@ static audio_capture_processing_config_t s_capture_processing_config = {
     .far_end_auto_gain_max_percent = AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT,
     .echo_suppression = AUDIO_ECHO_SUPPRESSION_BALANCED,
     .echo_diagnostics_enabled = false,
+    .high_pass_filter_enabled = false,
     .noise_gate_enabled = true,
     .noise_gate_open_peak = AUDIO_CAPTURE_NOISE_GATE_OPEN_PEAK,
     .noise_gate_close_peak = AUDIO_CAPTURE_NOISE_GATE_CLOSE_PEAK,
@@ -383,6 +394,7 @@ static audio_capture_processing_config_t audio_capture_make_default_processing_c
         .far_end_auto_gain_max_percent = AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT,
         .echo_suppression = AUDIO_ECHO_SUPPRESSION_BALANCED,
         .echo_diagnostics_enabled = false,
+        .high_pass_filter_enabled = false,
         .noise_gate_enabled = true,
         .noise_gate_open_peak = AUDIO_CAPTURE_NOISE_GATE_OPEN_PEAK,
         .noise_gate_close_peak = AUDIO_CAPTURE_NOISE_GATE_CLOSE_PEAK,
@@ -546,6 +558,37 @@ static int16_t audio_apply_capture_upload_gain(int32_t sample, uint32_t base_gai
     int64_t amplified = (int64_t)sample * (int64_t)base_gain_q8 * (int64_t)auto_gain_q8;
     amplified /= (256LL * 256LL);
     return audio_clip_i16((int32_t)amplified);
+}
+
+static void audio_capture_apply_high_pass(int16_t *samples,
+                                          size_t sample_count,
+                                          int32_t *previous_input,
+                                          int32_t *previous_output,
+                                          bool *state_valid)
+{
+    if (samples == NULL || previous_input == NULL || previous_output == NULL ||
+        state_valid == NULL || sample_count == 0U) {
+        return;
+    }
+
+    size_t index = 0U;
+    if (!*state_valid) {
+        *previous_input = samples[0];
+        *previous_output = 0;
+        *state_valid = true;
+        samples[0] = 0;
+        index = 1U;
+    }
+
+    for (; index < sample_count; ++index) {
+        int32_t input = samples[index];
+        int32_t state = *previous_output + input - *previous_input;
+        int32_t output =
+            (int32_t)(((int64_t)AUDIO_CAPTURE_HIGH_PASS_ALPHA_Q15 * state) >> 15);
+        *previous_input = input;
+        *previous_output = output;
+        samples[index] = audio_clip_i16(output);
+    }
 }
 
 static void audio_mute_playback_path_no_mutex(void)
@@ -1561,6 +1604,10 @@ static void audio_capture_process_task(void *ctx)
     uint32_t log_auto_gain_q8 = AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8;
     uint32_t auto_gain_q8 = AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8;
     bool noise_gate_open = false;
+    int32_t high_pass_previous_input = 0;
+    int32_t high_pass_previous_output = 0;
+    bool high_pass_state_valid = false;
+    bool high_pass_was_enabled = false;
     uint64_t timing_process_sum_us = 0;
     uint64_t timing_dispatch_sum_us = 0;
     uint64_t timing_pipeline_wait_sum_us = 0;
@@ -1639,6 +1686,10 @@ static void audio_capture_process_task(void *ctx)
 
         if (!capture_enabled) {
             audio_echo_cancel_reset();
+            high_pass_previous_input = 0;
+            high_pass_previous_output = 0;
+            high_pass_state_valid = false;
+            high_pass_was_enabled = false;
             (void)xQueueSend(s_capture_free_queue, &slot_index, 0);
             continue;
         }
@@ -1810,6 +1861,20 @@ static void audio_capture_process_task(void *ctx)
         }
         if (echo_metrics.linear_peak > log_echo_linear_peak) {
             log_echo_linear_peak = echo_metrics.linear_peak;
+        }
+
+        if (processing_config.high_pass_filter_enabled) {
+            audio_capture_apply_high_pass(mono_buffer,
+                                          samples_per_frame,
+                                          &high_pass_previous_input,
+                                          &high_pass_previous_output,
+                                          &high_pass_state_valid);
+            high_pass_was_enabled = true;
+        } else if (high_pass_was_enabled) {
+            high_pass_previous_input = 0;
+            high_pass_previous_output = 0;
+            high_pass_state_valid = false;
+            high_pass_was_enabled = false;
         }
 
         uint32_t noise_gate_input_peak = 0;
@@ -2549,6 +2614,7 @@ esp_err_t audio_set_capture_processing_config(const audio_capture_processing_con
     s_audio_stats.far_end_upload_gain_percent = next.far_end_upload_gain_percent;
     s_audio_stats.far_end_auto_gain_max_percent = next.far_end_auto_gain_max_percent;
     s_audio_stats.echo_suppression = next.echo_suppression;
+    s_audio_stats.capture_high_pass_filter_enabled = next.high_pass_filter_enabled;
     s_audio_stats.capture_noise_gate_enabled = next.noise_gate_enabled;
     input_ready = s_audio_input_ready;
     taskEXIT_CRITICAL(&s_audio_lock);
@@ -2559,7 +2625,7 @@ esp_err_t audio_set_capture_processing_config(const audio_capture_processing_con
     uint32_t far_end_upload_gain_x10 =
         (audio_capture_base_gain_q8(next.far_end_upload_gain_percent) * 10U) / 256U;
     ESP_LOGI(TAG,
-             "capture processing configured: send=%u codec=%u(%d.%01ddB) upload=%u(%lu.%lux) auto_max=%u%% echo_continuous=%u near_end_protect=%u far_end_guard=%u upload=%u(%lu.%lux) auto_max=%u%% suppression=%s diagnostics=%u noise_gate=%u open=%u close=%u atten=%u%%",
+             "capture processing configured: send=%u codec=%u(%d.%01ddB) upload=%u(%lu.%lux) auto_max=%u%% echo_continuous=%u near_end_protect=%u far_end_guard=%u upload=%u(%lu.%lux) auto_max=%u%% suppression=%s diagnostics=%u hpf=%u/%uHz noise_gate=%u open=%u close=%u atten=%u%%",
              (unsigned)next.send_volume_percent,
              (unsigned)next.codec_gain_percent,
              codec_gain_x10 / 10,
@@ -2577,6 +2643,8 @@ esp_err_t audio_set_capture_processing_config(const audio_capture_processing_con
              (unsigned)next.far_end_auto_gain_max_percent,
              next.echo_suppression == AUDIO_ECHO_SUPPRESSION_STRONG ? "strong" : "balanced",
              next.echo_diagnostics_enabled ? 1U : 0U,
+             next.high_pass_filter_enabled ? 1U : 0U,
+             AUDIO_CAPTURE_HIGH_PASS_CUTOFF_HZ,
              next.noise_gate_enabled ? 1U : 0U,
              (unsigned)next.noise_gate_open_peak,
              (unsigned)next.noise_gate_close_peak,

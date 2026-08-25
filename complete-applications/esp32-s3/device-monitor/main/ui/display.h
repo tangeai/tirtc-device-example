@@ -9,7 +9,6 @@
 
 #define DISPLAY_WIFI_SCAN_MAX       10
 #define DISPLAY_DEVICE_UUID_MAX_LEN 37
-#define DISPLAY_PING_SUMMARY_MAX    96
 #define DISPLAY_TEST_STATUS_MAX     96
 #define DISPLAY_AI_CHAT_CAPTION_MAX 256
 #define DISPLAY_AI_CHAT_MESSAGE_MAX 100
@@ -133,7 +132,12 @@ typedef struct {
     uint16_t wifi_scan_count;
     display_wifi_scan_result_t wifi_scan_results[DISPLAY_WIFI_SCAN_MAX];
     bool ping_running;
-    char ping_summary[DISPLAY_PING_SUMMARY_MAX];
+    bool ping_valid;
+    uint32_t ping_transmitted;
+    uint32_t ping_received;
+    uint32_t ping_latency_avg_ms;
+    uint32_t ping_jitter_ms;
+    uint32_t ping_loss_percent;
     bool test_running;
     char test_status[DISPLAY_TEST_STATUS_MAX];
     display_ota_state_t ota_state;

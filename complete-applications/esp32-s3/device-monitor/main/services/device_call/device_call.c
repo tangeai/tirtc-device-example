@@ -14,6 +14,7 @@
 #include "freertos/task.h"
 
 #include "device_online.h"
+#include "device_call_ringtone.h"
 #include "platform_task_reaper.h"
 #include "rtc_transport.h"
 #include "thing_http_client.h"
@@ -905,6 +906,7 @@ static void device_call_accept_failed(const device_call_accept_ctx_t *ctx,
     if (s_call.generation == ctx->generation) {
         device_call_set_error_locked(error, message);
         s_call.accept_running = false;
+        s_call.switch_disconnect_in_progress = false;
         session_ended = true;
     }
     device_call_unlock();
@@ -2403,6 +2405,14 @@ static void device_call_handle_incoming(const cJSON *payload, uint32_t message_g
     state = s_call.state;
     generation = s_call.generation;
     device_call_unlock();
+    esp_err_t ringtone_ret = device_call_ringtone_start();
+    if (ringtone_ret != ESP_OK) {
+        ESP_LOGW(CALL_FLOW_TAG,
+                 "stage=ringtone_start_failed gen=%lu room=%s ret=%s",
+                 (unsigned long)generation,
+                 room_id,
+                 esp_err_to_name(ringtone_ret));
+    }
     ESP_LOGI(CALL_FLOW_TAG,
              "stage=incoming_received gen=%lu state=%s room=%s peer=%s type=%s",
              (unsigned long)generation,
@@ -2421,6 +2431,7 @@ static void device_call_handle_room_cancel(const cJSON *payload, uint32_t messag
 {
     const char *room_id = device_call_json_string(payload, "room_id");
     bool close_transport = false;
+    bool stop_ringtone = false;
 
     if (room_id[0] == '\0') {
         return;
@@ -2433,6 +2444,7 @@ static void device_call_handle_room_cancel(const cJSON *payload, uint32_t messag
     }
     if (s_call.pending_incoming && strcmp(s_call.pending_room_id, room_id) == 0) {
         s_call.pending_incoming = false;
+        stop_ringtone = true;
         s_call.pending_room_id[0] = '\0';
         s_call.pending_caller_id[0] = '\0';
         s_call.pending_call_type[0] = '\0';
@@ -2447,6 +2459,16 @@ static void device_call_handle_room_cancel(const cJSON *payload, uint32_t messag
         device_call_show_pending_or_idle_locked("call ended");
     }
     device_call_unlock();
+
+    if (stop_ringtone) {
+        esp_err_t ringtone_ret = device_call_ringtone_stop();
+        if (ringtone_ret != ESP_OK) {
+            ESP_LOGW(CALL_FLOW_TAG,
+                     "stage=ringtone_stop_failed reason=room_cancel room=%s ret=%s",
+                     room_id,
+                     esp_err_to_name(ringtone_ret));
+        }
+    }
 
     if (close_transport) {
         device_call_reset_caller_media_gate();
@@ -2867,20 +2889,42 @@ static void device_call_on_rtc_connection_error(tirtc_conn_t conn, int error, vo
     device_call_state_t state = DEVICE_CALL_STATE_IDLE;
     bool active = false;
     bool pending_caller = false;
+    bool caller_connect_timeout = false;
+    bool callee_connect_failed = false;
 
     (void)ctx;
 
     device_call_lock();
-    pending_caller = s_call.role == DEVICE_CALL_ROLE_CALLER &&
-                     (s_call.state == DEVICE_CALL_STATE_OUTGOING ||
-                      s_call.state == DEVICE_CALL_STATE_CONNECTING) &&
-                     s_call.rtc_conn == conn;
-    if (pending_caller) {
-        s_call.rtc_conn = NULL;
-        device_call_set_message_locked("peer connection retrying");
+    caller_connect_timeout = error == TIRTC_E_TIMEOUTED &&
+                             s_call.role == DEVICE_CALL_ROLE_CALLER &&
+                             (s_call.state == DEVICE_CALL_STATE_OUTGOING ||
+                              s_call.state == DEVICE_CALL_STATE_CONNECTING) &&
+                             (s_call.rtc_conn == NULL || s_call.rtc_conn == conn);
+    callee_connect_failed = error != 0 && conn == NULL &&
+                            s_call.role == DEVICE_CALL_ROLE_CALLEE &&
+                            s_call.state == DEVICE_CALL_STATE_CONNECTING &&
+                            s_call.rtc_conn == NULL;
+    if (caller_connect_timeout || callee_connect_failed) {
+        /* A terminal TiRtcConnect result ends this call generation. The caller
+         * cancels its room here. The callee accept worker owns the accepted-room
+         * HANGUP action and will observe the generation change immediately. */
+        strlcpy(room_id, s_call.room_id, sizeof(room_id));
+        role = s_call.role;
+        state = s_call.state;
+        device_call_end_session_generation_locked();
+        device_call_set_error_locked(ESP_ERR_TIMEOUT, "peer connection timed out");
+    } else {
+        pending_caller = s_call.role == DEVICE_CALL_ROLE_CALLER &&
+                         (s_call.state == DEVICE_CALL_STATE_OUTGOING ||
+                          s_call.state == DEVICE_CALL_STATE_CONNECTING) &&
+                         s_call.rtc_conn == conn;
+        if (pending_caller) {
+            s_call.rtc_conn = NULL;
+            device_call_set_message_locked("peer connection retrying");
+        }
+        active = s_call.state == DEVICE_CALL_STATE_IN_CALL &&
+                 s_call.rtc_conn != NULL && s_call.rtc_conn == conn;
     }
-    active = s_call.state == DEVICE_CALL_STATE_IN_CALL &&
-             s_call.rtc_conn != NULL && s_call.rtc_conn == conn;
     if (active) {
         strlcpy(room_id, s_call.room_id, sizeof(room_id));
         role = s_call.role;
@@ -2890,6 +2934,15 @@ static void device_call_on_rtc_connection_error(tirtc_conn_t conn, int error, vo
     }
     device_call_unlock();
 
+    if (caller_connect_timeout && room_id[0] != '\0') {
+        (void)device_call_post_room_action_async(DEVICE_CALL_ACTION_CANCEL,
+                                                 room_id,
+                                                 "p2p_timeout");
+    }
+    if (caller_connect_timeout || callee_connect_failed) {
+        device_call_reset_caller_media_gate();
+        device_call_notify_session_ended();
+    }
     if (active && room_id[0] != '\0') {
         device_call_action_t action = role == DEVICE_CALL_ROLE_CALLER &&
                                       state != DEVICE_CALL_STATE_IN_CALL ?
@@ -2902,13 +2955,15 @@ static void device_call_on_rtc_connection_error(tirtc_conn_t conn, int error, vo
         device_call_notify_session_ended();
     }
     ESP_LOGW(CALL_FLOW_TAG,
-             "stage=rtc_error role=%s state=%s room=%s sdk_error=%d active=%d pending_caller=%d",
+             "stage=rtc_error role=%s state=%s room=%s sdk_error=%d active=%d pending_caller=%d caller_timeout=%d callee_connect_failed=%d",
              device_call_role_name(role),
              device_call_state_name(state),
              room_id[0] != '\0' ? room_id : "-",
              error,
              active ? 1 : 0,
-             pending_caller ? 1 : 0);
+             pending_caller ? 1 : 0,
+             caller_connect_timeout ? 1 : 0,
+             callee_connect_failed ? 1 : 0);
     ESP_LOGW(TAG, "RTC connection error during device call: error=%d", error);
 }
 
@@ -3232,6 +3287,7 @@ esp_err_t device_call_start(void)
 void device_call_reset_identity_state(void)
 {
     bool notify_session_ended = false;
+    bool stop_ringtone = false;
 
     device_call_lock();
     if (s_call.initialized) {
@@ -3240,6 +3296,7 @@ void device_call_reset_identity_state(void)
                                s_call.switch_disconnect_in_progress ||
                                s_call.pending_incoming ||
                                s_call.state != DEVICE_CALL_STATE_IDLE;
+        stop_ringtone = s_call.pending_incoming;
         s_call.ingress_enabled = false;
         device_call_end_session_generation_locked();
         s_call.pending_incoming = false;
@@ -3260,6 +3317,9 @@ void device_call_reset_identity_state(void)
     }
     device_call_unlock();
 
+    if (stop_ringtone) {
+        (void)device_call_ringtone_stop();
+    }
     device_call_reset_caller_media_gate();
     if (notify_session_ended) {
         device_call_notify_session_ended();
@@ -3481,6 +3541,18 @@ esp_err_t device_call_accept_pending(void)
     device_call_set_message_locked("answering call");
     device_call_unlock();
 
+    esp_err_t ringtone_ret = device_call_ringtone_stop();
+    if (ringtone_ret != ESP_OK) {
+        device_call_accept_failed(ctx, ringtone_ret, "ringtone stop failed", false);
+        ESP_LOGE(CALL_FLOW_TAG,
+                 "stage=accept_rejected gen=%lu room=%s reason=ringtone_stop ret=%s",
+                 (unsigned long)generation,
+                 ctx->room_id,
+                 esp_err_to_name(ringtone_ret));
+        free(ctx);
+        return ringtone_ret;
+    }
+
     ESP_LOGI(CALL_FLOW_TAG,
              "stage=accept_queued gen=%lu room=%s peer=%s type=%s switch=%d",
              (unsigned long)generation,
@@ -3532,6 +3604,14 @@ esp_err_t device_call_reject_pending(void)
     }
     device_call_unlock();
 
+    esp_err_t ringtone_ret = device_call_ringtone_stop();
+    if (ringtone_ret != ESP_OK) {
+        ESP_LOGW(CALL_FLOW_TAG,
+                 "stage=ringtone_stop_failed reason=reject room=%s ret=%s",
+                 room_id,
+                 esp_err_to_name(ringtone_ret));
+    }
+
     ESP_LOGI(CALL_FLOW_TAG,
              "stage=reject_queued room=%s",
              room_id);
@@ -3545,22 +3625,52 @@ esp_err_t device_call_hangup(void)
     device_call_role_t role = DEVICE_CALL_ROLE_NONE;
     device_call_state_t state = DEVICE_CALL_STATE_IDLE;
     bool connected = false;
+    bool incoming = false;
 
     device_call_lock();
     state = s_call.state;
-    if (state != DEVICE_CALL_STATE_OUTGOING && state != DEVICE_CALL_STATE_CONNECTING &&
-        state != DEVICE_CALL_STATE_IN_CALL) {
+    if (state != DEVICE_CALL_STATE_OUTGOING && state != DEVICE_CALL_STATE_INCOMING &&
+        state != DEVICE_CALL_STATE_CONNECTING && state != DEVICE_CALL_STATE_IN_CALL) {
         device_call_unlock();
         ESP_LOGW(CALL_FLOW_TAG,
                  "stage=hangup_rejected state=%s reason=no_active_call",
                  device_call_state_name(state));
         return ESP_ERR_INVALID_STATE;
     }
-    strlcpy(room_id, s_call.room_id, sizeof(room_id));
+    incoming = state == DEVICE_CALL_STATE_INCOMING && s_call.pending_incoming;
+    strlcpy(room_id,
+            incoming ? s_call.pending_room_id : s_call.room_id,
+            sizeof(room_id));
     role = s_call.role;
+    if (incoming) {
+        s_call.pending_incoming = false;
+        s_call.pending_room_id[0] = '\0';
+        s_call.pending_caller_id[0] = '\0';
+        s_call.pending_call_type[0] = '\0';
+    }
     device_call_end_session_generation_locked();
     device_call_show_pending_or_idle_locked("call ended");
     device_call_unlock();
+
+    if (incoming) {
+        esp_err_t ringtone_ret = device_call_ringtone_stop();
+        if (ringtone_ret != ESP_OK) {
+            ESP_LOGW(CALL_FLOW_TAG,
+                     "stage=ringtone_stop_failed reason=hangup_incoming room=%s ret=%s",
+                     room_id,
+                     esp_err_to_name(ringtone_ret));
+        }
+        esp_err_t reject_ret = room_id[0] != '\0' ?
+                               device_call_post_room_action_async(DEVICE_CALL_ACTION_REJECT,
+                                                                  room_id,
+                                                                  "decline") :
+                               ESP_OK;
+        ESP_LOGI(CALL_FLOW_TAG,
+                 "stage=hangup_done action=reject room=%s ret=%s",
+                 room_id[0] != '\0' ? room_id : "-",
+                 esp_err_to_name(reject_ret));
+        return reject_ret;
+    }
 
     device_call_reset_caller_media_gate();
     connected = device_call_transport_is_connected();

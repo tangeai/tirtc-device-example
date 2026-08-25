@@ -74,6 +74,7 @@ idf_component_register(
         "services/device_binding/device_binding_http.c"
         "services/device_binding/device_identity.c"
         "services/device_call/device_call.c"
+        "services/device_call/device_call_ringtone.c"
         "services/device_online/device_online.c"
         "services/thing_connect/thing_service_registry.c"
         "services/media_sink.c"

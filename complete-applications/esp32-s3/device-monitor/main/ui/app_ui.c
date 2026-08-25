@@ -743,7 +743,12 @@ void app_ui_fill_display_status(display_status_t *status, void *ctx)
         status->wifi_scan_results[index].channel = snapshot->network.scan_results[index].channel;
     }
     status->ping_running = snapshot->network.ping_running;
-    strlcpy(status->ping_summary, snapshot->network.ping_summary, sizeof(status->ping_summary));
+    status->ping_valid = snapshot->network.ping_valid;
+    status->ping_transmitted = snapshot->network.ping_transmitted;
+    status->ping_received = snapshot->network.ping_received;
+    status->ping_latency_avg_ms = snapshot->network.ping_latency_avg_ms;
+    status->ping_jitter_ms = snapshot->network.ping_jitter_ms;
+    status->ping_loss_percent = snapshot->network.ping_loss_percent;
     status->test_running = snapshot->test.sender_running;
     strlcpy(status->test_status, snapshot->test.sender_status, sizeof(status->test_status));
     status->ota_state = (display_ota_state_t)snapshot->ota.state;

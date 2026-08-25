@@ -2,6 +2,7 @@
 
 #include <limits.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -16,11 +17,10 @@ static const char *TAG = "audio_alaw_codec";
  * combination made speech dull while allowing aliased high-frequency noise
  * into the telephone-band A-law stream. These Q15 coefficients keep the
  * speech passband substantially flatter and provide a real anti-alias stage.
- * The symmetric implementation below needs only 16 multiplies per output
- * sample and no heap or persistent state.
+ * Decimation is a stream operation: every call must retain the FIR delay line.
+ * Restarting a symmetric filter at each 20 ms packet creates two edge
+ * transients per packet, which becomes a periodic buzz after G.711 coding.
  */
-#define AUDIO_ALAW_DECIMATOR_TAPS       31U
-#define AUDIO_ALAW_DECIMATOR_HALF_TAPS  15U
 #define AUDIO_ALAW_DECIMATOR_Q15_SHIFT  15U
 
 static const int16_t s_audio_alaw_decimator_q15[AUDIO_ALAW_DECIMATOR_TAPS] = {
@@ -30,22 +30,31 @@ static const int16_t s_audio_alaw_decimator_q15[AUDIO_ALAW_DECIMATOR_TAPS] = {
     305, 261, -112, -132, 33, 65, -9,
 };
 
-static int16_t audio_alaw_decimate_sample(const int16_t *samples,
-                                          size_t sample_count,
-                                          size_t center)
+static int16_t audio_alaw_decimator_push(audio_alaw_stream_encoder_t *encoder,
+                                         int16_t sample)
 {
-    int64_t accumulator =
-        (int64_t)samples[center] *
-        s_audio_alaw_decimator_q15[AUDIO_ALAW_DECIMATOR_HALF_TAPS];
+    if (!encoder->initialized) {
+        for (size_t index = 0; index < AUDIO_ALAW_DECIMATOR_TAPS; ++index) {
+            encoder->delay[index] = sample;
+        }
+        encoder->write_index = 0U;
+        encoder->phase = 0U;
+        encoder->initialized = true;
+    }
 
-    for (size_t offset = 1U; offset <= AUDIO_ALAW_DECIMATOR_HALF_TAPS; ++offset) {
-        size_t left = center >= offset ? center - offset : 0U;
-        size_t right = center + offset < sample_count ?
-                           center + offset : sample_count - 1U;
-        int32_t pair = (int32_t)samples[left] + samples[right];
-        accumulator +=
-            (int64_t)pair *
-            s_audio_alaw_decimator_q15[AUDIO_ALAW_DECIMATOR_HALF_TAPS + offset];
+    encoder->delay[encoder->write_index] = sample;
+
+    int64_t accumulator = 0;
+    size_t delay_index = encoder->write_index;
+    for (size_t tap = 0; tap < AUDIO_ALAW_DECIMATOR_TAPS; ++tap) {
+        accumulator += (int64_t)encoder->delay[delay_index] *
+                       s_audio_alaw_decimator_q15[tap];
+        delay_index = delay_index == 0U ? AUDIO_ALAW_DECIMATOR_TAPS - 1U : delay_index - 1U;
+    }
+
+    encoder->write_index++;
+    if (encoder->write_index >= AUDIO_ALAW_DECIMATOR_TAPS) {
+        encoder->write_index = 0U;
     }
 
     accumulator += (int64_t)1 << (AUDIO_ALAW_DECIMATOR_Q15_SHIFT - 1U);
@@ -73,15 +82,20 @@ static void *audio_alaw_alloc(size_t size)
 
 static uint8_t audio_alaw_linear_to_alaw(int16_t sample)
 {
-    static const int16_t segment_end[8] = {0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF, 0x1FFF, 0x3FFF, 0x7FFF};
+    /* Segment boundaries and shifts follow the corrected 16-bit G.711 reference. */
+    static const int16_t segment_end[8] = {
+        0x1F, 0x3F, 0x7F, 0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF,
+    };
     uint8_t mask = 0xD5;
-    int32_t magnitude = sample;
+    int32_t scaled = sample >= 0 ?
+                         (int32_t)sample / 8 :
+                         -(((int32_t)(-sample) + 7) / 8);
+    int32_t magnitude = scaled;
     uint8_t segment = 0;
 
     if (magnitude < 0) {
         mask = 0x55;
-        /* ITU-T G.711 A-law uses an 8-count negative-side bias. */
-        magnitude = -magnitude - 8;
+        magnitude = -magnitude - 1;
     }
 
     while (segment < 8 && magnitude > segment_end[segment]) {
@@ -94,9 +108,9 @@ static uint8_t audio_alaw_linear_to_alaw(int16_t sample)
 
     uint8_t alaw = (uint8_t)(segment << 4);
     if (segment < 2) {
-        alaw |= (uint8_t)((magnitude >> 4) & 0x0F);
+        alaw |= (uint8_t)((magnitude >> 1) & 0x0F);
     } else {
-        alaw |= (uint8_t)((magnitude >> (segment + 3)) & 0x0F);
+        alaw |= (uint8_t)((magnitude >> segment) & 0x0F);
     }
 
     return (uint8_t)(alaw ^ mask);
@@ -197,10 +211,33 @@ esp_err_t audio_alaw_encode_16k_mono_to_8k(const uint8_t *pcm_data,
                                            size_t encoded_capacity,
                                            size_t *encoded_data_len)
 {
+    audio_alaw_stream_encoder_t encoder = {0};
+    return audio_alaw_stream_encode_16k_mono_to_8k(&encoder,
+                                                   pcm_data,
+                                                   pcm_data_len,
+                                                   encoded_data,
+                                                   encoded_capacity,
+                                                   encoded_data_len);
+}
+
+void audio_alaw_stream_encoder_reset(audio_alaw_stream_encoder_t *encoder)
+{
+    if (encoder != NULL) {
+        memset(encoder, 0, sizeof(*encoder));
+    }
+}
+
+esp_err_t audio_alaw_stream_encode_16k_mono_to_8k(audio_alaw_stream_encoder_t *encoder,
+                                                  const uint8_t *pcm_data,
+                                                  size_t pcm_data_len,
+                                                  uint8_t *encoded_data,
+                                                  size_t encoded_capacity,
+                                                  size_t *encoded_data_len)
+{
     if (encoded_data_len != NULL) {
         *encoded_data_len = 0;
     }
-    if (pcm_data == NULL || encoded_data == NULL || encoded_data_len == NULL ||
+    if (encoder == NULL || pcm_data == NULL || encoded_data == NULL || encoded_data_len == NULL ||
         pcm_data_len == 0 || (pcm_data_len & 0x3U) != 0U) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -212,14 +249,16 @@ esp_err_t audio_alaw_encode_16k_mono_to_8k(const uint8_t *pcm_data,
     }
 
     const int16_t *pcm_samples = (const int16_t *)pcm_data;
-    for (size_t index = 0; index < output_sample_count; ++index) {
-        const size_t center = index * 2U;
-        const int16_t filtered =
-            audio_alaw_decimate_sample(pcm_samples, input_sample_count, center);
-        encoded_data[index] = audio_alaw_linear_to_alaw(filtered);
+    size_t output_index = 0U;
+    for (size_t input_index = 0; input_index < input_sample_count; ++input_index) {
+        int16_t filtered = audio_alaw_decimator_push(encoder, pcm_samples[input_index]);
+        if (encoder->phase == 0U) {
+            encoded_data[output_index++] = audio_alaw_linear_to_alaw(filtered);
+        }
+        encoder->phase ^= 1U;
     }
 
-    *encoded_data_len = output_sample_count;
+    *encoded_data_len = output_index;
     return ESP_OK;
 }
 

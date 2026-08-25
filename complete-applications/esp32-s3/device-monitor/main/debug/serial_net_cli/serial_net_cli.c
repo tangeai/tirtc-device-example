@@ -648,7 +648,7 @@ static void serial_net_cli_print_media(void)
         "buffered_ms=%u,queued=%u,playback=%u,talkspurt=%u,first_play_ms=%u,"
         "jitter_ms=%u/%u/%u,max_gap_ms=%u,rx=%u/%u,played=%u/%u,"
         "drop=%u/%u/%u,underflow=%u/%u,grace=%u/%u,delayed=%u,"
-        "source_late=%u/%u/%u,source_clock=%d,gap_pending=%d/%u,gap_fill=%u/%u,conceal=%u/%u,clock_recovery=%u/%u,"
+        "source_late=%u/%u/%u,source_clock=%d,gap_pending=%d/%u,gap_fill=%u/%u,conceal=%u/%u,rate=%d,slow=%u/%u,fast=%u/%u,"
         "sdk_send=%u/%s,rtc_rx=%u",
         serial_net_cli_media_profile_name(media.profile),
         (unsigned)media.source_packet_ms,
@@ -685,8 +685,11 @@ static void serial_net_cli_print_media(void)
         (unsigned)media.source_gap_fill_ms,
         (unsigned)media.concealment_events,
         (unsigned)media.concealed_ms,
+        (int)media.playout_rate_mode,
         (unsigned)media.clock_recovery_events,
         (unsigned)media.clock_recovery_frames,
+        (unsigned)media.clock_recovery_fast_events,
+        (unsigned)media.clock_recovery_fast_frames,
         (unsigned)send_buffer_used,
         esp_err_to_name(send_buffer_ret),
         (unsigned)rtc.rx_audio_frames);
@@ -1546,7 +1549,7 @@ static void serial_net_cli_print_audio_path(void)
         (unsigned long)audio.echo_near_reject_low_nlp,
         (unsigned long)audio.echo_near_reject_high_coherence);
     serial_net_cli_writef(
-        "+AUDIOPATH:node=uplink_gain,send=%u,upload=%u,base_q8=%u,auto_q8=%u,target_peak=%u,auto_max=%u,last_auto_max=%u,gate=%u,pre_dbfs_x10=%ld/%ld,post_dbfs_x10=%ld/%ld,meter=%lu",
+        "+AUDIOPATH:node=uplink_gain,send=%u,upload=%u,base_q8=%u,auto_q8=%u,target_peak=%u,auto_max=%u,last_auto_max=%u,hpf=%u,gate=%u,pre_dbfs_x10=%ld/%ld,post_dbfs_x10=%ld/%ld,meter=%lu",
         (unsigned)audio.capture_gain_percent,
         (unsigned)audio.capture_upload_gain_percent,
         (unsigned)audio.capture_base_gain_q8,
@@ -1554,6 +1557,7 @@ static void serial_net_cli_print_audio_path(void)
         (unsigned)audio.capture_auto_gain_target_peak,
         (unsigned)audio.capture_auto_gain_max_percent,
         (unsigned)audio.capture_effective_auto_gain_max_percent,
+        audio.capture_high_pass_filter_enabled ? 1U : 0U,
         audio.capture_noise_gate_enabled ? 1U : 0U,
         (long)audio.capture_pre_peak_dbfs_x10,
         (long)audio.capture_pre_rms_dbfs_x10,
@@ -1606,7 +1610,7 @@ static void serial_net_cli_print_audio_path(void)
             (unsigned)media.source_gap_fill_events,
             (unsigned)media.source_gap_fill_ms);
         serial_net_cli_writef(
-            "+AUDIOPATH:node=play_buffer,active=%u,talkspurt=%u,rx=%u/%u,played=%u/%u,drop=%u/%u/%u,underflow=%u/%u,grace=%u/%u,conceal=%u/%u,recovery=%u/%u,paced=%u,pace_wait=%u/%u/%u,pace_late=%u/%u/%u",
+            "+AUDIOPATH:node=play_buffer,active=%u,talkspurt=%u,rx=%u/%u,played=%u/%u,drop=%u/%u/%u,underflow=%u/%u,grace=%u/%u,conceal=%u/%u,rate=%d,slow=%u/%u,fast=%u/%u,paced=%u,pace_wait=%u/%u/%u,pace_late=%u/%u/%u",
             media.playback_active ? 1U : 0U,
             media.talkspurt_active ? 1U : 0U,
             (unsigned)media.rx_packets,
@@ -1622,8 +1626,11 @@ static void serial_net_cli_print_audio_path(void)
             (unsigned)media.underflow_grace_recoveries,
             (unsigned)media.concealment_events,
             (unsigned)media.concealed_ms,
+            (int)media.playout_rate_mode,
             (unsigned)media.clock_recovery_events,
             (unsigned)media.clock_recovery_frames,
+            (unsigned)media.clock_recovery_fast_events,
+            (unsigned)media.clock_recovery_fast_frames,
             media.playback_pacing_enabled ? 1U : 0U,
             (unsigned)media.pacing_wait_events,
             (unsigned)media.pacing_wait_ms,
@@ -1952,13 +1959,14 @@ static void serial_net_cli_poll_operations(void)
             if (!ping.running && ping.valid) {
                 const bool ping_ready = ping.received > 0U;
                 serial_net_cli_writef(
-                    "+NETEVT:seq=%u,stage=ping,state=%s,tx=%u,rx=%u,loss=%u,avg_ms=%u",
+                    "+NETEVT:seq=%u,stage=ping,state=%s,tx=%u,rx=%u,loss=%u,avg_ms=%u,jitter_ms=%u",
                     (unsigned)probe_seq,
                     ping_ready ? "ready" : "failed",
                     (unsigned)ping.transmitted,
                     (unsigned)ping.received,
                     (unsigned)ping.loss_percent,
-                    (unsigned)ping.avg_time_ms);
+                    (unsigned)ping.avg_time_ms,
+                    (unsigned)ping.jitter_ms);
                 taskENTER_CRITICAL(&s_serial_net_cli_lock);
                 s_operations.probe_ping_reported = true;
                 if (!ping_ready) {

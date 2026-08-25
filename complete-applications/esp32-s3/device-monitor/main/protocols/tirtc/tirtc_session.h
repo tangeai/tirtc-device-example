@@ -26,9 +26,9 @@ typedef enum {
 } tirtc_session_mode_t;
 
 typedef enum {
-    /* Browser IPC talkback keeps the deployed 8 kHz A-law wire contract. */
+    /* Browser IPC, device calls and WeChat VoIP share the 8 kHz A-law wire contract. */
     TIRTC_SESSION_BUILTIN_AUDIO_FORMAT_ALAW_8K = 0,
-    /* Device-to-device calls can preserve the native 16 kHz PCM capture. */
+    /* Retained only for explicit PCM A/B tests; it is not the product default. */
     TIRTC_SESSION_BUILTIN_AUDIO_FORMAT_PCM_16K,
 } tirtc_session_builtin_audio_format_t;
 

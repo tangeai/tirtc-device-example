@@ -35,6 +35,7 @@ typedef struct {
     uint32_t min_time_ms;
     uint32_t avg_time_ms;
     uint32_t max_time_ms;
+    uint32_t jitter_ms;
     uint32_t loss_percent;
     int last_error;
     char target[NETWORK_PING_TARGET_MAX];

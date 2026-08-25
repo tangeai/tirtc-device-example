@@ -49,6 +49,7 @@
 #include "serial_net_cli.h"
 #endif
 #include "system_time.h"
+#include "thing_http_client.h"
 #include "thing_mqtt_client.h"
 #include "thing_service_registry.h"
 #include "wechat_voip_config.h"
@@ -97,6 +98,9 @@ static const char *CALL_FLOW_TAG = "CALL_FLOW";
 #define APP_AI_CHAT_TOKEN_PREFETCH_TASK_PRIORITY   1
 #define APP_THING_BOOTSTRAP_TASK_STACK_SIZE        (12 * 1024)
 #define APP_THING_BOOTSTRAP_TASK_PRIORITY          2
+#define APP_THING_DISCOVERY_MAX_ATTEMPTS            4U
+#define APP_THING_DISCOVERY_RETRY_INITIAL_MS        1000U
+#define APP_THING_DISCOVERY_RETRY_MAX_MS            4000U
 #define APP_DEVICE_UNBIND_ACK_WAIT_MS               2000U
 #define APP_DEVICE_ONLINE_STOP_WAIT_MS              12000U
 #if APP_CONFIG_DEBUG_SCREEN_SERVER_ENABLE
@@ -111,6 +115,7 @@ typedef enum {
 	APP_CONTROL_EVENT_RTC_PREPARE_AFTER_IDENTITY,
 	APP_CONTROL_EVENT_RTC_IDENTITY_CONFLICT,
 	APP_CONTROL_EVENT_DEVICE_UNBIND,
+	APP_CONTROL_EVENT_DEVICE_BINDING_REFRESH,
 	APP_CONTROL_EVENT_DEVICE_BINDING_VERIFY,
 	APP_CONTROL_EVENT_DEVICE_REBIND_REQUIRED,
 	APP_CONTROL_EVENT_DEVICE_ONLINE_READY,
@@ -236,6 +241,7 @@ static esp_err_t app_apply_pending_rtc_identity_config(const char *reason);
 static esp_err_t app_handle_device_unbind(const char *reason);
 static void app_request_device_unbind(const char *reason);
 static void app_clear_device_binding_control_pending(void);
+static esp_err_t app_refresh_device_binding_internal(const char *reason);
 static void app_schedule_thing_bootstrap(const char *reason);
 static void app_time_sync_cb(esp_err_t result, bool time_valid, void *ctx);
 static void app_device_binding_bound_cb(const char *device_id, void *ctx);
@@ -969,6 +975,36 @@ static esp_err_t app_queue_device_binding_verification(const char *reason)
 	return ESP_OK;
 }
 
+static esp_err_t app_queue_device_binding_refresh(const char *reason)
+{
+	const char *safe_reason = reason != NULL && reason[0] != '\0' ? reason : "manual-refresh";
+	bool already_pending = false;
+
+	if (s_app_control_queue == NULL) {
+		return ESP_ERR_INVALID_STATE;
+	}
+	taskENTER_CRITICAL(&s_app_lifecycle_lock);
+	already_pending = s_device_binding_control_pending;
+	if (!already_pending) {
+		s_device_binding_control_pending = true;
+	}
+	taskEXIT_CRITICAL(&s_app_lifecycle_lock);
+	if (already_pending) {
+		ESP_LOGI(TAG, "device binding refresh already pending: reason=%s", safe_reason);
+		return ESP_OK;
+	}
+
+	app_control_event_t event = {
+		.type = APP_CONTROL_EVENT_DEVICE_BINDING_REFRESH,
+	};
+	strlcpy(event.reason, safe_reason, sizeof(event.reason));
+	if (xQueueSendToBack(s_app_control_queue, &event, 0) != pdTRUE) {
+		app_clear_device_binding_control_pending();
+		return ESP_ERR_NO_MEM;
+	}
+	return ESP_OK;
+}
+
 static void app_device_online_message_cb(const char *topic,
 					 const char *payload,
 					 size_t payload_len,
@@ -1181,6 +1217,16 @@ static bool app_incoming_session_allowed(app_id_t incoming_app)
 
 	device_call_get_snapshot(&call);
 	rtc_transport_get_stats(&rtc);
+	/* ThingConnect signaling can remain online while the RTC runtime is in a
+	 * genuine error state. Reject the room instead of leaving the peer ringing
+	 * when media transport is unavailable. */
+	if (rtc.state == RTC_TRANSPORT_STATE_ERROR) {
+		ESP_LOGW(TAG,
+			 "incoming session rejected: incoming=%s reason=rtc_unavailable sdk_started=%d",
+			 app_id_name(incoming_app),
+			 rtc.sdk_started ? 1 : 0);
+		return false;
+	}
 	call_busy = call.pending_incoming ||
 	            call.state == DEVICE_CALL_STATE_OUTGOING ||
 	            call.state == DEVICE_CALL_STATE_INCOMING ||
@@ -1342,6 +1388,19 @@ static void app_control_task(void *arg)
 			if (ret != ESP_OK) {
 				ESP_LOGW(TAG,
 					 "device unbind flow failed: reason=%s ret=%s",
+					 reason,
+					 esp_err_to_name(ret));
+			}
+			break;
+		}
+		case APP_CONTROL_EVENT_DEVICE_BINDING_REFRESH:
+		{
+			const char *reason = event.reason[0] != '\0' ? event.reason : "manual-refresh";
+			esp_err_t ret = app_refresh_device_binding_internal(reason);
+			app_clear_device_binding_control_pending();
+			if (ret != ESP_OK) {
+				ESP_LOGW(TAG,
+					 "device binding refresh failed: reason=%s ret=%s",
 					 reason,
 					 esp_err_to_name(ret));
 			}
@@ -2190,16 +2249,42 @@ static void app_thing_bootstrap_task(void *arg)
 {
 	app_thing_bootstrap_context_t *context = (app_thing_bootstrap_context_t *)arg;
 	char reason[APP_RTC_RECONFIGURE_REASON_MAX] = "thing-bootstrap";
+	esp_err_t discovery_ret = ESP_ERR_INVALID_STATE;
 
 	if (context != NULL && context->reason[0] != '\0') {
 		strlcpy(reason, context->reason, sizeof(reason));
 	}
 
 	if (network_is_connected() && system_time_has_valid_time()) {
-		esp_err_t discovery_ret = thing_service_registry_refresh();
+		uint32_t retry_delay_ms = APP_THING_DISCOVERY_RETRY_INITIAL_MS;
+		for (uint32_t attempt = 1U;
+		     attempt <= APP_THING_DISCOVERY_MAX_ATTEMPTS &&
+		     network_is_connected() && system_time_has_valid_time();
+		     ++attempt) {
+			discovery_ret = thing_service_registry_refresh();
+			if (discovery_ret == ESP_OK ||
+			    !thing_http_error_is_recoverable(discovery_ret) ||
+			    attempt == APP_THING_DISCOVERY_MAX_ATTEMPTS) {
+				break;
+			}
+
+			ESP_LOGW(TAG,
+				 "service discovery retry: attempt=%u/%u wait_ms=%u ret=%s",
+				 (unsigned)attempt,
+				 (unsigned)APP_THING_DISCOVERY_MAX_ATTEMPTS,
+				 (unsigned)retry_delay_ms,
+				 esp_err_to_name(discovery_ret));
+			vTaskDelay(pdMS_TO_TICKS(retry_delay_ms));
+			if (retry_delay_ms < APP_THING_DISCOVERY_RETRY_MAX_MS) {
+				retry_delay_ms *= 2U;
+				if (retry_delay_ms > APP_THING_DISCOVERY_RETRY_MAX_MS) {
+					retry_delay_ms = APP_THING_DISCOVERY_RETRY_MAX_MS;
+				}
+			}
+		}
 		if (discovery_ret != ESP_OK) {
 			ESP_LOGW(TAG,
-				 "service discovery failed, using configured fallback endpoints: %s",
+				 "service discovery unavailable after retries, using current fallback endpoints: %s",
 				 esp_err_to_name(discovery_ret));
 		}
 
@@ -2573,6 +2658,8 @@ static esp_err_t app_apply_call_capture_profile(uint8_t requested_gain_percent)
 		.echo_suppression = AUDIO_ECHO_SUPPRESSION_BALANCED,
 		/* Keep AEC probes out of the real-time capture task during normal calls. */
 		.echo_diagnostics_enabled = false,
+		/* Remove sub-100 Hz board rumble after AEC without changing its reference path. */
+		.high_pass_filter_enabled = true,
 		/* A frame-by-frame post-AEC gate clips consonants and word endings in full-duplex calls. */
 		.noise_gate_enabled = false,
 		.noise_gate_open_peak = APP_CALL_CAPTURE_NOISE_GATE_OPEN_PEAK,
@@ -2800,7 +2887,21 @@ static esp_err_t app_start_app_services(app_id_t app_id)
 		return ESP_OK;
 	}
 	case APP_ID_CALL:
+	{
+		if (!device_online_is_online()) {
+			ESP_LOGI(CALL_FLOW_TAG,
+				 "stage=contacts_refresh_skipped source=call_app_enter reason=device_offline");
+			return ESP_OK;
+		}
+		esp_err_t ret = device_call_refresh_contacts_async();
+		ESP_LOGI(CALL_FLOW_TAG,
+			 "stage=contacts_refresh_requested source=call_app_enter ret=%s",
+			 esp_err_to_name(ret));
+		if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+			ESP_LOGW(TAG, "refresh contacts on call app entry failed: %s", esp_err_to_name(ret));
+		}
 		return ESP_OK;
+	}
 	case APP_ID_SYSTEM:
 	case APP_ID_HOME:
 	default:
@@ -3420,11 +3521,38 @@ esp_err_t app_start_device_binding(void)
 		return ESP_ERR_INVALID_STATE;
 	}
 	if (!thing_service_registry_is_ready()) {
-		app_schedule_thing_bootstrap("manual");
-		return ESP_ERR_INVALID_STATE;
+		/* Discovery owns the endpoint arrays. Let its background task finish
+		 * before binding starts so endpoint replacement never races an HTTP/MQTT
+		 * client reading those stable pointers. The bootstrap starts binding as
+		 * soon as discovery (or the current fallback) is ready. */
+		app_schedule_thing_bootstrap("manual-refresh");
+		return ESP_OK;
 	}
 
-	return app_start_device_identity_services("manual");
+	return app_queue_device_binding_refresh("manual-refresh");
+}
+
+static esp_err_t app_refresh_device_binding_internal(const char *reason)
+{
+	const char *safe_reason = reason != NULL && reason[0] != '\0' ? reason : "manual-refresh";
+
+	if (!network_is_connected() || !system_time_has_valid_time()) {
+		return ESP_ERR_INVALID_STATE;
+	}
+	if (app_rtc_device_credentials_available()) {
+		return app_verify_device_binding_internal(safe_reason);
+	}
+
+	ESP_LOGI(TAG, "device binding refresh begin: reason=%s", safe_reason);
+	esp_err_t ret = device_binding_reset_state(safe_reason);
+	if (ret != ESP_OK) {
+		return ret;
+	}
+	ret = device_binding_start_async(safe_reason);
+	if (ret == ESP_OK) {
+		ESP_LOGI(TAG, "device binding refresh queued: reason=%s", safe_reason);
+	}
+	return ret;
 }
 
 static esp_err_t app_reconcile_binding_with_retained_credentials(const char *reason)

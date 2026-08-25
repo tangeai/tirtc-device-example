@@ -343,10 +343,21 @@ esp_err_t app_accept_call(void)
 
     ret = app_acquire_call_session_resources();
     if (ret != ESP_OK) {
+		esp_err_t reject_ret = ESP_OK;
+
+		/*
+		 * The signaling room already exists at this point. If RTC preparation
+		 * loses a race with transport teardown, close that room through
+		 * the normal service action instead of silently abandoning the caller.
+		 */
+		if (service_pending) {
+			reject_ret = device_call_reject_pending();
+		}
         ESP_LOGW(CALL_FLOW_TAG,
-                 "stage=app_accept_done source=%s ret=%s reason=resource_acquire",
+                 "stage=app_accept_done source=%s ret=%s reason=resource_acquire reject=%s",
                  service_pending ? "thing_connect" : "tirtc_command",
-                 esp_err_to_name(ret));
+                 esp_err_to_name(ret),
+			 esp_err_to_name(reject_ret));
         ESP_LOGE(TAG, "acquire call session resources failed: %s", esp_err_to_name(ret));
         return ret;
     }

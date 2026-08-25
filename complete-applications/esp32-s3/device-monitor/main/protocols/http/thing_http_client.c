@@ -256,6 +256,11 @@ esp_err_t thing_http_request_json_ex(const thing_http_request_t *request,
         (request->header_count > 0 && request->headers == NULL)) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (!thing_http_is_https(request->url)) {
+        ESP_LOGE(TAG, "plaintext HTTP request rejected: trace=%s",
+                 request->trace_name != NULL ? request->trace_name : "-");
+        return ESP_ERR_INVALID_ARG;
+    }
 
     uint32_t timeout_ms = request->timeout_ms != 0 ? request->timeout_ms : THING_HTTP_DEFAULT_TIMEOUT_MS;
     uint8_t attempts = (uint8_t)(request->retry_count + 1U);
@@ -296,7 +301,10 @@ esp_err_t thing_http_request_json_ex(const thing_http_request_t *request,
             .timeout_ms = (int)timeout_ms,
             .buffer_size = THING_HTTP_BUFFER_SIZE,
             .buffer_size_tx = THING_HTTP_TX_BUFFER_SIZE,
-            .crt_bundle_attach = thing_http_is_https(request->url) ? esp_crt_bundle_attach : NULL,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            /* Authenticated requests must never follow an HTTPS -> HTTP
+             * redirect and resend credentials on a plaintext transport. */
+            .disable_auto_redirect = true,
         };
 
         ESP_LOGD(TAG,

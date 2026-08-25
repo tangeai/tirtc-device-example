@@ -88,7 +88,12 @@ static void app_snapshot_fill_network(app_network_snapshot_t *network_snapshot)
 		network_snapshot->scan_results[index].channel = wifi_scan.results[index].channel;
 	}
 	network_snapshot->ping_running = ping.running;
-	strlcpy(network_snapshot->ping_summary, ping.summary, sizeof(network_snapshot->ping_summary));
+	network_snapshot->ping_valid = ping.valid;
+	network_snapshot->ping_transmitted = ping.transmitted;
+	network_snapshot->ping_received = ping.received;
+	network_snapshot->ping_latency_avg_ms = ping.avg_time_ms;
+	network_snapshot->ping_jitter_ms = ping.jitter_ms;
+	network_snapshot->ping_loss_percent = ping.loss_percent;
 }
 
 static void app_snapshot_fill_device(app_device_snapshot_t *device_snapshot)

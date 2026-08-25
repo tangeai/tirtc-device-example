@@ -206,6 +206,7 @@ static void tirtc_connect_result_cb(int error, tirtc_conn_t hconn, void *user_da
     } else if (current &&
         error != 0 &&
         s_connect_has_provided_token &&
+        error != TIRTC_E_TIMEOUTED &&
         error != TIRTC_E_CACHE_EXPIRED &&
         s_connect_retry_count < TIRTC_CONNECT_PROVIDED_TOKEN_RETRIES) {
         s_connect_retry_count++;

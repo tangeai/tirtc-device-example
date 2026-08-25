@@ -35,8 +35,8 @@
 #define AUDIO_AEC_REF_DELAY_SAMPLES           ((AUDIO_AEC_SAMPLE_RATE_HZ * AUDIO_AEC_REF_DELAY_MS) / 1000U)
 #define AUDIO_AEC_REF_ACTIVE_US               320000LL
 #define AUDIO_AEC_REF_ACTIVE_PEAK             256U
-#define AUDIO_AEC_PROFILE_NAME                "fd-low-linear-tail320"
-#define AUDIO_AEC_MODE                        AEC_MODE_FD_LOW_COST
+#define AUDIO_AEC_PROFILE_NAME                "fd-high-linear-tail320"
+#define AUDIO_AEC_MODE                        AEC_MODE_FD_HIGH_PERF
 #define AUDIO_AEC_DEFAULT_NLP_LEVEL            AEC_NLP_LEVEL_NORMAL
 #define AUDIO_AEC_FILTER_LENGTH               4
 #define AUDIO_AEC_FALLBACK_FILTER_LENGTH      2
@@ -246,12 +246,10 @@ static bool audio_aec_ensure_ready(void)
     taskEXIT_CRITICAL(&s_aec_lock);
 
     /*
-     * Device calls use the FD low-cost linear canceller. ESP-SR no longer
-     * recommends the legacy VOIP modes, and the combined nonlinear path was
-     * measured to damage quiet near-end speech. FD low-cost keeps sufficient
-     * echo cancellation while preserving the microphone waveform. The app
-     * deliberately leaves custom near-end blending disabled for calls, so the
-     * result below is the official linear AEC output without a raw-echo mix.
+     * Use the full-duplex high-performance linear canceller. The app still
+     * selects the linear output explicitly below, so this does not re-enable
+     * the combined nonlinear path that damaged quiet near-end speech. The
+     * extra working set is requested from PSRAM through config.caps.
      */
     aec_handle_t *handle = audio_aec_create_handle(AUDIO_AEC_MODE,
                                                     AUDIO_AEC_FILTER_LENGTH,

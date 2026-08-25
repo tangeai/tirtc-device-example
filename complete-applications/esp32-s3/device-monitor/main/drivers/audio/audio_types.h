@@ -88,6 +88,7 @@ typedef struct {
     uint8_t far_end_upload_gain_percent;
     uint16_t far_end_auto_gain_max_percent;
     audio_echo_suppression_t echo_suppression;
+    bool capture_high_pass_filter_enabled;
     bool capture_noise_gate_enabled;
 } audio_stats_t;
 
@@ -109,6 +110,7 @@ typedef struct {
     uint16_t far_end_auto_gain_max_percent;
     audio_echo_suppression_t echo_suppression;
     bool echo_diagnostics_enabled;
+    bool high_pass_filter_enabled;
     bool noise_gate_enabled;
     uint16_t noise_gate_open_peak;
     uint16_t noise_gate_close_peak;

@@ -41,16 +41,14 @@ static bool thing_service_has_prefix(const char *value, const char *prefix)
     return value != NULL && prefix != NULL && strncmp(value, prefix, strlen(prefix)) == 0;
 }
 
-static bool thing_service_is_http_url(const char *value)
+static bool thing_service_is_https_url(const char *value)
 {
-    return thing_service_has_prefix(value, "https://") ||
-           thing_service_has_prefix(value, "http://");
+    return thing_service_has_prefix(value, "https://");
 }
 
-static bool thing_service_is_mqtt_uri(const char *value)
+static bool thing_service_is_mqtts_uri(const char *value)
 {
-    return thing_service_has_prefix(value, "mqtts://") ||
-           thing_service_has_prefix(value, "mqtt://");
+    return thing_service_has_prefix(value, "mqtts://");
 }
 
 static esp_err_t thing_service_copy(char *destination,
@@ -103,12 +101,16 @@ static esp_err_t thing_service_parse_response(const char *json,
     mqtt_uri = thing_service_json_string(root, "mqtt-srv");
     tirtc_endpoint = thing_service_json_string(root, "tirtc-srv");
 
-    if (!thing_service_is_http_url(device_api) ||
-        !thing_service_is_http_url(voip_api) ||
-        !thing_service_is_http_url(ai_api) ||
-        !thing_service_is_mqtt_uri(mqtt_uri) ||
-        (call_api != NULL && !thing_service_is_http_url(call_api)) ||
-        (tirtc_endpoint != NULL && !thing_service_is_http_url(tirtc_endpoint))) {
+    /* Service discovery controls every authenticated transport. Accepting a
+     * syntactically valid plaintext endpoint here would turn a discovery
+     * downgrade into Bearer-token, MQTT-password and device-key disclosure. */
+    if (!thing_service_is_https_url(device_api) ||
+        !thing_service_is_https_url(voip_api) ||
+        !thing_service_is_https_url(ai_api) ||
+        !thing_service_is_mqtts_uri(mqtt_uri) ||
+        (call_api != NULL && !thing_service_is_https_url(call_api)) ||
+        (tirtc_endpoint != NULL && !thing_service_is_https_url(tirtc_endpoint))) {
+        ESP_LOGE(TAG, "service discovery rejected insecure endpoint scheme");
         ret = ESP_ERR_INVALID_RESPONSE;
         goto cleanup;
     }
@@ -160,13 +162,14 @@ cleanup:
 esp_err_t thing_service_registry_init(const thing_service_registry_config_t *config)
 {
     if (config == NULL ||
-        !thing_service_is_http_url(config->discovery_url) ||
-        !thing_service_is_http_url(config->device_api_base) ||
-        !thing_service_is_http_url(config->voip_api_base) ||
-        !thing_service_is_http_url(config->ai_api_base) ||
-        !thing_service_is_http_url(config->call_api_base) ||
-        !thing_service_is_mqtt_uri(config->mqtt_uri) ||
-        !thing_service_is_http_url(config->tirtc_endpoint)) {
+        !thing_service_is_https_url(config->discovery_url) ||
+        !thing_service_is_https_url(config->device_api_base) ||
+        !thing_service_is_https_url(config->voip_api_base) ||
+        !thing_service_is_https_url(config->ai_api_base) ||
+        !thing_service_is_https_url(config->call_api_base) ||
+        !thing_service_is_mqtts_uri(config->mqtt_uri) ||
+        !thing_service_is_https_url(config->tirtc_endpoint)) {
+        ESP_LOGE(TAG, "service registry requires HTTPS and MQTTS endpoints");
         return ESP_ERR_INVALID_ARG;
     }
     if (s_registry.lock == NULL) {
