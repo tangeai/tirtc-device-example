@@ -147,6 +147,7 @@ void tirtc_session_apply_local_media_policy(void);
 void tirtc_session_mark_access_hijacking_detected(void);
 bool tirtc_session_connection_auto_media_enabled(tirtc_conn_t conn);
 bool tirtc_session_connection_media_deferred(tirtc_conn_t conn);
+void tirtc_session_notify_connection_accepted(tirtc_conn_t conn);
 void tirtc_session_start_time_stream_messages(void);
 void tirtc_session_stop_time_stream_messages(void);
 void tirtc_session_update_local_video_subscription(tirtc_conn_t conn, uint8_t stream_id, bool subscribed);

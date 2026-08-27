@@ -16,6 +16,10 @@
 #define APP_CONFIG_WIFI_AUTO_CONNECT 1
 #endif
 
+#ifndef APP_CONFIG_WIFI_FALLBACK_DNS_IPV4
+#define APP_CONFIG_WIFI_FALLBACK_DNS_IPV4 "223.5.5.5"
+#endif
+
 #ifndef APP_CONFIG_OTA_DEFAULT_URL
 #define APP_CONFIG_OTA_DEFAULT_URL "https://tirtc-device-ota.tange365.com"
 #endif
@@ -25,7 +29,7 @@
 #endif
 
 #ifndef APP_CONFIG_RTC_SERVICE_ENDPOINT
-#define APP_CONFIG_RTC_SERVICE_ENDPOINT "http://ep-tirtc.tange365.com"
+#define APP_CONFIG_RTC_SERVICE_ENDPOINT "https://ep-tirtc.tange365.com"
 #endif
 
 #ifndef APP_CONFIG_RTC_DEVICE_ID
@@ -106,15 +110,15 @@
 #endif
 
 #ifndef APP_CONFIG_THING_SERVICE_DISCOVERY_URL
-#define APP_CONFIG_THING_SERVICE_DISCOVERY_URL "http://ep-open.tangeopen.com/services"
+#define APP_CONFIG_THING_SERVICE_DISCOVERY_URL "https://ep-open.tangeopen.com/services"
 #endif
 
 #ifndef APP_CONFIG_DEVICE_BINDING_API_BASE
-#define APP_CONFIG_DEVICE_BINDING_API_BASE "https://mqtt-demo.tange-ai.com"
+#define APP_CONFIG_DEVICE_BINDING_API_BASE "https://srv-open.tangeopen.com"
 #endif
 
 #ifndef APP_CONFIG_DEVICE_BINDING_MQTT_URI
-#define APP_CONFIG_DEVICE_BINDING_MQTT_URI "mqtts://mqtt-demo.tange-ai.com:8883"
+#define APP_CONFIG_DEVICE_BINDING_MQTT_URI "mqtts://mqtt-open.tangeopen.com:8883"
 #endif
 
 #ifndef APP_CONFIG_DEVICE_BINDING_WAIT_TIMEOUT_MS

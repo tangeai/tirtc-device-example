@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "audio_echo_cancel.h"
+#include "app_log_policy.h"
 #include "app_task_affinity.h"
 #include "hardware_board.h"
 #include "driver/i2s_std.h"
@@ -27,10 +28,12 @@ static const char *TAG = "audio";
 #define AUDIO_INPUT_LEVEL_DISPLAY_SCALE  10U
 #define AUDIO_CAPTURE_AUTO_GAIN_TARGET_PEAK 8192U
 #define AUDIO_CAPTURE_AUTO_GAIN_NOISE_FLOOR_PEAK 192U
-#define AUDIO_CAPTURE_AUTO_GAIN_MAX_Q8   (4U * 256U)
+#define AUDIO_CAPTURE_UPLOAD_GAIN_MAX_Q8 384U
+#define AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT 200U
+#define AUDIO_CAPTURE_AUTO_GAIN_LIMIT_PERCENT 800U
 #define AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8   256U
-#define AUDIO_CAPTURE_AEC_AUTO_GAIN_MAX_Q8 AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8
-#define AUDIO_CAPTURE_AUTO_GAIN_ATTACK_DIV 16U
+#define AUDIO_CAPTURE_AUTO_GAIN_ATTACK_DIV 4U
+#define AUDIO_CAPTURE_HIGH_PASS_ALPHA_Q15 31506
 #define AUDIO_MAX_CAPTURE_GAIN_DB        30.0f
 #define AUDIO_CAPTURE_LEVEL_LOG_INTERVAL_MS 15000U
 #define AUDIO_CAPTURE_LEVEL_DBFS_FLOOR_X10 (-960)
@@ -93,6 +96,21 @@ static const audio_format_t s_playback_format = {
     .bits_per_sample = HARDWARE_BOARD_AUDIO_BITS_PER_SAMPLE,
 };
 
+/*
+ * esp_codec_dev's default 0..100 curve is linear from -50 dB to 0 dB, so the
+ * product default of 70 maps to -15 dB and wastes most of the small onboard
+ * speaker's usable range. Keep 0 as a hard mute and preserve the 0 dB ceiling,
+ * but use a board-specific perceptual control curve in the normal UI range.
+ */
+static esp_codec_dev_vol_map_t s_p4_speaker_volume_map[] = {
+    { .vol = 0,   .db_value = -50.0f },
+    { .vol = 30,  .db_value = -24.0f },
+    { .vol = 50,  .db_value = -12.0f },
+    { .vol = 70,  .db_value = -6.0f },
+    { .vol = 85,  .db_value = -2.0f },
+    { .vol = 100, .db_value = 0.0f },
+};
+
 typedef struct {
     audio_capture_frame_cb_t cb;
     void *ctx;
@@ -118,13 +136,30 @@ static SemaphoreHandle_t s_playback_mutex;
 static audio_stats_t s_audio_stats = {
     .speaker_volume_percent = HARDWARE_BOARD_AUDIO_DEFAULT_VOLUME,
     .capture_gain_percent = AUDIO_DEFAULT_CAPTURE_GAIN_PERCENT,
+    .capture_codec_gain_percent = AUDIO_DEFAULT_CAPTURE_GAIN_PERCENT,
+    .capture_upload_gain_percent = AUDIO_DEFAULT_CAPTURE_GAIN_PERCENT,
+    .capture_auto_gain_max_percent = AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT,
+    .capture_effective_auto_gain_max_percent = AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT,
+    .far_end_upload_gain_percent = AUDIO_DEFAULT_CAPTURE_GAIN_PERCENT,
+    .far_end_auto_gain_max_percent = AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT,
+    .echo_suppression = AUDIO_ECHO_SUPPRESSION_BALANCED,
 };
 static esp_err_t s_audio_output_prepare_last_err = ESP_OK;
 static esp_err_t s_audio_input_prepare_last_err = ESP_OK;
 static TickType_t s_audio_output_prepare_retry_after_ticks;
 static TickType_t s_audio_input_prepare_retry_after_ticks;
 static uint8_t s_speaker_volume_percent = HARDWARE_BOARD_AUDIO_DEFAULT_VOLUME;
-static uint8_t s_capture_gain_percent = AUDIO_DEFAULT_CAPTURE_GAIN_PERCENT;
+static audio_capture_processing_config_t s_capture_processing_config = {
+    .send_volume_percent = AUDIO_DEFAULT_CAPTURE_GAIN_PERCENT,
+    .codec_gain_percent = AUDIO_DEFAULT_CAPTURE_GAIN_PERCENT,
+    .upload_gain_percent = AUDIO_DEFAULT_CAPTURE_GAIN_PERCENT,
+    .auto_gain_max_percent = AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT,
+    .far_end_gain_guard_enabled = false,
+    .far_end_upload_gain_percent = AUDIO_DEFAULT_CAPTURE_GAIN_PERCENT,
+    .far_end_auto_gain_max_percent = AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT,
+    .echo_suppression = AUDIO_ECHO_SUPPRESSION_BALANCED,
+    .high_pass_filter_enabled = false,
+};
 static bool s_playback_muted_logged;
 static bool s_playback_write_logged;
 static TickType_t s_last_playback_write_log_tick;
@@ -176,7 +211,7 @@ static esp_err_t audio_ensure_playback_mutex(void)
     taskEXIT_CRITICAL(&s_audio_lock);
 
     if (mutex != NULL) {
-        vSemaphoreDelete(mutex);
+        vSemaphoreDeleteWithCaps(mutex);
     }
     return ESP_OK;
 }
@@ -266,9 +301,9 @@ static void audio_format_dbfs_x10(int dbfs_x10, char *buffer, size_t buffer_size
 }
 #endif
 
-static uint8_t audio_get_capture_gain_percent_locked(void)
+static audio_capture_processing_config_t audio_get_capture_processing_config_locked(void)
 {
-    return s_capture_gain_percent > 100U ? 100U : s_capture_gain_percent;
+    return s_capture_processing_config;
 }
 
 static uint8_t audio_get_speaker_volume_percent_locked(void)
@@ -276,12 +311,67 @@ static uint8_t audio_get_speaker_volume_percent_locked(void)
     return s_speaker_volume_percent > 100U ? 100U : s_speaker_volume_percent;
 }
 
-static uint32_t audio_capture_base_gain_q8(uint8_t gain_percent)
+static uint8_t audio_clamp_percent(uint8_t percent)
 {
-    return gain_percent == 0U ? 0U : AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8;
+    return percent > 100U ? 100U : percent;
 }
 
-static uint32_t audio_capture_auto_gain_target_q8(uint32_t pre_peak, uint32_t base_gain_q8)
+static uint16_t audio_clamp_auto_gain_percent(uint16_t percent)
+{
+    if (percent < 100U) {
+        return 100U;
+    }
+    return percent > AUDIO_CAPTURE_AUTO_GAIN_LIMIT_PERCENT ?
+           AUDIO_CAPTURE_AUTO_GAIN_LIMIT_PERCENT : percent;
+}
+
+static audio_capture_processing_config_t audio_capture_make_default_processing_config(
+    uint8_t percent)
+{
+    percent = audio_clamp_percent(percent);
+    return (audio_capture_processing_config_t) {
+        .send_volume_percent = percent,
+        .codec_gain_percent = percent,
+        .upload_gain_percent = percent,
+        .auto_gain_max_percent = AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT,
+        .far_end_gain_guard_enabled = false,
+        .far_end_upload_gain_percent = percent,
+        .far_end_auto_gain_max_percent = AUDIO_CAPTURE_AUTO_GAIN_DEFAULT_MAX_PERCENT,
+        .echo_suppression = AUDIO_ECHO_SUPPRESSION_BALANCED,
+        .high_pass_filter_enabled = false,
+    };
+}
+
+static audio_capture_processing_config_t audio_capture_sanitize_processing_config(
+    const audio_capture_processing_config_t *config)
+{
+    audio_capture_processing_config_t sanitized = *config;
+    sanitized.send_volume_percent = audio_clamp_percent(sanitized.send_volume_percent);
+    sanitized.codec_gain_percent = audio_clamp_percent(sanitized.codec_gain_percent);
+    sanitized.upload_gain_percent = audio_clamp_percent(sanitized.upload_gain_percent);
+    sanitized.auto_gain_max_percent =
+        audio_clamp_auto_gain_percent(sanitized.auto_gain_max_percent);
+    sanitized.far_end_upload_gain_percent =
+        audio_clamp_percent(sanitized.far_end_upload_gain_percent);
+    sanitized.far_end_auto_gain_max_percent =
+        audio_clamp_auto_gain_percent(sanitized.far_end_auto_gain_max_percent);
+    if (sanitized.echo_suppression != AUDIO_ECHO_SUPPRESSION_STRONG) {
+        sanitized.echo_suppression = AUDIO_ECHO_SUPPRESSION_BALANCED;
+    }
+    return sanitized;
+}
+
+static uint32_t audio_capture_base_gain_q8(uint8_t upload_gain_percent)
+{
+    if (upload_gain_percent == 0U) {
+        return 0U;
+    }
+    return ((uint32_t)upload_gain_percent * AUDIO_CAPTURE_UPLOAD_GAIN_MAX_Q8 + 99U) / 100U;
+}
+
+static uint32_t audio_capture_auto_gain_target_q8(uint32_t pre_peak,
+                                                   uint32_t base_gain_q8,
+                                                   uint16_t max_percent)
 {
     if (pre_peak < AUDIO_CAPTURE_AUTO_GAIN_NOISE_FLOOR_PEAK || base_gain_q8 == 0U) {
         return AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8;
@@ -297,8 +387,9 @@ static uint32_t audio_capture_auto_gain_target_q8(uint32_t pre_peak, uint32_t ba
     if (target_q8 < AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8) {
         target_q8 = AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8;
     }
-    if (target_q8 > AUDIO_CAPTURE_AUTO_GAIN_MAX_Q8) {
-        target_q8 = AUDIO_CAPTURE_AUTO_GAIN_MAX_Q8;
+    uint32_t max_q8 = ((uint32_t)audio_clamp_auto_gain_percent(max_percent) * 256U) / 100U;
+    if (target_q8 > max_q8) {
+        target_q8 = max_q8;
     }
     return target_q8;
 }
@@ -329,6 +420,19 @@ static int16_t audio_apply_capture_upload_gain(int32_t sample, uint32_t base_gai
     int64_t amplified = (int64_t)sample * (int64_t)base_gain_q8 * (int64_t)auto_gain_q8;
     amplified /= (256LL * 256LL);
     return audio_clip_i16((int32_t)amplified);
+}
+
+static int16_t audio_capture_high_pass_filter(int16_t sample,
+                                              int32_t *previous_input,
+                                              int32_t *previous_output)
+{
+    int32_t input = sample;
+    int64_t filtered = (int64_t)AUDIO_CAPTURE_HIGH_PASS_ALPHA_Q15 *
+                       (*previous_output + input - *previous_input);
+    filtered >>= 15;
+    *previous_input = input;
+    *previous_output = (int32_t)filtered;
+    return audio_clip_i16((int32_t)filtered);
 }
 
 static void audio_mute_playback_path_no_mutex(void)
@@ -637,10 +741,15 @@ static esp_err_t audio_open_microphone(uint32_t sample_rate_hz, uint32_t bits_pe
         .channel = channels,
     };
 
+    uint8_t codec_gain_percent = 0U;
+    taskENTER_CRITICAL(&s_audio_lock);
+    codec_gain_percent = s_capture_processing_config.codec_gain_percent;
+    taskEXIT_CRITICAL(&s_audio_lock);
+
     ESP_RETURN_ON_FALSE(s_record_dev_handle != NULL, ESP_ERR_INVALID_STATE, TAG, "mic codec handle missing");
     ESP_RETURN_ON_ERROR(esp_codec_dev_open(s_record_dev_handle, &sample_info), TAG, "open mic codec failed");
     return esp_codec_dev_set_in_gain(s_record_dev_handle,
-                                     audio_capture_gain_percent_to_db(s_capture_gain_percent));
+                                     audio_capture_gain_percent_to_db(codec_gain_percent));
 }
 
 static esp_err_t audio_bus_init(void)
@@ -771,8 +880,18 @@ static esp_err_t audio_do_prepare_output(void)
     }
 
     ret = audio_open_speaker(s_playback_format.sample_rate_hz,
-                                      s_playback_format.bits_per_sample,
-                                      s_playback_format.channels);
+                                       s_playback_format.bits_per_sample,
+                                       s_playback_format.channels);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    esp_codec_dev_vol_curve_t volume_curve = {
+        .count = sizeof(s_p4_speaker_volume_map) /
+                 sizeof(s_p4_speaker_volume_map[0]),
+        .vol_map = s_p4_speaker_volume_map,
+    };
+    ret = esp_codec_dev_set_vol_curve(s_play_dev_handle, &volume_curve);
     if (ret != ESP_OK) {
         return ret;
     }
@@ -1096,6 +1215,8 @@ static void audio_capture_task(void *ctx)
     uint32_t log_auto_gain_q8 = AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8;
 #endif
     uint32_t auto_gain_q8 = AUDIO_CAPTURE_AUTO_GAIN_MIN_Q8;
+    int32_t high_pass_previous_input = 0;
+    int32_t high_pass_previous_output = 0;
 
     if (raw_buffer == NULL || mono_buffer == NULL || reference_buffer == NULL) {
         ESP_LOGE(TAG, "audio capture buffers alloc failed");
@@ -1147,6 +1268,8 @@ static void audio_capture_task(void *ctx)
         taskEXIT_CRITICAL(&s_audio_lock);
 
         if (!capture_enabled) {
+            high_pass_previous_input = 0;
+            high_pass_previous_output = 0;
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
@@ -1159,15 +1282,16 @@ static void audio_capture_task(void *ctx)
         }
 
         uint32_t peak = 0;
-        uint8_t capture_gain_percent = 0;
+        audio_capture_processing_config_t processing_config = {0};
         uint32_t pre_frame_peak = 0;
         uint32_t base_gain_q8 = 0;
+        uint8_t effective_upload_gain_percent = 0;
+        uint16_t effective_auto_gain_max_percent = 100U;
         audio_echo_cancel_metrics_t echo_metrics = {0};
 
         taskENTER_CRITICAL(&s_audio_lock);
-        capture_gain_percent = audio_get_capture_gain_percent_locked();
+        processing_config = audio_get_capture_processing_config_locked();
         taskEXIT_CRITICAL(&s_audio_lock);
-        base_gain_q8 = audio_capture_base_gain_q8(capture_gain_percent);
 
         for (size_t frame_index = 0; frame_index < samples_per_frame; ++frame_index) {
             int32_t primary_sum = 0;
@@ -1210,6 +1334,15 @@ static void audio_capture_task(void *ctx)
                                                          reference_buffer,
                                                          samples_per_frame,
                                                          &echo_metrics);
+        effective_upload_gain_percent = processing_config.upload_gain_percent;
+        effective_auto_gain_max_percent = processing_config.auto_gain_max_percent;
+        if (processing_config.far_end_gain_guard_enabled &&
+            echo_metrics.reference_active && !echo_metrics.near_end_detected) {
+            effective_upload_gain_percent = processing_config.far_end_upload_gain_percent;
+            effective_auto_gain_max_percent =
+                processing_config.far_end_auto_gain_max_percent;
+        }
+        base_gain_q8 = audio_capture_base_gain_q8(effective_upload_gain_percent);
 #if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
         if (echo_metrics.active) {
             log_echo_active_frames++;
@@ -1230,7 +1363,17 @@ static void audio_capture_task(void *ctx)
         }
 #endif
 
+        if (!processing_config.high_pass_filter_enabled) {
+            high_pass_previous_input = 0;
+            high_pass_previous_output = 0;
+        }
         for (size_t frame_index = 0; frame_index < samples_per_frame; ++frame_index) {
+            if (processing_config.high_pass_filter_enabled) {
+                mono_buffer[frame_index] =
+                    audio_capture_high_pass_filter(mono_buffer[frame_index],
+                                                   &high_pass_previous_input,
+                                                   &high_pass_previous_output);
+            }
             uint32_t pre_abs_value = audio_abs_i16(mono_buffer[frame_index]);
 #if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
             if (pre_abs_value > log_pre_gain_peak) {
@@ -1246,17 +1389,10 @@ static void audio_capture_task(void *ctx)
 #endif
         }
 
-        uint32_t target_auto_gain_q8 = audio_capture_auto_gain_target_q8(pre_frame_peak, base_gain_q8);
-        if (echo_metrics.reference_active &&
-            target_auto_gain_q8 > AUDIO_CAPTURE_AEC_AUTO_GAIN_MAX_Q8) {
-            /*
-             * ESP-SR already contains nonlinear residual-echo suppression.
-             * Raising its output by up to 4x while the far-end reference is
-             * active makes the remaining echo audible again and can retrigger
-             * cloud ASR, so keep post-AEC digital AGC at unity during overlap.
-             */
-            target_auto_gain_q8 = AUDIO_CAPTURE_AEC_AUTO_GAIN_MAX_Q8;
-        }
+        uint32_t target_auto_gain_q8 =
+            audio_capture_auto_gain_target_q8(pre_frame_peak,
+                                              base_gain_q8,
+                                              effective_auto_gain_max_percent);
         auto_gain_q8 = audio_capture_smooth_auto_gain_q8(auto_gain_q8, target_auto_gain_q8);
 #if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
         log_auto_gain_q8 = auto_gain_q8;
@@ -1282,6 +1418,13 @@ static void audio_capture_task(void *ctx)
         taskENTER_CRITICAL(&s_audio_lock);
         s_audio_stats.capture_frames++;
         s_audio_stats.input_level = audio_capture_peak_to_meter_percent(peak);
+        s_audio_stats.capture_effective_auto_gain_max_percent =
+            effective_auto_gain_max_percent;
+        s_audio_stats.aec_near_end_detected = echo_metrics.near_end_detected;
+        s_audio_stats.aec_ref_peak = echo_metrics.ref_peak;
+        s_audio_stats.aec_mic_peak = echo_metrics.mic_peak;
+        s_audio_stats.aec_out_peak = echo_metrics.out_peak;
+        s_audio_stats.aec_suppress_percent = echo_metrics.suppress_percent;
         taskEXIT_CRITICAL(&s_audio_lock);
 
         if (capture_primary_enabled) {
@@ -1308,7 +1451,9 @@ static void audio_capture_task(void *ctx)
             char post_rms_db[16] = {0};
             char ch0_peak_db[16] = {0};
             char ch1_peak_db[16] = {0};
-            int codec_gain_x10 = (int)(audio_capture_gain_percent_to_db(capture_gain_percent) * 10.0f + 0.5f);
+            int codec_gain_x10 =
+                (int)(audio_capture_gain_percent_to_db(processing_config.codec_gain_percent) *
+                      10.0f + 0.5f);
             uint32_t sw_gain_x10 = (base_gain_q8 * 10U) / 256U;
             uint32_t auto_gain_x10 = (log_auto_gain_q8 * 10U) / 256U;
 
@@ -1333,15 +1478,18 @@ static void audio_capture_task(void *ctx)
                                   sizeof(ch1_peak_db));
 
             ESP_LOGI(TAG,
-                     "mic capture level: frames=%lu gain=%u codec_gain=%d.%01ddB sw_gain=%lu.%lux auto_gain=%lu.%lux primary_ch=%u ch0_peak=%sdBFS ch1_peak=%sdBFS aec_frames=%lu aec_ref=%lu aec_out=%lu aec_suppress=%lu%% aec_process_avg=%luus aec_process_max=%luus pre_peak=%sdBFS pre_rms=%sdBFS post_peak=%sdBFS post_rms=%sdBFS meter=%lu",
+                     "mic capture level: frames=%lu gain=%u codec_gain=%d.%01ddB sw_gain=%lu.%lux auto_gain=%lu.%lux effective=%u/%u near=%d primary_ch=%u ch0_peak=%sdBFS ch1_peak=%sdBFS aec_frames=%lu aec_ref=%lu aec_out=%lu aec_suppress=%lu%% aec_process_avg=%luus aec_process_max=%luus pre_peak=%sdBFS pre_rms=%sdBFS post_peak=%sdBFS post_rms=%sdBFS meter=%lu",
                      (unsigned long)log_frame_count,
-                     (unsigned)capture_gain_percent,
+                     (unsigned)processing_config.send_volume_percent,
                      codec_gain_x10 / 10,
                      codec_gain_x10 % 10,
                      (unsigned long)(sw_gain_x10 / 10U),
                      (unsigned long)(sw_gain_x10 % 10U),
                      (unsigned long)(auto_gain_x10 / 10U),
                      (unsigned long)(auto_gain_x10 % 10U),
+                     (unsigned)effective_upload_gain_percent,
+                     (unsigned)effective_auto_gain_max_percent,
+                     echo_metrics.near_end_detected ? 1 : 0,
                      (unsigned)AUDIO_CAPTURE_PRIMARY_CHANNEL,
                      ch0_peak_db,
                      ch1_peak_db,
@@ -1740,27 +1888,59 @@ esp_err_t audio_set_speaker_volume(uint8_t percent)
 
 esp_err_t audio_set_capture_gain_percent(uint8_t percent)
 {
-    if (percent > 100) {
-        percent = 100;
-    }
+    audio_capture_processing_config_t config =
+        audio_capture_make_default_processing_config(percent);
+    return audio_set_capture_processing_config(&config);
+}
+
+esp_err_t audio_set_capture_processing_config(
+    const audio_capture_processing_config_t *config)
+{
+    ESP_RETURN_ON_FALSE(config != NULL, ESP_ERR_INVALID_ARG, TAG,
+                        "capture processing config is required");
+    audio_capture_processing_config_t sanitized =
+        audio_capture_sanitize_processing_config(config);
 
     taskENTER_CRITICAL(&s_audio_lock);
-    s_capture_gain_percent = percent;
-    s_audio_stats.capture_gain_percent = percent;
+    s_capture_processing_config = sanitized;
+    s_audio_stats.capture_gain_percent = sanitized.send_volume_percent;
+    s_audio_stats.capture_codec_gain_percent = sanitized.codec_gain_percent;
+    s_audio_stats.capture_upload_gain_percent = sanitized.upload_gain_percent;
+    s_audio_stats.capture_auto_gain_max_percent = sanitized.auto_gain_max_percent;
+    s_audio_stats.capture_effective_auto_gain_max_percent =
+        sanitized.auto_gain_max_percent;
+    s_audio_stats.far_end_gain_guard_enabled = sanitized.far_end_gain_guard_enabled;
+    s_audio_stats.far_end_upload_gain_percent = sanitized.far_end_upload_gain_percent;
+    s_audio_stats.far_end_auto_gain_max_percent = sanitized.far_end_auto_gain_max_percent;
+    s_audio_stats.echo_suppression = sanitized.echo_suppression;
+    s_audio_stats.capture_high_pass_filter_enabled =
+        sanitized.high_pass_filter_enabled;
     taskEXIT_CRITICAL(&s_audio_lock);
 
-    int codec_gain_x10 = (int)(audio_capture_gain_percent_to_db(percent) * 10.0f + 0.5f);
-    ESP_LOGI(TAG,
-             "capture gain configured: percent=%u codec_gain=%d.%01ddB digital_base=1.0x auto_max=4.0x",
-             (unsigned)percent,
-             codec_gain_x10 / 10,
-             codec_gain_x10 % 10);
+    audio_echo_cancel_set_suppression(sanitized.echo_suppression);
+    int codec_gain_x10 =
+        (int)(audio_capture_gain_percent_to_db(sanitized.codec_gain_percent) * 10.0f + 0.5f);
+    APP_LOG_DETAIL(TAG,
+                   "capture profile: send=%u codec=%u(%d.%01ddB) upload=%u auto_max=%u far_guard=%d/%u/%u aec=%s hpf=%d",
+                   (unsigned)sanitized.send_volume_percent,
+                   (unsigned)sanitized.codec_gain_percent,
+                   codec_gain_x10 / 10,
+                   codec_gain_x10 % 10,
+                   (unsigned)sanitized.upload_gain_percent,
+                   (unsigned)sanitized.auto_gain_max_percent,
+                   sanitized.far_end_gain_guard_enabled ? 1 : 0,
+                   (unsigned)sanitized.far_end_upload_gain_percent,
+                   (unsigned)sanitized.far_end_auto_gain_max_percent,
+                   sanitized.echo_suppression == AUDIO_ECHO_SUPPRESSION_STRONG ?
+                       "strong" : "balanced",
+                   sanitized.high_pass_filter_enabled ? 1 : 0);
 
     if (!s_audio_input_ready) {
         return ESP_OK;
     }
     return esp_codec_dev_set_in_gain(s_record_dev_handle,
-                                     audio_capture_gain_percent_to_db(percent));
+                                      audio_capture_gain_percent_to_db(
+                                          sanitized.codec_gain_percent));
 }
 
 esp_err_t audio_prepare_playback_path(void)

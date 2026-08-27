@@ -124,7 +124,7 @@ their SPI HD Function:
 
 ## 4 SPI HD Protocol
 
-Hosted uses the ESP SPI co-processor HD (Half Duplex) Mode Protocol (see [References](#11-references)) with some modifications.
+Hosted uses the ESP SPI co-processor HD (Half Duplex) Mode Protocol (see [References](#12-references)) with some modifications.
 
 ### 4.1 Data IO Modes
 
@@ -138,7 +138,7 @@ When communicating with the co-processor, the master uses the Command, Address, 
 > [!NOTE]
 >
 > The number of data lines used in the Address and Data phase depends
-> on the Command Mask in the Command sent by the host. See [Supported Commands](#44-supported-commands).
+> on the Command Mask in the Command sent by the host. See [Supported Commands](#42-supported-commands).
 
 ### 4.2 Supported Commands
 

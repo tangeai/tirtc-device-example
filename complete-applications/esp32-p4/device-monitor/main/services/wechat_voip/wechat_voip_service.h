@@ -34,6 +34,8 @@ esp_err_t wechat_voip_service_reject_or_hangup(void);
 esp_err_t wechat_voip_service_request_call(const char *open_id,
                                            wechat_voip_call_media_t call_media);
 esp_err_t wechat_voip_service_refresh_contacts_async(void);
+esp_err_t wechat_voip_service_update_contact_remark(const char *open_id,
+                                                    const char *remark);
 bool wechat_voip_service_is_enabled(void);
 bool wechat_voip_service_is_connected(void);
 esp_err_t wechat_voip_service_add_contact(const char *open_id);

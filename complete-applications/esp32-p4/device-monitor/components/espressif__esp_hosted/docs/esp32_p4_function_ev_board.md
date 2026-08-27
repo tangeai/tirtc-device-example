@@ -11,10 +11,10 @@
   - [Building Firmware](#33-building-firmware)
 - [Checking ESP-Hosted](#4-checking-esp-hosted)
 - [Flashing ESP32-C6](#5-flashing-esp32-c6)
-  - [Using ESP-Prog](#51-using-esp-prog)
-  - [OTA Updates](#52-ota-updates)
+  - [Using ESP-Prog](#52-using-esp-prog)
+  - [OTA Updates](#51-ota-updates)
 - [Troubleshooting](#6-troubleshooting)
-- [Flashing the On-board ESP32-P4 through the ESP-Prog](#7-flashing-esp32-p4)
+- [Flashing the On-board ESP32-P4 through the ESP-Prog](#7-flashing-the-on-board-esp32-p4-through-the-esp-prog)
 - [Testing ESP-Hosted with SPI-FD with other MCUs](#8-testing-esp-hosted-with-spi-fd-with-other-mcus)
 - [References](#9-references)
 

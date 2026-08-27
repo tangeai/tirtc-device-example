@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "audio_types.h"
 
 typedef enum {
     AUDIO_ECHO_CANCEL_REFERENCE_NONE = 0,
@@ -15,6 +16,8 @@ typedef enum {
 typedef struct {
     bool active;
     bool reference_active;
+    bool near_end_detected;
+    bool warming_up;
     audio_echo_cancel_reference_t reference;
     uint32_t ref_peak;
     uint32_t mic_peak;
@@ -36,6 +39,7 @@ typedef struct {
 
 esp_err_t audio_echo_cancel_prepare(void);
 esp_err_t audio_echo_cancel_set_active(bool active);
+void audio_echo_cancel_set_suppression(audio_echo_suppression_t suppression);
 void audio_echo_cancel_get_status(audio_echo_cancel_status_t *status);
 void audio_echo_cancel_feed_playback(const int16_t *samples,
                                      size_t sample_count,

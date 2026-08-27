@@ -74,6 +74,12 @@ typedef struct {
 } voip_msg_item_t;
 
 typedef struct {
+    uint32_t channel_generation;
+    char openid[WECHAT_VOIP_OPEN_ID_MAX];
+    char remark[WECHAT_VOIP_REMARK_MAX];
+} contact_remark_job_t;
+
+typedef struct {
     SemaphoreHandle_t lock;
     SemaphoreHandle_t lifecycle_lock;
     SemaphoreHandle_t dispatch_lock;
@@ -95,6 +101,9 @@ typedef struct {
     int64_t active_call_deadline_us;
     char active_call_openid[WECHAT_VOIP_OPEN_ID_MAX];
     wechat_voip_call_media_t active_call_media;
+    bool remark_update_pending;
+    bool remark_update_running;
+    contact_remark_job_t remark_update;
     wechat_voip_incoming_allowed_cb_t incoming_allowed;
     void *incoming_policy_ctx;
 } wechat_voip_thing_runtime_t;
@@ -431,7 +440,7 @@ static esp_err_t refresh_callers(void)
     char token[DEVICE_AUTH_MQTT_TOKEN_MAX_LEN] = {0};
     char device_id[TIRTC_SESSION_DEVICE_ID_MAX_LEN] = {0};
     uint32_t channel_generation = 0;
-    caller_refresh_context_t refresh = {0};
+    caller_refresh_context_t *refresh = NULL;
 
     get_runtime_mqtt_token(token, sizeof(token));
     xSemaphoreTake(s_voip.lock, portMAX_DELAY);
@@ -443,14 +452,23 @@ static esp_err_t refresh_callers(void)
         return ESP_ERR_INVALID_STATE;
     }
 
+    /* The HTTP client and JSON parser already consume most of this task's
+     * stack. Keep the variable-size contact workspace in PSRAM so growing the
+     * contact contract cannot silently exhaust the worker stack. */
+    refresh = heap_caps_calloc(1, sizeof(*refresh), APP_MEMORY_CAPS_PSRAM);
+    if (refresh == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
     int count = 0;
     esp_err_t ret = wechat_voip_api_fetch_callers(
         thing_service_registry_voip_api_base(),
         token,
         caller_refresh_cb,
-        &refresh,
+        refresh,
         &count);
     if (ret != ESP_OK) {
+        heap_caps_free(refresh);
         return ret;
     }
 
@@ -464,12 +482,13 @@ static esp_err_t refresh_callers(void)
                            s_voip.channel_generation == channel_generation &&
                            strcmp(s_voip.device_id, device_id) == 0;
     if (current_channel) {
-        wechat_voip_contacts_replace(refresh.contacts,
-                                     refresh.count,
+        wechat_voip_contacts_replace(refresh->contacts,
+                                     refresh->count,
                                      "server-refresh");
     }
     xSemaphoreGive(s_voip.lock);
     if (!current_channel) {
+        heap_caps_free(refresh);
         ESP_LOGI(TAG, "drop stale contact refresh after identity change");
         return ESP_ERR_INVALID_STATE;
     }
@@ -477,7 +496,84 @@ static esp_err_t refresh_callers(void)
     ESP_LOGI(TAG,
              "wechat contacts refreshed: server=%d local=%u",
              count,
-             (unsigned)refresh.count);
+             (unsigned)refresh->count);
+    heap_caps_free(refresh);
+    return ESP_OK;
+}
+
+static bool take_contact_remark_job(contact_remark_job_t *job)
+{
+    bool available = false;
+
+    if (job == NULL) {
+        return false;
+    }
+    memset(job, 0, sizeof(*job));
+
+    xSemaphoreTake(s_voip.lock, portMAX_DELAY);
+    if (s_voip.remark_update_pending) {
+        *job = s_voip.remark_update;
+        memset(&s_voip.remark_update, 0, sizeof(s_voip.remark_update));
+        s_voip.remark_update_pending = false;
+        s_voip.remark_update_running = true;
+        available = true;
+    }
+    xSemaphoreGive(s_voip.lock);
+    return available;
+}
+
+static void finish_contact_remark_job(void)
+{
+    xSemaphoreTake(s_voip.lock, portMAX_DELAY);
+    s_voip.remark_update_running = false;
+    xSemaphoreGive(s_voip.lock);
+}
+
+static esp_err_t update_contact_remark(const contact_remark_job_t *job)
+{
+    char token[DEVICE_AUTH_MQTT_TOKEN_MAX_LEN] = {0};
+    bool current_channel = false;
+
+    if (job == NULL || job->openid[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    get_runtime_mqtt_token(token, sizeof(token));
+    xSemaphoreTake(s_voip.lock, portMAX_DELAY);
+    current_channel = s_voip.started &&
+                      s_voip.channel_generation == job->channel_generation;
+    xSemaphoreGive(s_voip.lock);
+    if (!current_channel || token[0] == '\0' || !thing_mqtt_client_is_connected()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t ret = wechat_voip_api_update_contact_remark(
+        thing_service_registry_call_api_base(),
+        token,
+        job->openid,
+        job->remark);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    xSemaphoreTake(s_voip.lock, portMAX_DELAY);
+    current_channel = s_voip.started &&
+                      s_voip.channel_generation == job->channel_generation;
+    xSemaphoreGive(s_voip.lock);
+    if (!current_channel) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t cache_ret = wechat_voip_contacts_update_remark(job->openid,
+                                                             job->remark,
+                                                             "device-remark");
+    if (cache_ret != ESP_OK && cache_ret != ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(TAG, "cache updated contact remark failed: %s", esp_err_to_name(cache_ret));
+    }
+    ESP_LOGI(TAG,
+             "wechat contact remark updated: peer_id_len=%u remark_len=%u",
+             (unsigned)strlen(job->openid),
+             (unsigned)strlen(job->remark));
     return ESP_OK;
 }
 
@@ -487,8 +583,26 @@ static void contact_refresh_task(void *arg)
 
     while (true) {
         (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        contact_remark_job_t remark_job = {0};
+        if (take_contact_remark_job(&remark_job)) {
+            esp_err_t ret = update_contact_remark(&remark_job);
+            finish_contact_remark_job();
+            if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+                wechat_voip_contacts_note_sync_error(ret);
+                ESP_LOGW(TAG, "wechat contact remark update failed: %s", esp_err_to_name(ret));
+            }
+            esp_err_t refresh_ret = refresh_callers();
+            if (refresh_ret != ESP_OK && refresh_ret != ESP_ERR_INVALID_STATE) {
+                wechat_voip_contacts_note_sync_error(refresh_ret);
+                ESP_LOGW(TAG,
+                         "wechat contact refresh after remark update failed: %s",
+                         esp_err_to_name(refresh_ret));
+            }
+            continue;
+        }
         esp_err_t ret = refresh_callers();
         if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            wechat_voip_contacts_note_sync_error(ret);
             ESP_LOGW(TAG, "wechat contact refresh failed: %s", esp_err_to_name(ret));
         }
     }
@@ -535,6 +649,47 @@ esp_err_t wechat_voip_thing_refresh_contacts_async(void)
 {
     ESP_RETURN_ON_ERROR(ensure_runtime(), TAG, "runtime init failed");
     return request_contact_refresh();
+}
+
+esp_err_t wechat_voip_thing_update_contact_remark_async(const char *open_id,
+                                                        const char *remark)
+{
+    TaskHandle_t refresh_task = NULL;
+    bool ready = false;
+    bool mqtt_connected = false;
+
+    if (open_id == NULL || open_id[0] == '\0' || remark == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (strlen(open_id) >= WECHAT_VOIP_OPEN_ID_MAX ||
+        !wechat_voip_remark_is_valid(remark)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    ESP_RETURN_ON_ERROR(ensure_runtime(), TAG, "runtime init failed");
+    mqtt_connected = thing_mqtt_client_is_connected();
+
+    xSemaphoreTake(s_voip.lock, portMAX_DELAY);
+    ready = s_voip.started && s_voip.profile_ready && s_voip.refresh_task != NULL &&
+            !s_voip.remark_update_pending && !s_voip.remark_update_running &&
+            mqtt_connected;
+    refresh_task = s_voip.refresh_task;
+    if (ready) {
+        s_voip.remark_update.channel_generation = s_voip.channel_generation;
+        copy_str(s_voip.remark_update.openid,
+                 sizeof(s_voip.remark_update.openid),
+                 open_id);
+        copy_str(s_voip.remark_update.remark,
+                 sizeof(s_voip.remark_update.remark),
+                 remark);
+        s_voip.remark_update_pending = true;
+    }
+    xSemaphoreGive(s_voip.lock);
+
+    if (!ready || refresh_task == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    xTaskNotifyGive(refresh_task);
+    return ESP_OK;
 }
 
 static const char *active_call_state_name(active_call_state_t state)
@@ -1199,6 +1354,9 @@ esp_err_t wechat_voip_thing_start(void)
     copy_str(s_voip.device_key, sizeof(s_voip.device_key), credentials.device_key);
     s_voip.mqtt_token[0] = '\0';
     s_voip.profile_ready = false;
+    s_voip.remark_update_pending = false;
+    s_voip.remark_update_running = false;
+    memset(&s_voip.remark_update, 0, sizeof(s_voip.remark_update));
     xSemaphoreGive(s_voip.lock);
     wechat_voip_contacts_reset_for_device(credentials.device_id);
     wechat_voip_contacts_load(credentials.device_id);
@@ -1259,6 +1417,9 @@ void wechat_voip_thing_stop(void)
     s_voip.device_id[0] = '\0';
     s_voip.device_key[0] = '\0';
     s_voip.mqtt_token[0] = '\0';
+    s_voip.remark_update_pending = false;
+    s_voip.remark_update_running = false;
+    memset(&s_voip.remark_update, 0, sizeof(s_voip.remark_update));
     ++s_voip.active_call_seq;
     active_call_set_idle_locked();
     xSemaphoreGive(s_voip.lock);

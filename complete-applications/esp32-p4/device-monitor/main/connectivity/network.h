@@ -35,6 +35,7 @@ typedef struct {
     uint32_t min_time_ms;
     uint32_t avg_time_ms;
     uint32_t max_time_ms;
+    uint32_t jitter_ms;
     uint32_t loss_percent;
     int last_error;
     char target[NETWORK_PING_TARGET_MAX];
@@ -59,6 +60,7 @@ typedef struct {
     bool auto_connect;
     const char *default_ssid;
     const char *default_password;
+    const char *fallback_dns_ipv4;
 } network_config_t;
 
 esp_err_t network_prepare(const network_config_t *config);

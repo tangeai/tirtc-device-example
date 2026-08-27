@@ -368,6 +368,10 @@ esp_err_t binding_mqtt_client_wait_auth_grant(const binding_mqtt_client_config_t
         config->temp_token == NULL || config->temp_token[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
     }
+    if (strncmp(config->broker_uri, "mqtts://", 8) != 0) {
+        ESP_LOGE(TAG, "plaintext binding MQTT transport rejected");
+        return ESP_ERR_INVALID_ARG;
+    }
 
     memset(grant, 0, sizeof(*grant));
     if (strlen(config->temp_client_id) >= sizeof(client_id)) {

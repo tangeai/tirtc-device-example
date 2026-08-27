@@ -37,15 +37,27 @@
 
 static const char *TAG = "camera_pipeline";
 
+#ifndef CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
+#define CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS 0
+#endif
+#ifndef CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG
+#define CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG 0
+#endif
+
 #ifndef MAP_FAILED
 #define MAP_FAILED ((void *)-1)
 #endif
 
 #define CAMERA_PIPELINE_TASK_STACK       (9U * 1024U)
-#define CAMERA_PIPELINE_TASK_PRIORITY    14U
+/* Full-duplex video shares the PPA/PSRAM path with downlink conversion. Give
+ * capture one scheduler level over conversion so both peers cannot phase-lock
+ * into an asymmetric state where downlink repeatedly enters PPA first and the
+ * local camera holds a CSI buffer across multiple sensor periods. Decode stays
+ * at the same level, while both audio tasks remain above the video path. */
+#define CAMERA_PIPELINE_TASK_PRIORITY    16U
 #define CAMERA_PIPELINE_RETRY_DELAY_MS   200U
 #define CAMERA_PIPELINE_START_DELAY_MS   40U
-#define CAMERA_PIPELINE_LOG_INTERVAL_MS  5000U
+#define CAMERA_PIPELINE_LOG_INTERVAL_MS 10000U
 #define CAMERA_PIPELINE_H264_OPEN_RETRY_MS 2000U
 #define CAMERA_PIPELINE_H264_BUFFER_CNT  1U
 #ifndef CONFIG_APP_RTC_H264_DIRECT_HW_ENCODER
@@ -66,7 +78,7 @@ static const char *TAG = "camera_pipeline";
 #define CAMERA_PIPELINE_H264_FALLBACK_OUTPUT_BUFFER_BYTES APP_MEDIA_H264_OUTPUT_BUFFER_BYTES
 #define CAMERA_PIPELINE_H264_FALLBACK_MAX_DELTA_PAYLOAD APP_MEDIA_H264_MAX_DELTA_PAYLOAD_BYTES
 #define CAMERA_PIPELINE_FALLBACK_DMA_FREE_MIN_BYTES     (8U * 1024U)
-#define CAMERA_PIPELINE_FALLBACK_DMA_LARGEST_MIN_BYTES  (4U * 1024U)
+#define CAMERA_PIPELINE_FALLBACK_DMA_LARGEST_MIN_BYTES  (2U * 1024U)
 #define CAMERA_PIPELINE_TRANSPORT_GUARD_LOG_INTERVAL_MS 1000U
 #define CAMERA_PIPELINE_FRAME_TRACE_INITIAL_COUNT       APP_MEDIA_CAMERA_FRAME_TRACE_INITIAL_COUNT
 #define CAMERA_PIPELINE_FRAME_TRACE_INTERVAL_MS         APP_MEDIA_CAMERA_FRAME_TRACE_INTERVAL_MS
@@ -173,11 +185,18 @@ static uint32_t camera_pipeline_interval_ms(uint8_t fps)
     return interval == 0U ? 1U : interval;
 }
 
-static uint8_t camera_pipeline_h264_gop_for_fps(uint8_t fps)
+static uint8_t camera_pipeline_h264_gop_for_profile(uint16_t width,
+                                                    uint16_t height,
+                                                    uint8_t fps)
 {
     uint32_t safe_fps = fps > 0U ? fps : 1U;
+    uint32_t duration_ms =
+        width == APP_MEDIA_CALL_VIDEO_WIDTH &&
+                height == APP_MEDIA_CALL_VIDEO_HEIGHT ?
+            APP_MEDIA_CALL_H264_GOP_DURATION_MS :
+            APP_MEDIA_H264_GOP_DURATION_MS;
     uint32_t gop_frames =
-        (safe_fps * APP_MEDIA_H264_GOP_DURATION_MS + 999U) / 1000U;
+        (safe_fps * duration_ms + 999U) / 1000U;
 
     if (gop_frames == 0U) {
         gop_frames = 1U;
@@ -287,7 +306,7 @@ static void camera_pipeline_luma_stats_update(camera_pipeline_luma_stats_t *stat
     stats->previous_valid = true;
 }
 
-#if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
+#if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS || CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG
 static uint32_t camera_pipeline_luma_delta_x10(const camera_pipeline_luma_stats_t *stats)
 {
     if (stats == NULL || stats->transition_count == 0U) {
@@ -528,11 +547,6 @@ static bool camera_pipeline_should_hold_video_for_transport(size_t payload_len,
         *effective_max_delta = max_delta;
     }
 
-    size_t dma_free_min = policy != NULL ? policy->dma_free_min_bytes :
-                          CAMERA_PIPELINE_FALLBACK_DMA_FREE_MIN_BYTES;
-    size_t dma_largest_min = policy != NULL ? policy->dma_largest_min_bytes :
-                             CAMERA_PIPELINE_FALLBACK_DMA_LARGEST_MIN_BYTES;
-
     if (!key_frame && payload_len > max_delta) {
         if (reason != NULL) {
             *reason = "delta payload burst";
@@ -540,23 +554,7 @@ static bool camera_pipeline_should_hold_video_for_transport(size_t payload_len,
         return true;
     }
 
-    size_t dma_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-    size_t dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-    if (!key_frame &&
-        (dma_free < dma_free_min ||
-         dma_largest < dma_largest_min)) {
-        if (reason != NULL) {
-            *reason = "dma waterline";
-        }
-        return true;
-    }
-
     return false;
-}
-
-static bool camera_pipeline_transport_guard_is_network_backpressure(const char *reason)
-{
-    return reason != NULL && strcmp(reason, "dma waterline") == 0;
 }
 
 static bool camera_pipeline_transport_guard_needs_key_frame(const char *reason)
@@ -697,32 +695,41 @@ static bool camera_pipeline_h264_force_next_idr(camera_pipeline_h264_encoder_t *
     uint8_t old_gop = enc->direct_encoder ?
                       (enc->direct_active_gop != 0U ? enc->direct_active_gop : base_gop) :
                       (enc->v4l2_active_gop != 0U ? enc->v4l2_active_gop : base_gop);
-    uint8_t alternate_gop = base_gop > 1U ? (uint8_t)(base_gop - 1U) : 2U;
-    uint8_t next_gop = old_gop == base_gop ? alternate_gop : base_gop;
 
     if (enc->direct_encoder) {
         if (enc->direct_handle == NULL || enc->direct_param == NULL) {
             return false;
         }
-        esp_h264_err_t ret = esp_h264_enc_set_gop(&enc->direct_param->base, next_gop);
+        esp_h264_err_t ret = esp_h264_enc_force_idr(&enc->direct_param->base);
         if (ret != ESP_H264_ERR_OK) {
             ESP_LOGW(TAG,
-                     "direct H264 key-frame request failed: reason=%s err=%d gop=%u",
+                     "direct H264 key-frame request failed: reason=%s err=%d",
                      reason != NULL ? reason : "unknown",
-                     ret,
-                     (unsigned)next_gop);
+                     ret);
             return false;
         }
-        enc->direct_active_gop = next_gop;
-    } else {
-        if (camera_pipeline_h264_set_control(enc->fd,
-                                             V4L2_CID_MPEG_VIDEO_H264_I_PERIOD,
-                                             next_gop,
-                                             "gop-key-request") != ESP_OK) {
-            return false;
+        if (reason != NULL && strcmp(reason, "stream-start") == 0) {
+            APP_LOG_DETAIL(TAG,
+                           "H264 key-frame requested: reason=%s mode=direct_hw force-next-idr",
+                           reason);
+        } else {
+            ESP_LOGD(TAG,
+                     "H264 key-frame requested: reason=%s mode=direct_hw force-next-idr",
+                     reason != NULL ? reason : "unknown");
         }
-        enc->v4l2_active_gop = next_gop;
+        return true;
     }
+
+    uint8_t alternate_gop = base_gop > 1U ? (uint8_t)(base_gop - 1U) : 2U;
+    uint8_t next_gop = old_gop == base_gop ? alternate_gop : base_gop;
+
+    if (camera_pipeline_h264_set_control(enc->fd,
+                                         V4L2_CID_MPEG_VIDEO_H264_I_PERIOD,
+                                         next_gop,
+                                         "gop-key-request") != ESP_OK) {
+        return false;
+    }
+    enc->v4l2_active_gop = next_gop;
 
     if (reason != NULL && strcmp(reason, "stream-start") == 0) {
         APP_LOG_DETAIL(TAG,
@@ -993,7 +1000,8 @@ static esp_err_t camera_pipeline_h264_open(camera_pipeline_h264_encoder_t *enc,
                               min_qp : CAMERA_PIPELINE_H264_MIN_QP;
     uint8_t safe_max_qp = max_qp >= safe_min_qp && max_qp <= 51U ?
                               max_qp : CAMERA_PIPELINE_H264_MAX_QP;
-    uint8_t safe_gop = camera_pipeline_h264_gop_for_fps(safe_fps);
+    uint8_t safe_gop =
+        camera_pipeline_h264_gop_for_profile(width, height, safe_fps);
     size_t safe_output_buffer_bytes =
         output_buffer_bytes == 0U ? APP_MEDIA_H264_OUTPUT_BUFFER_BYTES : output_buffer_bytes;
 
@@ -1333,7 +1341,8 @@ static bool camera_pipeline_h264_matches(const camera_pipeline_h264_encoder_t *e
                               min_qp : CAMERA_PIPELINE_H264_MIN_QP;
     uint8_t safe_max_qp = max_qp >= safe_min_qp && max_qp <= 51U ?
                               max_qp : CAMERA_PIPELINE_H264_MAX_QP;
-    uint8_t safe_gop = camera_pipeline_h264_gop_for_fps(safe_fps);
+    uint8_t safe_gop =
+        camera_pipeline_h264_gop_for_profile(width, height, safe_fps);
     size_t safe_output_buffer_bytes =
         output_buffer_bytes == 0U ? APP_MEDIA_H264_OUTPUT_BUFFER_BYTES : output_buffer_bytes;
 
@@ -1387,10 +1396,16 @@ static esp_err_t camera_pipeline_h264_update_rate(camera_pipeline_h264_encoder_t
     const uint8_t safe_fps = fps == 0U ? 12U : fps;
     const uint32_t safe_bitrate_bps =
         bitrate_bps == 0U ? CAMERA_PIPELINE_H264_BITRATE : bitrate_bps;
-    const uint8_t safe_gop = camera_pipeline_h264_gop_for_fps(safe_fps);
+    const uint8_t safe_gop = camera_pipeline_h264_gop_for_profile(
+        enc->width,
+        enc->height,
+        safe_fps);
     const uint8_t old_fps = enc->fps;
     const uint8_t old_gop = enc->gop;
     const uint32_t old_bitrate_bps = enc->bitrate_bps;
+    const bool bitrate_changed = old_bitrate_bps != safe_bitrate_bps;
+    const bool fps_changed = old_fps != safe_fps;
+    const bool gop_changed = old_gop != safe_gop;
 
     if (old_fps == safe_fps &&
         old_gop == safe_gop &&
@@ -1398,19 +1413,22 @@ static esp_err_t camera_pipeline_h264_update_rate(camera_pipeline_h264_encoder_t
         return ESP_OK;
     }
 
+    const int64_t update_started_us = esp_timer_get_time();
     if (enc->direct_encoder) {
         ESP_RETURN_ON_FALSE(enc->direct_param != NULL,
                             ESP_ERR_NOT_SUPPORTED,
                             TAG,
                             "direct H264 parameter handle unavailable");
-        esp_h264_err_t h264_ret =
-            esp_h264_enc_set_bitrate(&enc->direct_param->base,
-                                     safe_bitrate_bps);
-        if (h264_ret == ESP_H264_ERR_OK) {
+        esp_h264_err_t h264_ret = ESP_H264_ERR_OK;
+        if (bitrate_changed) {
+            h264_ret = esp_h264_enc_set_bitrate(&enc->direct_param->base,
+                                                safe_bitrate_bps);
+        }
+        if (h264_ret == ESP_H264_ERR_OK && fps_changed) {
             h264_ret =
                 esp_h264_enc_set_fps(&enc->direct_param->base, safe_fps);
         }
-        if (h264_ret == ESP_H264_ERR_OK) {
+        if (h264_ret == ESP_H264_ERR_OK && gop_changed) {
             h264_ret =
                 esp_h264_enc_set_gop(&enc->direct_param->base, safe_gop);
         }
@@ -1422,40 +1440,47 @@ static esp_err_t camera_pipeline_h264_update_rate(camera_pipeline_h264_encoder_t
                      (unsigned)safe_bitrate_bps);
             return camera_pipeline_h264_error_to_esp(h264_ret);
         }
-        enc->direct_active_gop = safe_gop;
+        if (gop_changed) {
+            enc->direct_active_gop = safe_gop;
+        }
     } else {
         ESP_RETURN_ON_FALSE(enc->fd >= 0,
                             ESP_ERR_INVALID_STATE,
                             TAG,
                             "V4L2 H264 fd unavailable");
-        ESP_RETURN_ON_ERROR(
-            camera_pipeline_h264_set_control(enc->fd,
-                                             V4L2_CID_MPEG_VIDEO_BITRATE,
-                                             safe_bitrate_bps,
-                                             "bitrate"),
-            TAG,
-            "update V4L2 H264 bitrate failed");
-        ESP_RETURN_ON_ERROR(
-            camera_pipeline_h264_set_control(enc->fd,
-                                             V4L2_CID_MPEG_VIDEO_H264_I_PERIOD,
-                                             safe_gop,
-                                             "gop"),
-            TAG,
-            "update V4L2 H264 GOP failed");
-        enc->v4l2_active_gop = safe_gop;
+        if (bitrate_changed) {
+            ESP_RETURN_ON_ERROR(
+                camera_pipeline_h264_set_control(enc->fd,
+                                                 V4L2_CID_MPEG_VIDEO_BITRATE,
+                                                 safe_bitrate_bps,
+                                                 "bitrate"),
+                TAG,
+                "update V4L2 H264 bitrate failed");
+        }
+        if (gop_changed) {
+            ESP_RETURN_ON_ERROR(
+                camera_pipeline_h264_set_control(enc->fd,
+                                                 V4L2_CID_MPEG_VIDEO_H264_I_PERIOD,
+                                                 safe_gop,
+                                                 "gop"),
+                TAG,
+                "update V4L2 H264 GOP failed");
+            enc->v4l2_active_gop = safe_gop;
+        }
     }
 
     enc->fps = safe_fps;
     enc->gop = safe_gop;
     enc->bitrate_bps = safe_bitrate_bps;
     ESP_LOGI(TAG,
-             "H264 encoder rate updated in place: fps=%u->%u bitrate=%u->%u gop=%u->%u",
+             "H264 encoder rate updated in place: fps=%u->%u bitrate=%u->%u gop=%u->%u cost=%uus",
              old_fps,
              safe_fps,
              (unsigned)old_bitrate_bps,
              (unsigned)safe_bitrate_bps,
              old_gop,
-             safe_gop);
+             safe_gop,
+             (unsigned)(esp_timer_get_time() - update_started_us));
     return ESP_OK;
 }
 
@@ -2172,7 +2197,7 @@ static void camera_pipeline_task(void *arg)
         uint32_t source_sequence = frame.sequence;
         uint32_t source_stale_frames_dropped = frame.stale_frames_dropped;
         camera_pipeline_luma_probe_t source_luma_probe = {0};
-        if (source_format == CAMERA_DRIVER_PIXEL_FORMAT_YUV420 &&
+        if (source_format == CAMERA_DRIVER_PIXEL_FORMAT_YUV420_OUYY_EVYY &&
             camera_pipeline_probe_ouev_luma(frame.data,
                                             source_data_len,
                                             source_width,
@@ -2217,7 +2242,7 @@ static void camera_pipeline_task(void *arg)
         const char *h264_input_path = "unknown";
         bool h264_direct_input = false;
 
-        if (source_format == CAMERA_DRIVER_PIXEL_FORMAT_YUV420 &&
+        if (source_format == CAMERA_DRIVER_PIXEL_FORMAT_YUV420_OUYY_EVYY &&
             frame.data != NULL &&
             source_width == target_width &&
             source_height == target_height &&
@@ -2239,7 +2264,7 @@ static void camera_pipeline_task(void *arg)
                      (unsigned)source_data_len);
             vTaskDelay(pdMS_TO_TICKS(CAMERA_PIPELINE_RETRY_DELAY_MS));
             continue;
-        } else if (source_format == CAMERA_DRIVER_PIXEL_FORMAT_YUV420 &&
+        } else if (source_format == CAMERA_DRIVER_PIXEL_FORMAT_YUV420_OUYY_EVYY &&
                    frame.data != NULL &&
                    target_width > 0U && target_height > 0U) {
             video_yuv420_scaler_config_t scaler_config = {
@@ -2508,9 +2533,6 @@ static void camera_pipeline_task(void *arg)
                                                             &transport_guard_reason)) {
             drop_count++;
             transport_guard_drop_count++;
-            if (camera_pipeline_transport_guard_is_network_backpressure(transport_guard_reason)) {
-                media_governor_note_network_backpressure();
-            }
             if (camera_pipeline_transport_guard_needs_key_frame(transport_guard_reason)) {
                 key_frame_required_after_drop = true;
                 (void)camera_pipeline_h264_force_next_idr(&h264, "transport-guard");
@@ -2684,6 +2706,7 @@ static void camera_pipeline_task(void *arg)
                 elapsed_ms = 1U;
             }
             uint32_t avg_payload = upstream_count > 0U ? total_payload_bytes / upstream_count : 0U;
+#if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS || CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG
             uint32_t avg_capture_us = capture_sample_count > 0U ? (uint32_t)(capture_us_total / capture_sample_count) : 0U;
             uint32_t avg_convert_us = convert_sample_count > 0U ? (uint32_t)(convert_us_total / convert_sample_count) : 0U;
             uint32_t avg_encode_us = encode_sample_count > 0U ? (uint32_t)(encode_us_total / encode_sample_count) : 0U;
@@ -2692,6 +2715,11 @@ static void camera_pipeline_task(void *arg)
             uint32_t avg_gap_us = encoded_frame_count > 1U ?
                                   (uint32_t)(frame_gap_us_total / (encoded_frame_count - 1U)) :
                                   0U;
+            uint32_t source_luma_delta_x10 =
+                camera_pipeline_luma_delta_x10(&source_luma_stats);
+            uint32_t encoder_luma_delta_x10 =
+                camera_pipeline_luma_delta_x10(&encoder_luma_stats);
+#endif
 #if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
             uint32_t avg_h264_sync_in_us = encode_sample_count > 0U ?
                                            (uint32_t)(h264_sync_in_us_total / encode_sample_count) :
@@ -2710,10 +2738,6 @@ static void camera_pipeline_task(void *arg)
                 camera_sequence_sample_count > 0U ?
                     (uint32_t)(camera_sequence_delta_total_x10 / camera_sequence_sample_count) :
                     0U;
-            uint32_t source_luma_delta_x10 =
-                camera_pipeline_luma_delta_x10(&source_luma_stats);
-            uint32_t encoder_luma_delta_x10 =
-                camera_pipeline_luma_delta_x10(&encoder_luma_stats);
             uint32_t min_payload = min_payload_bytes == UINT32_MAX ? 0U : min_payload_bytes;
 #endif
             uint32_t measured_fps_x10 = (uint32_t)(((uint64_t)upstream_count * 10000ULL) / elapsed_ms);
@@ -2796,10 +2820,11 @@ static void camera_pipeline_task(void *arg)
                      (unsigned)psram_free,
                      (unsigned)psram_largest,
                      (unsigned)h264.capture_buffer_size);
-#else
+#elif CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG
             ESP_LOGI(TAG,
                      "CAM %ux%u@%u f=%lu.%lu br=%luk gap=%lu/%llums "
                      "us=c/s/e/cb/l:%lu/%lu/%lu/%lu/%lu "
+                     "motion=s/e:%lu.%lu/%lu.%lu chg=%lu/%lu,%lu/%lu "
                      "drop=%lu/%lu/%lu/%lu drain=%lu fail=%lu/%lu/%lu",
                      (unsigned)h264.width,
                      (unsigned)h264.height,
@@ -2814,6 +2839,14 @@ static void camera_pipeline_task(void *arg)
                      (unsigned long)avg_encode_us,
                      (unsigned long)avg_callback_us,
                      (unsigned long)avg_loop_us,
+                     (unsigned long)(source_luma_delta_x10 / 10U),
+                     (unsigned long)(source_luma_delta_x10 % 10U),
+                     (unsigned long)(encoder_luma_delta_x10 / 10U),
+                     (unsigned long)(encoder_luma_delta_x10 % 10U),
+                     (unsigned long)source_luma_stats.changed_count,
+                     (unsigned long)source_luma_stats.transition_count,
+                     (unsigned long)encoder_luma_stats.changed_count,
+                     (unsigned long)encoder_luma_stats.transition_count,
                      (unsigned long)drop_count,
                      (unsigned long)backpressure_skip_count,
                      (unsigned long)transport_guard_drop_count,
@@ -2997,7 +3030,14 @@ esp_err_t camera_pipeline_prewarm_h264(void)
         CAMERA_PIPELINE_H264_INTERNAL_MARGIN;
     size_t largest_internal =
         heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-    if (CAMERA_PIPELINE_H264_RESOURCE_FALLBACK_ENABLE &&
+    /*
+     * The retained HW reference pool is allocated during the early full-profile
+     * prewarm and is intentionally absent from the heap's largest-free-block
+     * metric.  Let the encoder acquire that pool instead of rejecting a valid
+     * reopen based on a heap-only admission check.
+     */
+    if (!CONFIG_APP_H264_PERSISTENT_REF_POOL &&
+        CAMERA_PIPELINE_H264_RESOURCE_FALLBACK_ENABLE &&
         required_internal > largest_internal) {
         if (dma_escrow_lent) {
             (void)media_dma_reserve_reclaim("h264-early-prewarm-deferred");

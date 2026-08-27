@@ -17,6 +17,7 @@
 #include "app_memory_policy.h"
 #include "app_log_policy.h"
 #include "app_task_affinity.h"
+#include "device_call_ringtone.h"
 #include "device_online.h"
 #include "rtc_transport.h"
 #include "thing_http_client.h"
@@ -33,6 +34,7 @@ static void *device_call_calloc_control(size_t count, size_t size)
 }
 
 #define DEVICE_CALL_API_BASE_MAX_LEN       256
+#define DEVICE_CALL_HTTP_PATH_MAX_LEN      192
 #define DEVICE_CALL_HTTP_RESPONSE_MAX_LEN  6144
 #define DEVICE_CALL_CONTACT_RESPONSE_MAX_LEN 12288
 #define DEVICE_CALL_HTTP_TIMEOUT_MS        10000U
@@ -46,6 +48,7 @@ static void *device_call_calloc_control(size_t count, size_t size)
 #define DEVICE_CALL_POLL_INTERVAL_MS       20U
 #define DEVICE_CALL_TIMER_POLL_INTERVAL_MS 100U
 #define DEVICE_CALL_ONLINE_READY_TIMEOUT_MS 30000U
+#define DEVICE_CALL_CODE_ROOM_NOT_FOUND    40400
 
 typedef enum {
     DEVICE_CALL_ROLE_NONE = 0,
@@ -96,6 +99,7 @@ typedef enum {
     DEVICE_CALL_CONTACT_WORK_REQUEST,
     DEVICE_CALL_CONTACT_WORK_RESPOND,
     DEVICE_CALL_CONTACT_WORK_REMARK,
+    DEVICE_CALL_CONTACT_WORK_DELETE,
 } device_call_contact_work_t;
 
 typedef struct {
@@ -117,8 +121,12 @@ typedef struct {
     bool switch_disconnect_in_progress;
     bool contacts_ready;
     bool contacts_refresh_running;
+    bool contacts_refresh_pending;
     bool contact_mutation_running;
     bool room_recovery_running;
+    bool caller_peer_answered;
+    bool caller_transport_accepted;
+    bool caller_media_activation_running;
     char api_base[DEVICE_CALL_API_BASE_MAX_LEN];
     device_call_can_accept_incoming_cb_t can_accept_incoming;
     device_call_session_ended_cb_t on_session_ended;
@@ -129,6 +137,7 @@ typedef struct {
     device_call_state_t state;
     device_call_role_t role;
     esp_err_t last_error;
+    tirtc_conn_t rtc_conn;
     char message[96];
     char room_id[96];
     char peer_device_id[128];
@@ -138,8 +147,10 @@ typedef struct {
     char pending_caller_id[128];
     char pending_call_type[16];
     uint8_t contact_count;
+    uint8_t pending_contact_count;
     esp_err_t contacts_last_error;
     device_call_contact_t contacts[DEVICE_CALL_CONTACT_MAX];
+    device_call_pending_contact_t pending_contacts[DEVICE_CALL_CONTACT_MAX];
 } device_call_runtime_t;
 
 static EXT_RAM_BSS_ATTR device_call_runtime_t s_call;
@@ -260,6 +271,10 @@ static uint32_t device_call_next_generation_locked(void)
     if (s_call.generation == 0U) {
         s_call.generation = 1U;
     }
+    s_call.caller_peer_answered = false;
+    s_call.caller_transport_accepted = false;
+    s_call.caller_media_activation_running = false;
+    s_call.rtc_conn = NULL;
     return s_call.generation;
 }
 
@@ -281,6 +296,10 @@ static void device_call_set_error_locked(esp_err_t error, const char *message)
 static void device_call_clear_current_locked(void)
 {
     s_call.role = DEVICE_CALL_ROLE_NONE;
+    s_call.caller_peer_answered = false;
+    s_call.caller_transport_accepted = false;
+    s_call.caller_media_activation_running = false;
+    s_call.rtc_conn = NULL;
     s_call.room_id[0] = '\0';
     s_call.peer_device_id[0] = '\0';
     s_call.call_type[0] = '\0';
@@ -317,6 +336,20 @@ static bool device_call_generation_matches(uint32_t generation)
 
     device_call_lock();
     matches = s_call.generation == generation;
+    device_call_unlock();
+    return matches;
+}
+
+static bool device_call_pending_incoming_matches(uint32_t generation, const char *room_id)
+{
+    bool matches = false;
+
+    device_call_lock();
+    matches = s_call.ingress_enabled &&
+              s_call.generation == generation &&
+              s_call.pending_incoming &&
+              room_id != NULL &&
+              strcmp(s_call.pending_room_id, room_id) == 0;
     device_call_unlock();
     return matches;
 }
@@ -370,7 +403,7 @@ static esp_err_t device_call_http_request(const char *method,
                                           int *status_code,
                                           const char *trace_name)
 {
-    char url[DEVICE_CALL_API_BASE_MAX_LEN + 96] = {0};
+    char url[DEVICE_CALL_API_BASE_MAX_LEN + DEVICE_CALL_HTTP_PATH_MAX_LEN] = {0};
     char bearer[DEVICE_AUTH_MQTT_TOKEN_MAX_LEN + 8] = {0};
     char api_base[DEVICE_CALL_API_BASE_MAX_LEN] = {0};
     thing_http_header_t headers[1] = {0};
@@ -595,6 +628,16 @@ static esp_err_t device_call_post_room_action(device_call_action_t action,
     } else if (ret == ESP_OK) {
         ret = ESP_FAIL;
     }
+    if (ret != ESP_OK && business_code == DEVICE_CALL_CODE_ROOM_NOT_FOUND) {
+        /* Room actions are terminal and idempotent. The peer may have already
+         * released the shared room while this request was in flight. */
+        ESP_LOGI(TAG,
+                 "%s already complete: room=%s code=%d",
+                 trace_name,
+                 room_id,
+                 business_code);
+        ret = ESP_OK;
+    }
     if (ret != ESP_OK) {
         ESP_LOGW(TAG,
                  "%s failed: http=%d code=%d ret=%s",
@@ -726,6 +769,7 @@ static esp_err_t device_call_wait_for_connection(uint32_t generation)
 
     while (elapsed_ms < DEVICE_CALL_CONNECT_TIMEOUT_MS) {
         rtc_transport_stats_t stats = {0};
+        bool connection_tracked = false;
 
         if (!device_call_generation_matches(generation)) {
             ESP_LOGW(CALL_FLOW_TAG,
@@ -735,7 +779,10 @@ static esp_err_t device_call_wait_for_connection(uint32_t generation)
             return ESP_ERR_INVALID_STATE;
         }
         rtc_transport_get_stats(&stats);
-        if (stats.active_connection) {
+        device_call_lock();
+        connection_tracked = s_call.generation == generation && s_call.rtc_conn != NULL;
+        device_call_unlock();
+        if (stats.active_connection && connection_tracked) {
             ESP_LOGI(CALL_FLOW_TAG,
                      "stage=p2p_wait_done gen=%lu elapsed_ms=%u state=%u ret=ESP_OK",
                      (unsigned long)generation,
@@ -997,6 +1044,20 @@ static void device_call_accept_task(void *arg)
         return;
     }
 
+    /* Hangup may complete while the side-effecting token request is in
+     * flight. Do not let the stale accept worker resurrect that room by
+     * starting a new TiRTC connection after the lifecycle has moved on. */
+    if (!device_call_generation_matches(ctx->generation)) {
+        ESP_LOGI(CALL_FLOW_TAG,
+                 "stage=accept_abandoned gen=%lu room=%s reason=generation_changed_before_connect",
+                 (unsigned long)ctx->generation,
+                 ctx->room_id);
+        memset(connect_token, 0, sizeof(connect_token));
+        free(ctx);
+        vTaskDeleteWithCaps(NULL);
+        return;
+    }
+
     if (ret == ESP_OK) {
         rtc_transport_set_next_connection_auto_media(true);
         rtc_transport_set_next_connection_defer_media(true);
@@ -1014,6 +1075,16 @@ static void device_call_accept_task(void *arg)
                  esp_err_to_name(ret));
     }
     memset(connect_token, 0, sizeof(connect_token));
+    if (ret == ESP_OK && !device_call_generation_matches(ctx->generation)) {
+        ESP_LOGI(CALL_FLOW_TAG,
+                 "stage=accept_abandoned gen=%lu room=%s reason=generation_changed_during_connect_submit",
+                 (unsigned long)ctx->generation,
+                 ctx->room_id);
+        (void)rtc_transport_disconnect();
+        free(ctx);
+        vTaskDeleteWithCaps(NULL);
+        return;
+    }
     if (ret == ESP_OK) {
         ret = device_call_wait_for_connection(ctx->generation);
     }
@@ -1022,6 +1093,16 @@ static void device_call_accept_task(void *arg)
     }
     if (ret == ESP_OK) {
         ret = device_call_activate_media(ctx->call_type);
+    }
+    if (ret != ESP_OK && !device_call_generation_matches(ctx->generation)) {
+        ESP_LOGI(CALL_FLOW_TAG,
+                 "stage=accept_abandoned gen=%lu room=%s reason=generation_changed_while_connecting",
+                 (unsigned long)ctx->generation,
+                 ctx->room_id);
+        (void)rtc_transport_disconnect();
+        free(ctx);
+        vTaskDeleteWithCaps(NULL);
+        return;
     }
     if (ret != ESP_OK) {
         device_call_accept_failed(ctx,
@@ -1457,25 +1538,37 @@ static void device_call_ring_timer_task(void *arg)
     }
 
     if (expired) {
+        UBaseType_t stack_hwm = uxTaskGetStackHighWaterMark(NULL);
         if (phase == DEVICE_CALL_STATE_CONNECTING) {
             ESP_LOGW(CALL_FLOW_TAG,
-                     "stage=p2p_wait_timeout gen=%lu role=caller room=%s timeout_ms=%u",
+                     "stage=p2p_wait_timeout gen=%lu role=caller room=%s timeout_ms=%u stack_hwm=%u",
                      (unsigned long)ctx->generation,
                      room_id,
-                     (unsigned)DEVICE_CALL_CONNECT_TIMEOUT_MS);
+                     (unsigned)DEVICE_CALL_CONNECT_TIMEOUT_MS,
+                     (unsigned)stack_hwm);
         } else {
             ESP_LOGW(CALL_FLOW_TAG,
-                     "stage=ring_timeout gen=%lu room=%s timeout_ms=%u",
+                     "stage=ring_timeout gen=%lu room=%s timeout_ms=%u stack_hwm=%u",
                      (unsigned long)ctx->generation,
                      room_id,
-                     (unsigned)DEVICE_CALL_RING_TIMEOUT_MS);
+                     (unsigned)DEVICE_CALL_RING_TIMEOUT_MS,
+                     (unsigned)stack_hwm);
         }
         ESP_LOGI(TAG,
                  "%s timed out: room=%s",
                  phase == DEVICE_CALL_STATE_CONNECTING ? "caller P2P connection" :
                                                          "outgoing call",
                  room_id);
-        (void)device_call_post_room_action(timeout_action, room_id, timeout_reason);
+        esp_err_t action_ret = device_call_post_room_action_async(timeout_action,
+                                                                  room_id,
+                                                                  timeout_reason);
+        if (action_ret != ESP_OK) {
+            ESP_LOGE(CALL_FLOW_TAG,
+                     "stage=timeout_room_action_queue_failed action=%s room=%s ret=%s",
+                     device_call_action_name(timeout_action),
+                     room_id,
+                     esp_err_to_name(action_ret));
+        }
         device_call_reset_caller_media_gate();
         (void)rtc_transport_disconnect();
         device_call_notify_session_ended();
@@ -1635,27 +1728,107 @@ static void device_call_request_task(void *arg)
     vTaskDeleteWithCaps(NULL);
 }
 
-static esp_err_t device_call_refresh_contacts_now(uint32_t generation)
+static device_call_contact_source_t device_call_contact_source_from_string(const char *source)
 {
-    device_call_contact_t contacts[DEVICE_CALL_CONTACT_MAX] = {0};
-    char *response = NULL;
+    if (source != NULL && strcmp(source, "manual") == 0) {
+        return DEVICE_CALL_CONTACT_SOURCE_MANUAL;
+    }
+    if (source != NULL && strcmp(source, "auto") == 0) {
+        return DEVICE_CALL_CONTACT_SOURCE_AUTO;
+    }
+    return DEVICE_CALL_CONTACT_SOURCE_UNKNOWN;
+}
+
+static const char *device_call_contact_source_name(device_call_contact_source_t source)
+{
+    switch (source) {
+    case DEVICE_CALL_CONTACT_SOURCE_MANUAL:
+        return "manual";
+    case DEVICE_CALL_CONTACT_SOURCE_AUTO:
+        return "auto";
+    case DEVICE_CALL_CONTACT_SOURCE_UNKNOWN:
+    default:
+        return "unknown";
+    }
+}
+
+static uint8_t device_call_contact_priority(const device_call_contact_t *contact)
+{
+    if (contact != NULL && contact->online) {
+        return 0U;
+    }
+    if (contact != NULL && contact->source == DEVICE_CALL_CONTACT_SOURCE_MANUAL) {
+        return 1U;
+    }
+    return 2U;
+}
+
+static bool device_call_select_contact(device_call_contact_t *contacts,
+                                       uint8_t *count,
+                                       const device_call_contact_t *candidate)
+{
+    uint8_t insert_at = 0;
+    uint8_t candidate_priority = 0;
+
+    if (contacts == NULL || count == NULL || candidate == NULL) {
+        return false;
+    }
+    for (uint8_t index = 0; index < *count; ++index) {
+        if (strcmp(contacts[index].device_id, candidate->device_id) == 0) {
+            return false;
+        }
+    }
+
+    candidate_priority = device_call_contact_priority(candidate);
+    insert_at = *count;
+    for (uint8_t index = 0; index < *count; ++index) {
+        if (candidate_priority < device_call_contact_priority(&contacts[index])) {
+            insert_at = index;
+            break;
+        }
+    }
+    if (*count >= DEVICE_CALL_CONTACT_MAX && insert_at >= DEVICE_CALL_CONTACT_MAX) {
+        return false;
+    }
+
+    uint8_t shift_from = *count < DEVICE_CALL_CONTACT_MAX ?
+        *count : (DEVICE_CALL_CONTACT_MAX - 1U);
+    for (uint8_t index = shift_from; index > insert_at; --index) {
+        contacts[index] = contacts[index - 1U];
+    }
+    contacts[insert_at] = *candidate;
+    if (*count < DEVICE_CALL_CONTACT_MAX) {
+        ++(*count);
+    }
+    return true;
+}
+
+static esp_err_t device_call_fetch_contacts(char *response,
+                                            size_t response_size,
+                                            device_call_contact_t *contacts,
+                                            uint8_t *count_out,
+                                            uint8_t *online_count_out)
+{
     cJSON *root = NULL;
     cJSON *data = NULL;
     cJSON *items = NULL;
     uint8_t count = 0;
     uint8_t online_count = 0;
+    uint16_t valid_count = 0;
+    uint16_t online_total = 0;
     int status_code = 0;
     int business_code = -1;
     esp_err_t ret = ESP_OK;
 
-    response = app_memory_calloc_psram(1, DEVICE_CALL_CONTACT_RESPONSE_MAX_LEN);
-    if (response == NULL) {
-        return ESP_ERR_NO_MEM;
+    if (response == NULL || response_size < 2U || contacts == NULL ||
+        count_out == NULL || online_count_out == NULL) {
+        return ESP_ERR_INVALID_ARG;
     }
 
+    response[0] = '\0';
     ret = device_call_http_get("/v1/call/device/contacts",
                                response,
-                               DEVICE_CALL_CONTACT_RESPONSE_MAX_LEN,
+                               response_size,
                                &status_code,
                                "call_contacts");
     if (ret == ESP_OK && status_code >= 200 && status_code < 300) {
@@ -1672,7 +1845,6 @@ static esp_err_t device_call_refresh_contacts_now(uint32_t generation)
         if (root != NULL) {
             cJSON_Delete(root);
         }
-        free(response);
         return ret != ESP_OK ? ret : ESP_ERR_INVALID_RESPONSE;
     }
 
@@ -1680,73 +1852,202 @@ static esp_err_t device_call_refresh_contacts_now(uint32_t generation)
     if (cJSON_IsArray(items)) {
         cJSON *item = NULL;
         cJSON_ArrayForEach(item, items) {
+            device_call_contact_t candidate = {0};
             const char *device_id = device_call_json_string(item, "device_id");
             const char *type = device_call_json_string(item, "type");
             const char *remark = device_call_json_string(item, "remark");
+            const char *source = device_call_json_string(item, "source");
             cJSON *online = cJSON_GetObjectItemCaseSensitive(item, "online");
-            bool duplicate = false;
 
-            /* WeChat contacts have their own application and must not leak into
-             * the device-to-device contact page. */
             if ((type[0] != '\0' && strcmp(type, "device") != 0) ||
                 device_id[0] == '\0' || strlen(device_id) >= sizeof(contacts[0].device_id)) {
                 continue;
             }
+
+            strlcpy(candidate.device_id, device_id, sizeof(candidate.device_id));
+            strlcpy(candidate.remark, remark, sizeof(candidate.remark));
+            candidate.online = cJSON_IsTrue(online);
+            candidate.source = device_call_contact_source_from_string(source);
+            ++valid_count;
+            if (candidate.online) {
+                ++online_total;
+            }
+            (void)device_call_select_contact(contacts, &count, &candidate);
+        }
+    }
+
+    for (uint8_t index = 0; index < count; ++index) {
+        if (contacts[index].online) {
+            ++online_count;
+        }
+    }
+    if (valid_count > count) {
+        ESP_LOGW(TAG,
+                 "device contact snapshot selected=%u total=%u online_total=%u policy=online-manual-auto",
+                 (unsigned)count,
+                 (unsigned)valid_count,
+                 (unsigned)online_total);
+    }
+
+    cJSON_Delete(root);
+    *count_out = count;
+    *online_count_out = online_count;
+    return ESP_OK;
+}
+
+static esp_err_t device_call_fetch_pending_contacts(char *response,
+                                                    size_t response_size,
+                                                    device_call_pending_contact_t *pending,
+                                                    uint8_t *count_out)
+{
+    cJSON *root = NULL;
+    cJSON *data = NULL;
+    cJSON *items = NULL;
+    uint8_t count = 0;
+    int status_code = 0;
+    int business_code = -1;
+    esp_err_t ret = ESP_OK;
+
+    if (response == NULL || response_size < 2U || pending == NULL || count_out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    response[0] = '\0';
+    ret = device_call_http_get("/v1/call/device/contacts/pending",
+                               response,
+                               response_size,
+                               &status_code,
+                               "call_contacts_pending");
+    if (ret == ESP_OK && status_code >= 200 && status_code < 300) {
+        ret = device_call_parse_response(response, &root, &data, &business_code);
+    } else if (ret == ESP_OK) {
+        ret = ESP_FAIL;
+    }
+    if (ret != ESP_OK || !cJSON_IsObject(data)) {
+        ESP_LOGW(TAG,
+                 "pending contact refresh failed: http=%d code=%d ret=%s",
+                 status_code,
+                 business_code,
+                 esp_err_to_name(ret));
+        if (root != NULL) {
+            cJSON_Delete(root);
+        }
+        return ret != ESP_OK ? ret : ESP_ERR_INVALID_RESPONSE;
+    }
+
+    items = cJSON_GetObjectItemCaseSensitive(data, "pending");
+    if (cJSON_IsArray(items)) {
+        cJSON *item = NULL;
+        cJSON_ArrayForEach(item, items) {
+            const char *type = device_call_json_string(item, "type");
+            const char *peer_device_id = device_call_json_string(item, "peer_device_id");
+            const char *created_at = device_call_json_string(item, "created_at");
+            bool duplicate = false;
+
+            if ((type[0] != '\0' && strcmp(type, "device") != 0) ||
+                peer_device_id[0] == '\0' ||
+                strlen(peer_device_id) >= sizeof(pending[0].peer_device_id)) {
+                continue;
+            }
             for (uint8_t index = 0; index < count; ++index) {
-                if (strcmp(contacts[index].device_id, device_id) == 0) {
+                if (strcmp(pending[index].peer_device_id, peer_device_id) == 0) {
                     duplicate = true;
                     break;
                 }
             }
-            if (duplicate || count >= DEVICE_CALL_CONTACT_MAX) {
+            if (duplicate) {
                 continue;
             }
-
-            strlcpy(contacts[count].device_id,
-                    device_id,
-                    sizeof(contacts[count].device_id));
-            strlcpy(contacts[count].remark,
-                    remark,
-                    sizeof(contacts[count].remark));
-            contacts[count].online = cJSON_IsTrue(online);
-            if (contacts[count].online) {
-                ++online_count;
+            if (count >= DEVICE_CALL_CONTACT_MAX) {
+                ESP_LOGW(TAG,
+                         "pending contact snapshot truncated at %u entries",
+                         (unsigned)DEVICE_CALL_CONTACT_MAX);
+                break;
             }
+
+            strlcpy(pending[count].peer_device_id,
+                    peer_device_id,
+                    sizeof(pending[count].peer_device_id));
+            strlcpy(pending[count].created_at,
+                    created_at,
+                    sizeof(pending[count].created_at));
             ++count;
         }
     }
 
-    /* The response is a complete cloud snapshot. Replace the RAM copy so a
-     * contact removed from the cloud disappears on this refresh. */
+    cJSON_Delete(root);
+    *count_out = count;
+    return ESP_OK;
+}
+
+static esp_err_t device_call_refresh_contacts_now(uint32_t generation)
+{
+    device_call_contact_t contacts[DEVICE_CALL_CONTACT_MAX] = {0};
+    device_call_pending_contact_t pending[DEVICE_CALL_CONTACT_MAX] = {0};
+    char *response = NULL;
+    uint8_t count = 0;
+    uint8_t pending_count = 0;
+    uint8_t online_count = 0;
+    esp_err_t ret = ESP_OK;
+
+    response = app_memory_calloc_psram(1, DEVICE_CALL_CONTACT_RESPONSE_MAX_LEN);
+    if (response == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    ret = device_call_fetch_contacts(response,
+                                     DEVICE_CALL_CONTACT_RESPONSE_MAX_LEN,
+                                     contacts,
+                                     &count,
+                                     &online_count);
+    if (ret == ESP_OK) {
+        ret = device_call_fetch_pending_contacts(response,
+                                                 DEVICE_CALL_CONTACT_RESPONSE_MAX_LEN,
+                                                 pending,
+                                                 &pending_count);
+    }
+    free(response);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    /* Accepted and pending lists are one cloud snapshot. Commit them together
+     * so the UI cannot mix new contacts with stale approval requests. */
     device_call_lock();
     if (s_call.generation != generation) {
         device_call_unlock();
-        cJSON_Delete(root);
-        free(response);
         return ESP_ERR_INVALID_STATE;
     }
     memset(s_call.contacts, 0, sizeof(s_call.contacts));
+    memset(s_call.pending_contacts, 0, sizeof(s_call.pending_contacts));
     memcpy(s_call.contacts, contacts, (size_t)count * sizeof(contacts[0]));
+    memcpy(s_call.pending_contacts, pending, (size_t)pending_count * sizeof(pending[0]));
     s_call.contact_count = count;
+    s_call.pending_contact_count = pending_count;
     s_call.contacts_ready = true;
     s_call.contacts_last_error = ESP_OK;
     device_call_unlock();
 
-    cJSON_Delete(root);
-    free(response);
     ESP_LOGI(CALL_FLOW_TAG,
-             "stage=contacts_ready total=%u online=%u offline=%u",
+             "stage=contacts_ready accepted=%u pending=%u online=%u offline=%u",
              (unsigned)count,
+             (unsigned)pending_count,
              (unsigned)online_count,
              (unsigned)(count - online_count));
     for (uint8_t index = 0; index < count; ++index) {
-        ESP_LOGI(CALL_FLOW_TAG,
-                 "stage=contact index=%u peer=%s online=%d",
-                 (unsigned)index,
-                 contacts[index].device_id,
-                 contacts[index].online ? 1 : 0);
+        APP_LOG_DETAIL(CALL_FLOW_TAG,
+                       "stage=contact index=%u peer=%s online=%d source=%s",
+                       (unsigned)index,
+                       contacts[index].device_id,
+                       contacts[index].online ? 1 : 0,
+                       device_call_contact_source_name(contacts[index].source));
     }
-    ESP_LOGI(TAG, "device contacts refreshed: count=%u", (unsigned)count);
+    for (uint8_t index = 0; index < pending_count; ++index) {
+        APP_LOG_DETAIL(CALL_FLOW_TAG,
+                       "stage=contact_pending index=%u peer=%s",
+                       (unsigned)index,
+                       pending[index].peer_device_id);
+    }
     return ESP_OK;
 }
 
@@ -1893,14 +2194,72 @@ static esp_err_t device_call_update_contact_remark_now(const char *peer_id,
                                          0U);
 }
 
+static esp_err_t device_call_delete_contact_now(const char *peer_device_id)
+{
+    char path[DEVICE_CALL_HTTP_PATH_MAX_LEN] = {0};
+    char *response = NULL;
+    cJSON *root = NULL;
+    int status_code = 0;
+    int business_code = -1;
+    esp_err_t ret = ESP_OK;
+
+    if (peer_device_id == NULL || peer_device_id[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    int written = snprintf(path,
+                           sizeof(path),
+                           "/v1/call/device/contacts?peer_id=%s",
+                           peer_device_id);
+    if (written <= 0 || written >= (int)sizeof(path)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    response = app_memory_calloc_psram(1, DEVICE_CALL_HTTP_RESPONSE_MAX_LEN);
+    if (response == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    ret = device_call_http_request("DELETE",
+                                   path,
+                                   NULL,
+                                   response,
+                                   DEVICE_CALL_HTTP_RESPONSE_MAX_LEN,
+                                   &status_code,
+                                   "contact_delete");
+    if (ret == ESP_OK && status_code >= 200 && status_code < 300) {
+        ret = device_call_parse_response(response, &root, NULL, &business_code);
+    } else if (ret == ESP_OK) {
+        ret = ESP_FAIL;
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "contact_delete failed: http=%d code=%d ret=%s",
+                 status_code,
+                 business_code,
+                 esp_err_to_name(ret));
+    }
+    if (root != NULL) {
+        cJSON_Delete(root);
+    }
+    free(response);
+    return ret;
+}
+
 static void device_call_contact_task(void *arg)
 {
     device_call_contact_ctx_t *ctx = (device_call_contact_ctx_t *)arg;
     esp_err_t ret = ESP_ERR_INVALID_ARG;
     char mutation_status[16] = {0};
 
-    if (ctx != NULL) {
-        if (ctx->work == DEVICE_CALL_CONTACT_WORK_REFRESH) {
+    if (ctx == NULL) {
+        vTaskDeleteWithCaps(NULL);
+        return;
+    }
+
+    if (ctx->work == DEVICE_CALL_CONTACT_WORK_REFRESH) {
+        bool rerun = false;
+
+        do {
             uint32_t elapsed_ms = 0;
             while (device_call_generation_matches(ctx->generation) &&
                    !device_online_is_online() &&
@@ -1914,75 +2273,107 @@ static void device_call_contact_task(void *arg)
                 ret = device_online_is_online() ?
                       device_call_refresh_contacts_now(ctx->generation) : ESP_ERR_TIMEOUT;
             }
-        } else {
-            uint32_t elapsed_ms = 0;
-            bool refresh_running = false;
-
-            /* A startup/MQTT refresh may already own the HTTP path. Queue the
-             * user mutation behind it instead of rejecting the action. */
-            do {
-                if (!device_call_generation_matches(ctx->generation)) {
-                    break;
-                }
-                device_call_lock();
-                refresh_running = s_call.contacts_refresh_running;
-                device_call_unlock();
-                if (!refresh_running) {
-                    break;
-                }
-                vTaskDelay(pdMS_TO_TICKS(DEVICE_CALL_POLL_INTERVAL_MS));
-                elapsed_ms += DEVICE_CALL_POLL_INTERVAL_MS;
-            } while (elapsed_ms < DEVICE_CALL_ONLINE_READY_TIMEOUT_MS);
-
-            if (!device_call_generation_matches(ctx->generation)) {
-                ret = ESP_ERR_INVALID_STATE;
-            } else if (refresh_running) {
-                ret = ESP_ERR_TIMEOUT;
-            } else if (!device_online_is_online()) {
-                ret = ESP_ERR_INVALID_STATE;
-            } else {
-                switch (ctx->work) {
-                case DEVICE_CALL_CONTACT_WORK_REQUEST:
-                    ret = device_call_request_contact_now(ctx->target_device_id,
-                                                          mutation_status,
-                                                          sizeof(mutation_status));
-                    break;
-                case DEVICE_CALL_CONTACT_WORK_RESPOND:
-                    ret = device_call_respond_contact_now(ctx->target_device_id,
-                                                          ctx->accept,
-                                                          mutation_status,
-                                                          sizeof(mutation_status));
-                    break;
-                case DEVICE_CALL_CONTACT_WORK_REMARK:
-                    ret = device_call_update_contact_remark_now(ctx->target_device_id,
-                                                                ctx->remark);
-                    break;
-                default:
-                    ret = ESP_ERR_NOT_SUPPORTED;
-                    break;
-                }
-                if (ret == ESP_OK) {
-                    ESP_LOGI(TAG,
-                             "contact mutation completed: work=%u target=%s status=%s",
-                             (unsigned)ctx->work,
-                             ctx->target_device_id,
-                             mutation_status[0] != '\0' ? mutation_status : "ok");
-                    ret = device_call_refresh_contacts_now(ctx->generation);
+            device_call_lock();
+            rerun = s_call.generation == ctx->generation &&
+                    s_call.contacts_refresh_pending;
+            if (s_call.generation == ctx->generation) {
+                s_call.contacts_refresh_pending = false;
+                s_call.contacts_last_error = ret;
+                if (!rerun) {
+                    s_call.contacts_refresh_running = false;
                 }
             }
+            device_call_unlock();
+
+            if (rerun) {
+                ESP_LOGI(CALL_FLOW_TAG,
+                         "stage=contacts_refresh_coalesced gen=%lu",
+                         (unsigned long)ctx->generation);
+            }
+        } while (rerun);
+
+        free(ctx);
+        vTaskDeleteWithCaps(NULL);
+        return;
+    }
+
+    uint32_t elapsed_ms = 0;
+    bool refresh_running = false;
+
+    /* Serialize mutations behind a running refresh so the resulting snapshot
+     * always reflects the accepted server mutation. */
+    do {
+        if (!device_call_generation_matches(ctx->generation)) {
+            break;
+        }
+        device_call_lock();
+        refresh_running = s_call.contacts_refresh_running;
+        device_call_unlock();
+        if (!refresh_running) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(DEVICE_CALL_POLL_INTERVAL_MS));
+        elapsed_ms += DEVICE_CALL_POLL_INTERVAL_MS;
+    } while (elapsed_ms < DEVICE_CALL_ONLINE_READY_TIMEOUT_MS);
+
+    if (!device_call_generation_matches(ctx->generation)) {
+        ret = ESP_ERR_INVALID_STATE;
+    } else if (refresh_running) {
+        ret = ESP_ERR_TIMEOUT;
+    } else if (!device_online_is_online()) {
+        ret = ESP_ERR_INVALID_STATE;
+    } else {
+        switch (ctx->work) {
+        case DEVICE_CALL_CONTACT_WORK_REQUEST:
+            ret = device_call_request_contact_now(ctx->target_device_id,
+                                                  mutation_status,
+                                                  sizeof(mutation_status));
+            break;
+        case DEVICE_CALL_CONTACT_WORK_RESPOND:
+            ret = device_call_respond_contact_now(ctx->target_device_id,
+                                                  ctx->accept,
+                                                  mutation_status,
+                                                  sizeof(mutation_status));
+            break;
+        case DEVICE_CALL_CONTACT_WORK_REMARK:
+            ret = device_call_update_contact_remark_now(ctx->target_device_id,
+                                                        ctx->remark);
+            break;
+        case DEVICE_CALL_CONTACT_WORK_DELETE:
+            ret = device_call_delete_contact_now(ctx->target_device_id);
+            break;
+        default:
+            ret = ESP_ERR_NOT_SUPPORTED;
+            break;
+        }
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG,
+                     "contact mutation completed: work=%u target=%s status=%s",
+                     (unsigned)ctx->work,
+                     ctx->target_device_id,
+                     mutation_status[0] != '\0' ? mutation_status : "ok");
+            ret = device_call_refresh_contacts_now(ctx->generation);
         }
     }
 
+    bool schedule_refresh = false;
     device_call_lock();
-    if (ctx != NULL && s_call.generation == ctx->generation) {
-        if (ctx->work != DEVICE_CALL_CONTACT_WORK_REFRESH) {
-            s_call.contact_mutation_running = false;
-        } else {
-            s_call.contacts_refresh_running = false;
-        }
+    if (s_call.generation == ctx->generation) {
+        s_call.contact_mutation_running = false;
         s_call.contacts_last_error = ret;
+        schedule_refresh = s_call.contacts_refresh_pending;
+        s_call.contacts_refresh_pending = false;
     }
     device_call_unlock();
+
+    if (schedule_refresh) {
+        esp_err_t refresh_ret = device_call_refresh_contacts_async();
+        if (refresh_ret != ESP_OK) {
+            ESP_LOGW(TAG,
+                     "deferred contact refresh not scheduled: %s",
+                     esp_err_to_name(refresh_ret));
+        }
+    }
 
     free(ctx);
     vTaskDeleteWithCaps(NULL);
@@ -2126,6 +2517,24 @@ static void device_call_handle_incoming(const cJSON *payload, uint32_t message_g
     state = s_call.state;
     generation = s_call.generation;
     device_call_unlock();
+    esp_err_t ringtone_ret = device_call_ringtone_start();
+    if (ringtone_ret != ESP_OK) {
+        ESP_LOGW(CALL_FLOW_TAG,
+                 "stage=ringtone_start_failed gen=%lu room=%s ret=%s",
+                 (unsigned long)generation,
+                 room_id,
+                 esp_err_to_name(ringtone_ret));
+    } else if (!device_call_pending_incoming_matches(generation, room_id)) {
+        /* The cancel/reset path may win between committing the incoming state
+         * and starting the audio task. Never leave a stale ringtone running. */
+        esp_err_t stop_ret = device_call_ringtone_stop();
+        if (stop_ret != ESP_OK) {
+            ESP_LOGW(CALL_FLOW_TAG,
+                     "stage=ringtone_stop_failed reason=stale_incoming room=%s ret=%s",
+                     room_id,
+                     esp_err_to_name(stop_ret));
+        }
+    }
     ESP_LOGI(CALL_FLOW_TAG,
              "stage=incoming_received gen=%lu role=callee state=%s room=%s peer=%s type=%s",
              (unsigned long)generation,
@@ -2173,6 +2582,16 @@ static void device_call_handle_room_cancel(const cJSON *payload, uint32_t messag
         device_call_show_pending_or_idle_locked("call ended");
     }
     device_call_unlock();
+
+    if (pending_cleared) {
+        esp_err_t ringtone_ret = device_call_ringtone_stop();
+        if (ringtone_ret != ESP_OK) {
+            ESP_LOGW(CALL_FLOW_TAG,
+                     "stage=ringtone_stop_failed reason=room_cancel room=%s ret=%s",
+                     room_id,
+                     esp_err_to_name(ringtone_ret));
+        }
+    }
 
     if (close_transport) {
         device_call_reset_caller_media_gate();
@@ -2231,6 +2650,85 @@ static void device_call_handle_reject(const cJSON *payload, uint32_t message_gen
     }
 }
 
+static void device_call_try_complete_caller_handshake(uint32_t generation, const char *source)
+{
+    tirtc_conn_t conn = NULL;
+    char room_id[96] = {0};
+    char call_type[16] = {0};
+    bool ready = false;
+
+    device_call_lock();
+    ready = s_call.generation == generation &&
+            s_call.role == DEVICE_CALL_ROLE_CALLER &&
+            (s_call.state == DEVICE_CALL_STATE_OUTGOING ||
+             s_call.state == DEVICE_CALL_STATE_CONNECTING) &&
+            s_call.caller_peer_answered &&
+            s_call.caller_transport_accepted &&
+            s_call.rtc_conn != NULL &&
+            !s_call.caller_media_activation_running &&
+            s_call.room_id[0] != '\0';
+    if (ready) {
+        s_call.caller_media_activation_running = true;
+        conn = s_call.rtc_conn;
+        strlcpy(room_id, s_call.room_id, sizeof(room_id));
+        strlcpy(call_type, s_call.call_type, sizeof(call_type));
+    }
+    device_call_unlock();
+
+    if (!ready) {
+        return;
+    }
+
+    esp_err_t media_ret = device_call_activate_media(call_type);
+    bool completed = false;
+    bool failed = false;
+
+    device_call_lock();
+    if (s_call.generation == generation) {
+        s_call.caller_media_activation_running = false;
+        if (media_ret == ESP_OK &&
+            s_call.role == DEVICE_CALL_ROLE_CALLER &&
+            (s_call.state == DEVICE_CALL_STATE_OUTGOING ||
+             s_call.state == DEVICE_CALL_STATE_CONNECTING) &&
+            s_call.caller_peer_answered &&
+            s_call.caller_transport_accepted &&
+            s_call.rtc_conn == conn &&
+            strcmp(s_call.room_id, room_id) == 0) {
+            s_call.state = DEVICE_CALL_STATE_IN_CALL;
+            s_call.last_error = ESP_OK;
+            device_call_set_message_locked("call connected");
+            completed = true;
+        } else if (media_ret != ESP_OK &&
+                   s_call.role == DEVICE_CALL_ROLE_CALLER &&
+                   (s_call.state == DEVICE_CALL_STATE_OUTGOING ||
+                    s_call.state == DEVICE_CALL_STATE_CONNECTING)) {
+            device_call_next_generation_locked();
+            device_call_set_error_locked(media_ret, "call media activation failed");
+            failed = true;
+        }
+    }
+    device_call_unlock();
+
+    ESP_LOGI(CALL_FLOW_TAG,
+             "stage=caller_handshake gen=%lu room=%s source=%s peer_answered=1 p2p=1 media=%s completed=%d",
+             (unsigned long)generation,
+             room_id,
+             source != NULL ? source : "-",
+             esp_err_to_name(media_ret),
+             completed ? 1 : 0);
+    if (completed) {
+        ESP_LOGI(CALL_FLOW_TAG,
+                 "stage=in_call gen=%lu role=caller room=%s source=%s",
+                 (unsigned long)generation,
+                 room_id,
+                 source != NULL ? source : "peer+p2p");
+    } else if (failed) {
+        device_call_reset_caller_media_gate();
+        (void)rtc_transport_disconnect();
+        device_call_notify_session_ended();
+    }
+}
+
 static void device_call_handle_answered(const cJSON *payload, uint32_t message_generation)
 {
     const char *room_id = device_call_json_string(payload, "room_id");
@@ -2248,6 +2746,7 @@ static void device_call_handle_answered(const cJSON *payload, uint32_t message_g
           s_call.state == DEVICE_CALL_STATE_CONNECTING)) {
         matched = true;
         s_call.state = DEVICE_CALL_STATE_CONNECTING;
+        s_call.caller_peer_answered = true;
         if (callee_id[0] != '\0') {
             strlcpy(s_call.peer_device_id, callee_id, sizeof(s_call.peer_device_id));
         }
@@ -2259,6 +2758,9 @@ static void device_call_handle_answered(const cJSON *payload, uint32_t message_g
              room_id[0] != '\0' ? room_id : "-",
              callee_id[0] != '\0' ? callee_id : "-",
              matched ? 1 : 0);
+    if (matched) {
+        device_call_try_complete_caller_handshake(message_generation, "cloud-answer");
+    }
 }
 
 static void device_call_mqtt_message(const char *topic,
@@ -2330,14 +2832,21 @@ static void device_call_mqtt_message(const char *topic,
     if (recognized) {
         const char *room_id = device_call_json_string(event_payload, "room_id");
         const char *peer_id = device_call_json_string(event_payload, "caller_id");
+        const char *action = device_call_json_string(event_payload, "action");
+        const char *contact_type = device_call_json_string(event_payload, "contact_type");
         if (peer_id[0] == '\0') {
             peer_id = device_call_json_string(event_payload, "callee_id");
         }
+        if (peer_id[0] == '\0') {
+            peer_id = device_call_json_string(event_payload, "peer_id");
+        }
         ESP_LOGI(CALL_FLOW_TAG,
-                 "stage=mqtt_rx type=%s room=%s peer=%s topic=%s",
+                 "stage=mqtt_rx type=%s room=%s peer=%s action=%s contact_type=%s topic=%s",
                  type,
                  room_id[0] != '\0' ? room_id : "-",
                  peer_id[0] != '\0' ? peer_id : "-",
+                 action[0] != '\0' ? action : "-",
+                 contact_type[0] != '\0' ? contact_type : "-",
                  topic != NULL ? topic : "-");
     }
 
@@ -2351,9 +2860,15 @@ static void device_call_mqtt_message(const char *topic,
         device_call_handle_answered(event_payload, message_generation);
     } else if (strcmp(type, "callers_update") == 0 &&
                device_call_generation_matches(message_generation)) {
-        esp_err_t ret = device_call_refresh_contacts_async();
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "contact refresh notification failed: %s", esp_err_to_name(ret));
+        const char *contact_type = device_call_json_string(event_payload, "contact_type");
+
+        /* Empty payloads are accepted for compatibility. Explicit VoIP
+         * updates belong to the independent WeChat contact service. */
+        if (contact_type[0] == '\0' || strcmp(contact_type, "device") == 0) {
+            esp_err_t ret = device_call_refresh_contacts_async();
+            if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "contact refresh notification failed: %s", esp_err_to_name(ret));
+            }
         }
     }
     cJSON_Delete(root);
@@ -2370,8 +2885,9 @@ static bool device_call_on_rtc_command(tirtc_conn_t conn,
     bool matched = false;
     bool expected = false;
     bool owns_command = false;
+    bool already_connected = false;
+    uint32_t generation = 0;
 
-    (void)conn;
     (void)ctx;
 
     if (command != TIRTC_SESSION_CMD_DEVICE_CALL_CONNECTED &&
@@ -2403,9 +2919,10 @@ static bool device_call_on_rtc_command(tirtc_conn_t conn,
         /* The transport dispatch layer has already verified that conn is the
          * current connection, so OUTGOING remains valid for the rare case in
          * which P2P control arrives before the MQTT answered notification. */
-        active = s_call.state == DEVICE_CALL_STATE_OUTGOING ||
-                 s_call.state == DEVICE_CALL_STATE_CONNECTING ||
-                 s_call.state == DEVICE_CALL_STATE_IN_CALL;
+        active = (s_call.state == DEVICE_CALL_STATE_OUTGOING ||
+                  s_call.state == DEVICE_CALL_STATE_CONNECTING ||
+                  s_call.state == DEVICE_CALL_STATE_IN_CALL) &&
+                 s_call.rtc_conn != NULL && s_call.rtc_conn == conn;
         if (active) {
             strlcpy(active_room, s_call.room_id, sizeof(active_room));
             role = s_call.role;
@@ -2441,15 +2958,23 @@ static bool device_call_on_rtc_command(tirtc_conn_t conn,
     device_call_lock();
     expected = s_call.role == DEVICE_CALL_ROLE_CALLER &&
                (s_call.state == DEVICE_CALL_STATE_OUTGOING ||
-                s_call.state == DEVICE_CALL_STATE_CONNECTING);
+                s_call.state == DEVICE_CALL_STATE_CONNECTING ||
+                s_call.state == DEVICE_CALL_STATE_IN_CALL);
     matched = expected && room_id[0] != '\0' && s_call.room_id[0] != '\0' &&
-              strcmp(room_id, s_call.room_id) == 0;
+              strcmp(room_id, s_call.room_id) == 0 &&
+              (s_call.rtc_conn == NULL || s_call.rtc_conn == conn);
     if (matched) {
-        s_call.state = DEVICE_CALL_STATE_IN_CALL;
-        s_call.last_error = ESP_OK;
-        device_call_set_message_locked("call connected");
+        already_connected = s_call.state == DEVICE_CALL_STATE_IN_CALL;
+        generation = s_call.generation;
+        s_call.rtc_conn = conn;
+        s_call.caller_peer_answered = true;
+        s_call.caller_transport_accepted = true;
+        if (!already_connected) {
+            s_call.state = DEVICE_CALL_STATE_CONNECTING;
+            device_call_set_message_locked("peer is connecting");
+        }
     } else if (expected) {
-        device_call_set_error_locked(ESP_ERR_INVALID_RESPONSE, "room confirmation mismatch");
+        device_call_set_message_locked("waiting for current room confirmation");
     }
     device_call_unlock();
 
@@ -2465,32 +2990,62 @@ static bool device_call_on_rtc_command(tirtc_conn_t conn,
                  "stage=connected_notice_rx room=%s matched=0 cmd=0x%04x",
                  room_id[0] != '\0' ? room_id : "-",
                  TIRTC_SESSION_CMD_DEVICE_CALL_CONNECTED);
-        ESP_LOGW(TAG, "reject mismatched 0x2000 room confirmation: room=%s", room_id);
-        device_call_reset_caller_media_gate();
-        (void)rtc_transport_disconnect();
-        device_call_notify_session_ended();
+        ESP_LOGW(TAG, "ignore stale 0x2000 room confirmation: room=%s", room_id);
         return true;
     }
 
     ESP_LOGI(CALL_FLOW_TAG,
-             "stage=in_call role=caller room=%s cmd=0x%04x",
+             "stage=connected_notice_rx room=%s matched=1 already_connected=%d cmd=0x%04x",
              room_id,
+             already_connected ? 1 : 0,
              TIRTC_SESSION_CMD_DEVICE_CALL_CONNECTED);
-    ESP_LOGI(TAG, "caller received room confirmation: room=%s", room_id);
-    char call_type[16] = {0};
-    device_call_lock();
-    strlcpy(call_type, s_call.call_type, sizeof(call_type));
-    device_call_unlock();
-    esp_err_t media_ret = device_call_activate_media(call_type);
-    if (media_ret != ESP_OK) {
-        ESP_LOGW(CALL_FLOW_TAG,
-                 "stage=media_activate_failed role=caller room=%s ret=%s",
-                 room_id,
-                 esp_err_to_name(media_ret));
-        (void)rtc_transport_disconnect();
-        device_call_notify_session_ended();
+    if (!already_connected) {
+        device_call_try_complete_caller_handshake(generation, "legacy-command");
     }
     return true;
+}
+
+static void device_call_on_rtc_connection_accepted(tirtc_conn_t conn, void *ctx)
+{
+    uint32_t generation = 0;
+    char room_id[96] = {0};
+    bool tracked = false;
+    bool peer_answered = false;
+
+    (void)ctx;
+
+    device_call_lock();
+    if (s_call.role == DEVICE_CALL_ROLE_CALLER &&
+        (s_call.state == DEVICE_CALL_STATE_OUTGOING ||
+         s_call.state == DEVICE_CALL_STATE_CONNECTING) &&
+        s_call.room_id[0] != '\0' &&
+        (s_call.rtc_conn == NULL || s_call.rtc_conn == conn)) {
+        s_call.rtc_conn = conn;
+        s_call.caller_transport_accepted = true;
+        generation = s_call.generation;
+        peer_answered = s_call.caller_peer_answered;
+        strlcpy(room_id, s_call.room_id, sizeof(room_id));
+        tracked = true;
+    } else if (s_call.role == DEVICE_CALL_ROLE_CALLEE &&
+               (s_call.state == DEVICE_CALL_STATE_CONNECTING ||
+                s_call.state == DEVICE_CALL_STATE_IN_CALL) &&
+               (s_call.rtc_conn == NULL || s_call.rtc_conn == conn)) {
+        s_call.rtc_conn = conn;
+    }
+    device_call_unlock();
+
+    if (!tracked) {
+        return;
+    }
+
+    ESP_LOGI(CALL_FLOW_TAG,
+             "stage=p2p_accepted gen=%lu role=caller room=%s peer_answered=%d",
+             (unsigned long)generation,
+             room_id,
+             peer_answered ? 1 : 0);
+    if (peer_answered) {
+        device_call_try_complete_caller_handshake(generation, "p2p-accepted");
+    }
 }
 
 static void device_call_on_rtc_connection_error(tirtc_conn_t conn, int error, void *ctx)
@@ -2499,8 +3054,8 @@ static void device_call_on_rtc_connection_error(tirtc_conn_t conn, int error, vo
     device_call_role_t role = DEVICE_CALL_ROLE_NONE;
     device_call_state_t state = DEVICE_CALL_STATE_IDLE;
     bool active = false;
+    bool pending_caller = false;
 
-    (void)conn;
     (void)ctx;
 
     device_call_lock();
@@ -2509,9 +3064,17 @@ static void device_call_on_rtc_connection_error(tirtc_conn_t conn, int error, vo
         ESP_LOGI(CALL_FLOW_TAG, "stage=rtc_error ignored=call_switch sdk_error=%d", error);
         return;
     }
-    active = s_call.state == DEVICE_CALL_STATE_OUTGOING ||
-             s_call.state == DEVICE_CALL_STATE_CONNECTING ||
-             s_call.state == DEVICE_CALL_STATE_IN_CALL;
+    pending_caller = s_call.role == DEVICE_CALL_ROLE_CALLER &&
+                     (s_call.state == DEVICE_CALL_STATE_OUTGOING ||
+                      s_call.state == DEVICE_CALL_STATE_CONNECTING) &&
+                     s_call.rtc_conn != NULL && s_call.rtc_conn == conn;
+    if (pending_caller) {
+        s_call.rtc_conn = NULL;
+        s_call.caller_transport_accepted = false;
+        device_call_set_message_locked("peer connection retrying");
+    }
+    active = s_call.state == DEVICE_CALL_STATE_IN_CALL &&
+             s_call.rtc_conn != NULL && s_call.rtc_conn == conn;
     if (active) {
         strlcpy(room_id, s_call.room_id, sizeof(room_id));
         role = s_call.role;
@@ -2523,8 +3086,9 @@ static void device_call_on_rtc_connection_error(tirtc_conn_t conn, int error, vo
 
     if (!active) {
         APP_LOG_DETAIL(CALL_FLOW_TAG,
-                       "stage=rtc_error ignored=inactive sdk_error=%d",
-                       error);
+                       "stage=rtc_error ignored=inactive sdk_error=%d pending_caller=%d",
+                       error,
+                       pending_caller ? 1 : 0);
         return;
     }
 
@@ -2563,8 +3127,8 @@ static void device_call_on_rtc_disconnected(tirtc_conn_t conn, void *ctx)
     device_call_state_t state = DEVICE_CALL_STATE_IDLE;
     bool notify_server = false;
     bool session_ended = false;
+    bool pending_caller = false;
 
-    (void)conn;
     (void)ctx;
 
     device_call_lock();
@@ -2573,7 +3137,17 @@ static void device_call_on_rtc_disconnected(tirtc_conn_t conn, void *ctx)
         ESP_LOGI(CALL_FLOW_TAG, "stage=rtc_disconnected ignored=call_switch");
         return;
     }
-    if (s_call.state == DEVICE_CALL_STATE_CONNECTING || s_call.state == DEVICE_CALL_STATE_IN_CALL) {
+    pending_caller = s_call.role == DEVICE_CALL_ROLE_CALLER &&
+                     (s_call.state == DEVICE_CALL_STATE_OUTGOING ||
+                      s_call.state == DEVICE_CALL_STATE_CONNECTING) &&
+                     s_call.rtc_conn != NULL && s_call.rtc_conn == conn;
+    if (pending_caller) {
+        s_call.rtc_conn = NULL;
+        s_call.caller_transport_accepted = false;
+        device_call_set_message_locked("peer connection retrying");
+    }
+    if (s_call.state == DEVICE_CALL_STATE_IN_CALL &&
+        s_call.rtc_conn != NULL && s_call.rtc_conn == conn) {
         strlcpy(room_id, s_call.room_id, sizeof(room_id));
         role = s_call.role;
         state = s_call.state;
@@ -2596,10 +3170,11 @@ static void device_call_on_rtc_disconnected(tirtc_conn_t conn, void *ctx)
         device_call_notify_session_ended();
     }
     ESP_LOGI(CALL_FLOW_TAG,
-             "stage=rtc_disconnected role=%s state=%s room=%s notify_server=%d session_ended=%d",
+             "stage=rtc_disconnected role=%s state=%s room=%s pending_caller=%d notify_server=%d session_ended=%d",
              device_call_role_name(role),
              device_call_state_name(state),
              room_id[0] != '\0' ? room_id : "-",
+             pending_caller ? 1 : 0,
              notify_server ? 1 : 0,
              session_ended ? 1 : 0);
 }
@@ -2660,6 +3235,7 @@ static void device_call_on_rtc_start_error(int error,
 
 static const rtc_transport_observer_t s_rtc_observer = {
     .on_command = device_call_on_rtc_command,
+    .on_connection_accepted = device_call_on_rtc_connection_accepted,
     .on_connection_error = device_call_on_rtc_connection_error,
     .on_disconnected = device_call_on_rtc_disconnected,
     .on_start_error = device_call_on_rtc_start_error,
@@ -2695,11 +3271,14 @@ esp_err_t device_call_init(const device_call_config_t *config)
     s_call.switch_disconnect_in_progress = false;
     s_call.contacts_ready = false;
     s_call.contacts_refresh_running = false;
+    s_call.contacts_refresh_pending = false;
     s_call.contact_mutation_running = false;
     s_call.room_recovery_running = false;
     s_call.contact_count = 0;
+    s_call.pending_contact_count = 0;
     s_call.contacts_last_error = ESP_OK;
     memset(s_call.contacts, 0, sizeof(s_call.contacts));
+    memset(s_call.pending_contacts, 0, sizeof(s_call.pending_contacts));
     device_call_set_message_locked(config->enabled ? "ready" : "disabled");
     device_call_unlock();
     ESP_LOGI(CALL_FLOW_TAG,
@@ -2894,15 +3473,24 @@ void device_call_reset_identity_state(void)
         s_call.pending_call_type[0] = '\0';
         s_call.contacts_ready = false;
         s_call.contacts_refresh_running = false;
+        s_call.contacts_refresh_pending = false;
         s_call.contact_mutation_running = false;
         s_call.room_recovery_running = false;
         s_call.contact_count = 0;
+        s_call.pending_contact_count = 0;
         s_call.contacts_last_error = ESP_OK;
         memset(s_call.contacts, 0, sizeof(s_call.contacts));
+        memset(s_call.pending_contacts, 0, sizeof(s_call.pending_contacts));
         device_call_show_pending_or_idle_locked("identity changed");
     }
     device_call_unlock();
 
+    esp_err_t ringtone_ret = device_call_ringtone_stop();
+    if (ringtone_ret != ESP_OK) {
+        ESP_LOGW(CALL_FLOW_TAG,
+                 "stage=ringtone_stop_failed reason=identity_reset ret=%s",
+                 esp_err_to_name(ringtone_ret));
+    }
     device_call_reset_caller_media_gate();
     if (notify_session_ended) {
         device_call_notify_session_ended();
@@ -3111,6 +3699,18 @@ esp_err_t device_call_accept_pending(void)
     device_call_set_message_locked("answering call");
     device_call_unlock();
 
+    esp_err_t ringtone_ret = device_call_ringtone_stop();
+    if (ringtone_ret != ESP_OK) {
+        device_call_accept_failed(ctx, ringtone_ret, "ringtone stop failed", false);
+        ESP_LOGE(CALL_FLOW_TAG,
+                 "stage=accept_rejected gen=%lu room=%s reason=ringtone_stop ret=%s",
+                 (unsigned long)generation,
+                 ctx->room_id,
+                 esp_err_to_name(ringtone_ret));
+        free(ctx);
+        return ringtone_ret;
+    }
+
     ESP_LOGI(CALL_FLOW_TAG,
              "stage=accept_queued gen=%lu role=callee room=%s peer=%s switch=%d",
              (unsigned long)generation,
@@ -3159,6 +3759,14 @@ esp_err_t device_call_reject_pending(void)
         device_call_show_pending_or_idle_locked("call rejected");
     }
     device_call_unlock();
+
+    esp_err_t ringtone_ret = device_call_ringtone_stop();
+    if (ringtone_ret != ESP_OK) {
+        ESP_LOGW(CALL_FLOW_TAG,
+                 "stage=ringtone_stop_failed reason=reject room=%s ret=%s",
+                 room_id,
+                 esp_err_to_name(ringtone_ret));
+    }
 
     ESP_LOGI(CALL_FLOW_TAG,
              "stage=reject_queued room=%s",
@@ -3267,11 +3875,17 @@ esp_err_t device_call_refresh_contacts_async(void)
     uint32_t generation = 0;
 
     device_call_lock();
-    if (!s_call.initialized || !s_call.enabled || !s_call.ingress_enabled) {
+    if (!s_call.initialized || !s_call.enabled || !s_call.ingress_enabled ||
+        s_call.request_running || s_call.accept_running ||
+        s_call.state == DEVICE_CALL_STATE_OUTGOING ||
+        s_call.state == DEVICE_CALL_STATE_INCOMING ||
+        s_call.state == DEVICE_CALL_STATE_CONNECTING ||
+        s_call.state == DEVICE_CALL_STATE_IN_CALL) {
         device_call_unlock();
         return ESP_ERR_INVALID_STATE;
     }
     if (s_call.contacts_refresh_running || s_call.contact_mutation_running) {
+        s_call.contacts_refresh_pending = true;
         device_call_unlock();
         return ESP_OK;
     }
@@ -3346,6 +3960,23 @@ static esp_err_t device_call_start_contact_mutation(device_call_contact_work_t w
         free(ctx);
         return ESP_ERR_INVALID_STATE;
     }
+    if (work == DEVICE_CALL_CONTACT_WORK_DELETE) {
+        bool found = false;
+        device_call_contact_source_t source = DEVICE_CALL_CONTACT_SOURCE_UNKNOWN;
+
+        for (uint8_t index = 0; index < s_call.contact_count; ++index) {
+            if (strcmp(s_call.contacts[index].device_id, peer_device_id) == 0) {
+                found = true;
+                source = s_call.contacts[index].source;
+                break;
+            }
+        }
+        if (!found || source != DEVICE_CALL_CONTACT_SOURCE_MANUAL) {
+            device_call_unlock();
+            free(ctx);
+            return found ? ESP_ERR_NOT_ALLOWED : ESP_ERR_NOT_FOUND;
+        }
+    }
     s_call.contact_mutation_running = true;
     generation = s_call.generation;
     ctx->generation = generation;
@@ -3360,6 +3991,9 @@ static esp_err_t device_call_start_contact_mutation(device_call_contact_work_t w
         break;
     case DEVICE_CALL_CONTACT_WORK_REMARK:
         task_name = "dev_ct_remark";
+        break;
+    case DEVICE_CALL_CONTACT_WORK_DELETE:
+        task_name = "dev_ct_delete";
         break;
     default:
         task_name = "dev_ct_mutate";
@@ -3409,6 +4043,14 @@ esp_err_t device_call_update_contact_remark_async(const char *peer_id, const cha
                                               false);
 }
 
+esp_err_t device_call_delete_contact_async(const char *peer_device_id)
+{
+    return device_call_start_contact_mutation(DEVICE_CALL_CONTACT_WORK_DELETE,
+                                              peer_device_id,
+                                              NULL,
+                                              false);
+}
+
 void device_call_get_contacts_snapshot(device_call_contacts_snapshot_t *snapshot)
 {
     if (snapshot == NULL) {
@@ -3420,9 +4062,13 @@ void device_call_get_contacts_snapshot(device_call_contacts_snapshot_t *snapshot
     snapshot->ready = s_call.contacts_ready;
     snapshot->refreshing = s_call.contacts_refresh_running || s_call.contact_mutation_running;
     snapshot->count = s_call.contact_count;
+    snapshot->pending_count = s_call.pending_contact_count;
     snapshot->last_error = s_call.contacts_last_error;
     memcpy(snapshot->contacts,
            s_call.contacts,
            (size_t)s_call.contact_count * sizeof(snapshot->contacts[0]));
+    memcpy(snapshot->pending,
+           s_call.pending_contacts,
+           (size_t)s_call.pending_contact_count * sizeof(snapshot->pending[0]));
     device_call_unlock();
 }

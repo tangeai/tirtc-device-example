@@ -298,7 +298,8 @@ static esp_err_t device_binding_http_post_json(const char *url,
             .event_handler = device_binding_http_event_handler,
             .user_data = &response,
             .timeout_ms = DEVICE_BINDING_HTTP_TIMEOUT_MS,
-            .crt_bundle_attach = device_binding_http_is_https(url) ? esp_crt_bundle_attach : NULL,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .disable_auto_redirect = true,
         };
 
         esp_http_client_handle_t client = esp_http_client_init(&http_config);
@@ -454,6 +455,10 @@ esp_err_t device_binding_http_report(const char *api_base,
     if (api_base == NULL || api_base[0] == '\0' ||
         mac == NULL || mac[0] == '\0' ||
         result == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!device_binding_http_is_https(api_base)) {
+        ESP_LOGE(TAG, "plaintext binding HTTP transport rejected");
         return ESP_ERR_INVALID_ARG;
     }
     if (has_device_id != has_device_key) {

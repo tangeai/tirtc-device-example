@@ -5,11 +5,11 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "scan_preview.h"
 #include "wifi.h"
 
 #define DISPLAY_WIFI_SCAN_MAX       10
 #define DISPLAY_DEVICE_UUID_MAX_LEN 37
-#define DISPLAY_PING_SUMMARY_MAX    96
 #define DISPLAY_TEST_STATUS_MAX     96
 #define DISPLAY_AI_CHAT_CAPTION_MAX 256
 #define DISPLAY_AI_CHAT_MESSAGE_MAX 100
@@ -20,13 +20,17 @@
 #define DISPLAY_TIRTC_CONFIG_TOKEN_SUBJECT_MAX 64
 #define DISPLAY_BINDING_CODE_MAX_LEN 8
 #define DISPLAY_BINDING_MESSAGE_MAX_LEN 96
-#define DISPLAY_CALL_CONTACT_MAX   5
+#define DISPLAY_CALL_CONTACT_MAX   8
+#define DISPLAY_CALL_CONTACT_DEVICE_ID_LENGTH 12
 #define DISPLAY_CALL_CONTACT_DEVICE_ID_MAX 64
 #define DISPLAY_CALL_CONTACT_REMARK_MAX 64
+#define DISPLAY_CALL_CONTACT_CREATED_AT_MAX 48
 #define DISPLAY_CALL_ROOM_ID_MAX 96
 #define DISPLAY_CALL_MESSAGE_MAX 96
-#define DISPLAY_WECHAT_CONTACT_MAX  3
+#define DISPLAY_WECHAT_CONTACT_MAX  4
 #define DISPLAY_WECHAT_OPEN_ID_MAX  96
+#define DISPLAY_WECHAT_REMARK_MAX_CHARS 64
+#define DISPLAY_WECHAT_REMARK_MAX ((DISPLAY_WECHAT_REMARK_MAX_CHARS * 4) + 1)
 
 typedef enum {
     DISPLAY_OTA_STATE_IDLE = 0,
@@ -108,13 +112,20 @@ typedef struct {
 
 typedef struct {
     char open_id[DISPLAY_WECHAT_OPEN_ID_MAX];
+    char remark[DISPLAY_WECHAT_REMARK_MAX];
 } display_wechat_contact_t;
 
 typedef struct {
     char device_id[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX];
     char remark[DISPLAY_CALL_CONTACT_REMARK_MAX];
     bool online;
+    bool deletable;
 } display_call_contact_t;
+
+typedef struct {
+    char device_id[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX];
+    char created_at[DISPLAY_CALL_CONTACT_CREATED_AT_MAX];
+} display_call_pending_contact_t;
 
 typedef struct {
     uint8_t caption_type;
@@ -134,7 +145,12 @@ typedef struct {
     uint16_t wifi_scan_count;
     display_wifi_scan_result_t wifi_scan_results[DISPLAY_WIFI_SCAN_MAX];
     bool ping_running;
-    char ping_summary[DISPLAY_PING_SUMMARY_MAX];
+    bool ping_valid;
+    uint32_t ping_transmitted;
+    uint32_t ping_received;
+    uint32_t ping_latency_avg_ms;
+    uint32_t ping_jitter_ms;
+    uint32_t ping_loss_percent;
     bool test_running;
     char test_status[DISPLAY_TEST_STATUS_MAX];
     display_ota_state_t ota_state;
@@ -153,6 +169,8 @@ typedef struct {
     bool device_door_open;
     size_t memory_internal_free;
     size_t memory_internal_largest;
+    size_t memory_dma_largest;
+    size_t memory_psram_largest;
     display_memory_health_t memory_health;
 
     bool rtc_connected;
@@ -196,12 +214,18 @@ typedef struct {
     bool call_contacts_ready;
     bool call_contacts_refreshing;
     int call_last_error;
+    int call_contacts_last_error;
     char call_peer_device_id[DISPLAY_CALL_CONTACT_DEVICE_ID_MAX];
     char call_room_id[DISPLAY_CALL_ROOM_ID_MAX];
     char call_message[DISPLAY_CALL_MESSAGE_MAX];
     uint8_t call_contact_count;
     display_call_contact_t call_contacts[DISPLAY_CALL_CONTACT_MAX];
+    uint8_t call_pending_contact_count;
+    display_call_pending_contact_t call_pending_contacts[DISPLAY_CALL_CONTACT_MAX];
     uint8_t wechat_contact_count;
+    bool wechat_contacts_ready;
+    bool wechat_contacts_server_synced;
+    int wechat_contacts_last_error;
     bool wechat_incoming_call_pending;
     display_wechat_call_state_t wechat_call_state;
     display_wechat_contact_t wechat_contacts[DISPLAY_WECHAT_CONTACT_MAX];
@@ -244,10 +268,13 @@ typedef esp_err_t (*display_call_contact_cb_t)(const char *device_id,
                                                display_call_type_t call_type,
                                                void *ctx);
 typedef esp_err_t (*display_call_contact_add_cb_t)(const char *device_id, void *ctx);
-typedef void (*display_scan_preview_cb_t)(const uint16_t *rgb565_pixels,
-                                          uint16_t width,
-                                          uint16_t height,
-                                          void *ctx);
+typedef esp_err_t (*display_call_contact_respond_cb_t)(const char *device_id,
+                                                       bool accept,
+                                                       void *ctx);
+typedef esp_err_t (*display_call_contact_remark_cb_t)(const char *device_id,
+                                                      const char *remark,
+                                                      void *ctx);
+typedef scan_preview_cb_t display_scan_preview_cb_t;
 typedef void (*display_contact_scan_result_cb_t)(esp_err_t result,
                                                  const char *device_id,
                                                  const char *raw_payload,
@@ -275,6 +302,9 @@ typedef esp_err_t (*display_wechat_contact_scan_start_cb_t)(display_scan_preview
                                                             void *ctx);
 typedef esp_err_t (*display_wechat_action_cb_t)(void *ctx);
 typedef esp_err_t (*display_wechat_contact_cb_t)(const char *open_id, void *ctx);
+typedef esp_err_t (*display_wechat_contact_remark_cb_t)(const char *open_id,
+                                                        const char *remark,
+                                                        void *ctx);
 typedef esp_err_t (*display_tirtc_config_update_cb_t)(display_tirtc_config_field_t field,
                                                       const char *value,
                                                       void *ctx);
@@ -287,11 +317,8 @@ typedef struct {
     display_uuid_update_cb_t on_set_device_uuid;
     display_simple_action_cb_t on_wifi_scan;
     display_simple_action_cb_t on_ping_test;
-    display_simple_action_cb_t on_start_rtc;
     display_simple_action_cb_t on_disconnect_rtc;
     display_simple_action_cb_t on_hangup_call;
-    display_simple_action_cb_t on_start_sender_video_test;
-    display_simple_action_cb_t on_start_sender_audio_test;
     display_simple_action_cb_t on_start_ota;
     display_simple_action_cb_t on_restart_for_ota;
     display_toggle_action_cb_t on_set_local_video_enabled;
@@ -300,6 +327,9 @@ typedef struct {
     display_percent_cb_t on_set_capture_gain;
     display_call_contact_cb_t on_call_contact;
     display_call_contact_add_cb_t on_add_call_contact;
+    display_call_contact_respond_cb_t on_respond_call_contact;
+    display_call_contact_remark_cb_t on_update_call_contact_remark;
+    display_call_contact_add_cb_t on_delete_call_contact;
     display_simple_action_cb_t on_refresh_call_contacts;
     display_simple_action_cb_t on_scan_contact;
     display_contact_scan_start_cb_t on_start_contact_scan;
@@ -311,6 +341,7 @@ typedef struct {
     display_wechat_contact_cb_t on_wechat_contact;
     display_wechat_contact_cb_t on_add_wechat_contact;
     display_wechat_contact_cb_t on_remove_wechat_contact;
+    display_wechat_contact_remark_cb_t on_update_wechat_contact_remark;
     display_simple_action_cb_t on_scan_wechat_contact;
     display_wechat_contact_scan_start_cb_t on_start_wechat_contact_scan;
     display_simple_action_cb_t on_stop_wechat_contact_scan;
@@ -332,10 +363,14 @@ typedef struct {
 
 esp_err_t display_init(const display_actions_t *actions);
 void display_set_snapshot_provider(display_snapshot_cb_t cb, void *ctx);
+esp_err_t display_open_home_page_async(void);
+esp_err_t display_open_device_page_async(void);
 esp_err_t display_open_call_page_async(void);
 esp_err_t display_open_call_active_page_async(void);
 esp_err_t display_open_wechat_page_async(void);
 esp_err_t display_open_wechat_active_page_async(void);
+esp_err_t display_open_ai_chat_page_async(void);
+esp_err_t display_open_system_page_async(void);
 esp_err_t display_capture_bmp(uint8_t **bmp_data, size_t *bmp_size);
 esp_err_t display_debug_tap(uint16_t x, uint16_t y);
 esp_err_t display_debug_tap_async(uint16_t x, uint16_t y);

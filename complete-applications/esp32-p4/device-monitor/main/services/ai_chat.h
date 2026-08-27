@@ -134,6 +134,7 @@ esp_err_t ai_chat_init(const ai_chat_config_t *config);
 esp_err_t ai_chat_configure(const ai_chat_config_t *config);
 esp_err_t ai_chat_open(void);
 esp_err_t ai_chat_close(void);
+esp_err_t ai_chat_wait_until_quiescent(uint32_t timeout_ms);
 esp_err_t ai_chat_clear_messages(void);
 esp_err_t ai_chat_handle_control_button(bool pressed);
 bool ai_chat_owns_control_button(void);

@@ -121,8 +121,8 @@
  * \brief SDK 初始化、配置项设置、启动与停止。
  *
  * 典型调用顺序：
- * 1. TiRtcSetOption() — 设置服务入口等选项（须在 TiRtcStart() 前，部分选项须在 TiRtcInit() 前）
- * 2. TiRtcInit()
+ * 1. TiRtcInit()
+ * 2. TiRtcSetOption() — 设置服务入口等选项（须在 TiRtcStart() 前，部分选项须在 TiRtcInit() 前）
  * 3. TiRtcStart()
  * 4. 使用 SDK（收发媒体、命令等）
  * 5. TiRtcStop()
@@ -270,7 +270,9 @@ typedef enum TIRTCOPTION {
     /** 是否支持休眠唤醒（`int *`，0 或 1）。默认 0。 */
     TIRTC_OPT_WAKEUP,
 
-    /** 是否受限网络（`int *`，0 或 1）。默认 0。 */
+    /** 是否受限网络（`int *`，0 或 1）。默认 0。
+     *  受限网络这里指运营商定向物联网卡
+     */
     TIRTC_OPT_RESTRICTED_NETWORK,
 
     /** 发送缓冲区大小（`uint32_t *`，字节）。
@@ -470,7 +472,7 @@ typedef struct TIRTCCALLBACKS {
      * \note  回调运行在 SDK 内部线程，应用应快速返回；如需重配编码器，建议投递到编码线程处理。
      *    - 先调用TiRtcConnSetVideoBitrateParams()设置
      */
-    void (*on_video_bitrate_required)(tirtc_conn_t hconn,
+    void (*on_update_bitrate)(tirtc_conn_t hconn,
                                         uint8_t stream_id,
                                         uint32_t target_bitrate_bps);
 } TIRTCCALLBACKS;
@@ -766,7 +768,7 @@ TiRTC_EXPORT uint32_t atomic_get_cmd_sn(void);
  *
  * \param hconn     连接句柄
  * \param stream_id 目标流 ID
- * \return 0 成功；否则为错误码
+ * \return >= 0 成功；否则为错误码
  */
 TiRTC_EXPORT int TiRtcRequestKeyFrame(tirtc_conn_t hconn, uint8_t stream_id);
 
@@ -776,7 +778,7 @@ TiRTC_EXPORT int TiRtcRequestKeyFrame(tirtc_conn_t hconn, uint8_t stream_id);
  *
  * \param hconn     连接句柄
  * \param stream_id 目标流 ID
- * \return 0 成功；否则为错误码
+ * \return >= 0 成功；否则为错误码
  */
 TiRTC_EXPORT int TiRtcSubscribeVideo(tirtc_conn_t hconn, uint8_t stream_id);
 
@@ -786,7 +788,7 @@ TiRTC_EXPORT int TiRtcSubscribeVideo(tirtc_conn_t hconn, uint8_t stream_id);
  *
  * \param hconn     连接句柄
  * \param stream_id 目标流 ID
- * \return 0 成功；否则为错误码
+ * \return >= 0 成功；否则为错误码
  */
 TiRTC_EXPORT int TiRtcUnsubscribeVideo(tirtc_conn_t hconn, uint8_t stream_id);
 
@@ -796,7 +798,7 @@ TiRTC_EXPORT int TiRtcUnsubscribeVideo(tirtc_conn_t hconn, uint8_t stream_id);
  *
  * \param hconn     连接句柄
  * \param stream_id 目标流 ID
- * \return 0 成功；否则为错误码
+ * \return >= 0 成功；否则为错误码
  */
 TiRTC_EXPORT int TiRtcSubscribeAudio(tirtc_conn_t hconn, uint8_t stream_id);
 
@@ -806,7 +808,7 @@ TiRTC_EXPORT int TiRtcSubscribeAudio(tirtc_conn_t hconn, uint8_t stream_id);
  *
  * \param hconn     连接句柄
  * \param stream_id 目标流 ID
- * \return 0 成功；否则为错误码
+ * \return >= 0 成功；否则为错误码
  */
 TiRTC_EXPORT int TiRtcUnsubscribeAudio(tirtc_conn_t hconn, uint8_t stream_id);
 

@@ -378,7 +378,7 @@ static esp_err_t screen_debug_handle_status(int fd)
     camera_pipeline_metrics_t camera = {0};
     char ip[SCREEN_DEBUG_JSON_STRING_MAX];
     char ssid[SCREEN_DEBUG_JSON_STRING_MAX];
-    char body[720];
+    char body[880];
 
     network_get_state(&network);
     camera_pipeline_get_metrics(&camera);
@@ -389,6 +389,9 @@ static esp_err_t screen_debug_handle_status(int fd)
                        sizeof(body),
                        "{\"ok\":true,\"connected\":%s,\"ip\":\"%s\",\"ssid\":\"%s\","
                        "\"width\":%u,\"height\":%u,\"port\":%u,\"uptime_ms\":%llu,"
+                       "\"memory\":{\"internal_free\":%u,\"internal_largest\":%u,"
+                       "\"dma_free\":%u,\"dma_largest\":%u,\"psram_free\":%u,"
+                       "\"psram_largest\":%u},"
                        "\"camera\":{\"running\":%s,\"enabled\":%s,\"width\":%u,\"height\":%u,"
                        "\"target_fps\":%u,\"fps_x10\":%lu,\"bitrate_kbps\":%lu,"
                        "\"configured_bitrate_kbps\":%lu,\"avg_payload\":%lu,"
@@ -400,6 +403,12 @@ static esp_err_t screen_debug_handle_status(int fd)
                        (unsigned)display_driver_height(),
                        (unsigned)CONFIG_APP_DEBUG_SCREEN_SERVER_PORT,
                        (unsigned long long)(esp_timer_get_time() / 1000ULL),
+                       (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                       (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+                       (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
                        camera.running ? "true" : "false",
                        camera.rtc_enabled ? "true" : "false",
                        (unsigned)camera.width,

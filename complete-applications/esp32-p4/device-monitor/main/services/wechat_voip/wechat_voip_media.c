@@ -115,6 +115,7 @@ static bool wechat_voip_media_format_is_16k_pcm_mono(const tirtc_session_audio_f
 }
 
 static esp_err_t wechat_voip_media_send_pcma_packet(const wechat_voip_media_packet_t *packet,
+                                                    audio_alaw_stream_encoder_t *encoder,
                                                     size_t *payload_len_out)
 {
     size_t encoded_len = 0;
@@ -136,11 +137,12 @@ static esp_err_t wechat_voip_media_send_pcma_packet(const wechat_voip_media_pack
                                    sizeof(encoded),
                                    &encoded_len);
     } else if (wechat_voip_media_format_is_16k_pcm_mono(&packet->format)) {
-        ret = audio_alaw_encode_16k_mono_to_8k(packet->data,
-                                               packet->data_len,
-                                               encoded,
-                                               sizeof(encoded),
-                                               &encoded_len);
+        ret = audio_alaw_stream_encode_16k_mono_to_8k(encoder,
+                                                      packet->data,
+                                                      packet->data_len,
+                                                      encoded,
+                                                      sizeof(encoded),
+                                                      &encoded_len);
         if (ret == ESP_OK && !s_audio_downsample_logged) {
             s_audio_downsample_logged = true;
             ESP_LOGI(TAG,
@@ -185,6 +187,8 @@ static void wechat_voip_media_task(void *ctx)
 {
     (void)ctx;
     wechat_voip_media_packet_t packet = {0};
+    audio_alaw_stream_encoder_t encoder = {0};
+    uint32_t encoder_generation = UINT32_MAX;
 
     while (true) {
         if (xQueueReceive(s_media.queue, &packet, portMAX_DELAY) != pdTRUE) {
@@ -209,8 +213,13 @@ static void wechat_voip_media_task(void *ctx)
             continue;
         }
 
+        if (encoder_generation != packet.generation) {
+            audio_alaw_stream_encoder_reset(&encoder);
+            encoder_generation = packet.generation;
+        }
+
         size_t payload_len = 0;
-        esp_err_t ret = wechat_voip_media_send_pcma_packet(&packet, &payload_len);
+        esp_err_t ret = wechat_voip_media_send_pcma_packet(&packet, &encoder, &payload_len);
 
         taskENTER_CRITICAL(&s_media_lock);
         bool log_first_packet = ret == ESP_OK && s_media.stats.tx_frames == 0;

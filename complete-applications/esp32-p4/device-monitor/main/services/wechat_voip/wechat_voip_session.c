@@ -2458,7 +2458,12 @@ bool wechat_voip_session_on_conn_error(tirtc_conn_t hconn, int error)
 
     ESP_LOGW(TAG, "微信通话连接错误: %d %s", error, TiRtcGetErrorStr(error));
     wechat_voip_media_stop(hconn);
-    disconnect_later(hconn, generation, false);
+    /* The TiRTC session worker owns SDK-error teardown. After notifying
+     * observers it moves this handle from active to closing, calls
+     * TiRtcDisconnect once, and waits for the disconnected callback. Queuing
+     * another delayed disconnect here can run after that callback has freed
+     * the peer connection, turning the saved handle into a use-after-free. */
+    (void)generation;
     return true;
 }
 

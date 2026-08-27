@@ -18,7 +18,7 @@ Release，不再用日期批次同时代表整仓内容。当前版本和下载�
 | 第一次移植 TiRTC SDK | [最小 TiRTC 集成](../sdk-integration-examples/README.md) |
 | 用串口观察配网、绑定、AI 和呼叫协议 | [ESP32-S3 最小系统例子](../minimal-system-examples/esp32-s3/README.md) |
 | 在带屏 S3 板上运行完整业务 | [ESP32-S3 Device Monitor](../complete-applications/esp32-s3/device-monitor/README.md) |
-| 在 P4+C6 板上构建完整业务 | [ESP32-P4 Device App](../complete-applications/esp32-p4/device-monitor/README.md) |
+| 在 P4+C6 板上构建完整业务 | [ESP32-P4 Device Monitor](../complete-applications/esp32-p4/device-monitor/README.md) |
 | 核对源码、SDK 和构建证据 | [版本与证据清单](VERSIONS_CN.md) |
 
 每个项目 README 是主入口。先沿着其中的“准备 -> 配置 -> 构建或下载 -> 烧录 -> 首次启动”完成
@@ -47,7 +47,7 @@ Release，不再用日期批次同时代表整仓内容。当前版本和下载�
 | --- | --- | --- | --- |
 | [完整应用总览](../complete-applications/README.md) | - | - | 选择目标开发板 |
 | [ESP32-S3 Device Monitor](../complete-applications/esp32-s3/device-monitor/README.md) | `1.9.6` | `2.3.0 mini` | 绑定、H5 双向音频、冷启动呼叫、联系人键盘、小钛、微信、二维码扫描和 OTA |
-| [ESP32-P4 Device App](../complete-applications/esp32-p4/device-monitor/README.md) | `1.3.2` | `2.3.0` 定制兼容快照 | Hosted 网络、P4 媒体链路和完整业务 |
+| [ESP32-P4 Device Monitor](../complete-applications/esp32-p4/device-monitor/README.md) | `1.5.0` | `2.3.0` 官方源码重建版 | Hosted 网络、TGMP 码率、持久 PSRAM 媒体池、双向设备视频和完整业务 |
 | [G32S10X Device Monitor](../complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | G32S10X 完整设备能力与君正平台适配 |
 | [固件下载与校验](RELEASES_CN.md) | - | - | Release 下载、烧录入口和一致性校验 |
 

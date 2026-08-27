@@ -24,6 +24,8 @@ static const char *TAG = "device_online";
 #define DEVICE_ONLINE_TASK_STACK_SIZE (12 * 1024)
 #define DEVICE_ONLINE_TASK_PRIORITY   2
 #define DEVICE_ONLINE_MONITOR_MS      1000U
+#define DEVICE_ONLINE_RECOVERY_RETRY_INITIAL_MS 5000U
+#define DEVICE_ONLINE_RECOVERY_RETRY_MAX_MS     60000U
 #define DEVICE_ONLINE_TOKEN_TTL_SECONDS (7U * 24U * 60U * 60U)
 #define DEVICE_ONLINE_TOKEN_REFRESH_SKEW_US (60LL * 1000LL * 1000LL)
 #define DEVICE_ONLINE_TOKEN_INVALID_REASON_ADMIN_ACTION 0x98U
@@ -774,10 +776,10 @@ static esp_err_t device_online_restart_owned_mqtt(const device_online_credential
     return ret;
 }
 
-static void device_online_monitor_loop(device_online_credentials_t *credentials)
+static esp_err_t device_online_monitor_loop(device_online_credentials_t *credentials)
 {
     if (credentials == NULL) {
-        return;
+        return ESP_ERR_INVALID_ARG;
     }
 
     while (!device_online_stopping() &&
@@ -792,7 +794,7 @@ static void device_online_monitor_loop(device_online_credentials_t *credentials)
                     device_online_set_state(DEVICE_ONLINE_STATE_ERROR, ret, "mqtt token self-heal failed");
                     ESP_LOGW(TAG, "mqtt token self-heal failed: %s", esp_err_to_name(ret));
                 }
-                return;
+                return ret;
             }
         }
 
@@ -804,7 +806,7 @@ static void device_online_monitor_loop(device_online_credentials_t *credentials)
                     device_online_set_state(DEVICE_ONLINE_STATE_ERROR, ret, "mqtt token refresh failed");
                     ESP_LOGW(TAG, "mqtt token refresh failed: %s", esp_err_to_name(ret));
                 }
-                return;
+                return ret;
             }
         }
         bool connected = thing_mqtt_client_is_connected();
@@ -823,6 +825,26 @@ static void device_online_monitor_loop(device_online_credentials_t *credentials)
         }
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(DEVICE_ONLINE_MONITOR_MS));
     }
+    return ESP_OK;
+}
+
+static void device_online_wait_recovery(uint32_t wait_ms)
+{
+    int64_t deadline_us = esp_timer_get_time() + (int64_t)wait_ms * 1000LL;
+
+    while (!device_online_stopping() &&
+           device_online_network_ready() &&
+           !device_online_realtime_media_active()) {
+        int64_t remaining_us = deadline_us - esp_timer_get_time();
+        if (remaining_us <= 0) {
+            break;
+        }
+        uint32_t slice_ms = (uint32_t)((remaining_us + 999LL) / 1000LL);
+        if (slice_ms > DEVICE_ONLINE_MONITOR_MS) {
+            slice_ms = DEVICE_ONLINE_MONITOR_MS;
+        }
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(slice_ms));
+    }
 }
 
 static void device_online_task(void *arg)
@@ -830,7 +852,7 @@ static void device_online_task(void *arg)
     (void)arg;
     device_online_credentials_t *credentials = app_memory_calloc_psram(1, sizeof(*credentials));
     esp_err_t ret = ESP_OK;
-    bool mqtt_started = false;
+    uint32_t recovery_wait_ms = DEVICE_ONLINE_RECOVERY_RETRY_INITIAL_MS;
     bool restart_requested = false;
     char restart_reason[sizeof(s_online.restart_reason)] = {0};
 
@@ -860,28 +882,55 @@ static void device_online_task(void *arg)
         goto done;
     }
 
-    ret = device_online_get_cached_credentials(credentials);
-    if (ret == ESP_ERR_NOT_FOUND) {
-        device_online_set_device_id("");
-        device_online_set_state(DEVICE_ONLINE_STATE_UNBOUND, ESP_OK, "device unbound");
-        goto done;
-    }
-    if (ret != ESP_OK) {
-        device_online_set_state(DEVICE_ONLINE_STATE_ERROR, ret, "credentials load failed");
-        goto done;
+    while (!device_online_stopping() &&
+           device_online_network_ready() &&
+           !device_online_realtime_media_active()) {
+        bool mqtt_started = false;
+        memset(credentials, 0, sizeof(*credentials));
+
+        ret = device_online_get_cached_credentials(credentials);
+        if (ret == ESP_ERR_NOT_FOUND) {
+            device_online_set_device_id("");
+            device_online_set_state(DEVICE_ONLINE_STATE_UNBOUND, ESP_OK, "device unbound");
+            break;
+        }
+        if (ret != ESP_OK) {
+            device_online_set_state(DEVICE_ONLINE_STATE_ERROR, ret, "credentials load failed");
+        } else {
+            device_online_set_device_id(credentials->device_id);
+            ret = device_online_connect(credentials);
+            if (ret == ESP_OK) {
+                mqtt_started = true;
+                recovery_wait_ms = DEVICE_ONLINE_RECOVERY_RETRY_INITIAL_MS;
+                ret = device_online_monitor_loop(credentials);
+            }
+        }
+
+        if (mqtt_started) {
+            device_online_release_mqtt();
+            device_online_set_mqtt_connected(false);
+        }
+        if (ret == ESP_ERR_NOT_FOUND ||
+            device_online_stopping() ||
+            !device_online_network_ready() ||
+            device_online_realtime_media_active()) {
+            break;
+        }
+
+        device_online_set_state(DEVICE_ONLINE_STATE_ERROR, ret, "online recovery pending");
+        ESP_LOGW(TAG,
+                 "online service recovery scheduled: ret=%s wait_ms=%lu",
+                 esp_err_to_name(ret),
+                 (unsigned long)recovery_wait_ms);
+        device_online_wait_recovery(recovery_wait_ms);
+        if (recovery_wait_ms < DEVICE_ONLINE_RECOVERY_RETRY_MAX_MS) {
+            recovery_wait_ms *= 2U;
+            if (recovery_wait_ms > DEVICE_ONLINE_RECOVERY_RETRY_MAX_MS) {
+                recovery_wait_ms = DEVICE_ONLINE_RECOVERY_RETRY_MAX_MS;
+            }
+        }
     }
 
-    device_online_set_device_id(credentials->device_id);
-    ret = device_online_connect(credentials);
-    if (ret == ESP_OK) {
-        mqtt_started = true;
-        device_online_monitor_loop(credentials);
-    }
-
-    if (mqtt_started) {
-        device_online_release_mqtt();
-        device_online_set_mqtt_connected(false);
-    }
     if (!device_online_network_ready()) {
         device_online_set_state(DEVICE_ONLINE_STATE_OFFLINE, ESP_OK, "network offline");
     }

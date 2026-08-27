@@ -26,6 +26,9 @@
 #define QR_SCANNER_TASK_PRIORITY       3
 #define QR_SCANNER_STOP_WAIT_MS        1000
 #define QR_SCANNER_PROGRESS_LOG_MS     1000
+#define QR_SCANNER_CAMERA_WIDTH        800U
+#define QR_SCANNER_CAMERA_HEIGHT       640U
+#define QR_SCANNER_CAMERA_FPS          15U
 
 static const char *TAG = "qr_scanner";
 
@@ -35,6 +38,7 @@ static void *qr_scanner_calloc(size_t count, size_t size)
 }
 
 static SemaphoreHandle_t s_scan_lock;
+static TaskHandle_t s_scan_task;
 static portMUX_TYPE s_scan_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_scan_running;
 static bool s_scan_stop_requested;
@@ -44,6 +48,8 @@ typedef struct {
 	qr_scanner_result_cb_t result_cb;
 	void *ctx;
 } qr_scanner_task_args_t;
+
+static qr_scanner_task_args_t s_scan_task_args;
 
 typedef enum {
 	QR_SCANNER_IMAGE_NORMAL = 0,
@@ -442,40 +448,81 @@ static quirc_decode_error_t qr_scanner_decode_code_with_flip(struct quirc_code *
 
 static esp_err_t qr_scanner_copy_frame_to_decoder(uint8_t *image,
 						  size_t image_len,
+						  uint16_t image_width,
+						  uint16_t image_height,
 						  const camera_driver_frame_t *frame,
 						  qr_scanner_image_transform_t transform)
 {
-	size_t pixel_count = (size_t)frame->width * frame->height;
+	size_t source_pixel_count = (size_t)frame->width * frame->height;
+	size_t image_pixel_count = (size_t)image_width * image_height;
+	uint16_t source_step_x = frame->width / image_width;
+	uint16_t source_step_y = frame->height / image_height;
 	bool mirror_x = qr_scanner_transform_mirrors_x(transform);
 	bool mirror_y = qr_scanner_transform_mirrors_y(transform);
 	bool swap_bytes = qr_scanner_transform_swaps_bytes(transform);
 
-	ESP_RETURN_ON_FALSE(image != NULL && frame != NULL,
+	ESP_RETURN_ON_FALSE(image != NULL && frame != NULL &&
+				    image_width > 0U && image_height > 0U &&
+				    frame->width % image_width == 0U &&
+				    frame->height % image_height == 0U,
 			    ESP_ERR_INVALID_ARG,
 			    TAG,
 			    "invalid frame copy args");
-	ESP_RETURN_ON_FALSE(image_len >= pixel_count,
+	ESP_RETURN_ON_FALSE(image_len >= image_pixel_count,
 			    ESP_ERR_INVALID_SIZE,
 			    TAG,
 			    "decoder image buffer too small");
 
 	if (frame->pixel_format == CAMERA_DRIVER_PIXEL_FORMAT_GRAYSCALE) {
-		ESP_RETURN_ON_FALSE(frame->data != NULL && frame->data_len >= pixel_count,
+		ESP_RETURN_ON_FALSE(frame->data != NULL && frame->data_len >= source_pixel_count,
 				    ESP_ERR_INVALID_SIZE,
 				    TAG,
 				    "camera grayscale frame is incomplete");
-		if (!mirror_x && !mirror_y) {
-			memcpy(image, frame->data, pixel_count);
+		if (!mirror_x && !mirror_y && source_step_x == 1U && source_step_y == 1U) {
+			memcpy(image, frame->data, image_pixel_count);
 		} else {
-			for (uint16_t y = 0; y < frame->height; ++y) {
-				uint16_t src_y = mirror_y ? (uint16_t)(frame->height - 1U - y) : y;
+			for (uint16_t y = 0; y < image_height; ++y) {
+				uint16_t sampled_y = (uint16_t)(y * source_step_y);
+				uint16_t src_y = mirror_y ?
+					(uint16_t)(frame->height - 1U - sampled_y) : sampled_y;
 				const uint8_t *src_row = frame->data + ((size_t)src_y * frame->width);
-				uint8_t *dst_row = image + ((size_t)y * frame->width);
+				uint8_t *dst_row = image + ((size_t)y * image_width);
 
-				for (uint16_t x = 0; x < frame->width; ++x) {
-					uint16_t src_x = mirror_x ? (uint16_t)(frame->width - 1U - x) : x;
+				for (uint16_t x = 0; x < image_width; ++x) {
+					uint16_t sampled_x = (uint16_t)(x * source_step_x);
+					uint16_t src_x = mirror_x ?
+						(uint16_t)(frame->width - 1U - sampled_x) : sampled_x;
 					dst_row[x] = src_row[src_x];
 				}
+			}
+		}
+		return ESP_OK;
+	}
+
+	if (frame->pixel_format == CAMERA_DRIVER_PIXEL_FORMAT_YUV420_OUYY_EVYY) {
+		ESP_RETURN_ON_FALSE(frame->data != NULL &&
+				    frame->data_len >= source_pixel_count * 3U / 2U,
+				    ESP_ERR_INVALID_SIZE,
+				    TAG,
+				    "camera yuv420 frame is incomplete");
+		/* The P4 camera's V4L2 YU12 buffer is the packed O_UYY_E_VYY
+		 * layout consumed by PPA/H264, not planar I420. Each two pixels use
+		 * one chroma byte followed by two full-resolution luma bytes. */
+		const size_t source_row_stride = (size_t)frame->width * 3U / 2U;
+		for (uint16_t y = 0; y < image_height; ++y) {
+			uint16_t sampled_y = (uint16_t)(y * source_step_y);
+			uint16_t src_y = mirror_y ?
+				(uint16_t)(frame->height - 1U - sampled_y) : sampled_y;
+			const uint8_t *src_row =
+				frame->data + ((size_t)src_y * source_row_stride);
+			uint8_t *dst_row = image + ((size_t)y * image_width);
+
+			for (uint16_t x = 0; x < image_width; ++x) {
+				uint16_t sampled_x = (uint16_t)(x * source_step_x);
+				uint16_t src_x = mirror_x ?
+					(uint16_t)(frame->width - 1U - sampled_x) : sampled_x;
+				dst_row[x] = src_row[((size_t)src_x / 2U) * 3U +
+							 1U + (src_x & 1U)];
 			}
 		}
 		return ESP_OK;
@@ -484,16 +531,20 @@ static esp_err_t qr_scanner_copy_frame_to_decoder(uint8_t *image,
 	if (frame->pixel_format == CAMERA_DRIVER_PIXEL_FORMAT_RGB565) {
 		const uint16_t *pixels = (const uint16_t *)frame->data;
 
-		ESP_RETURN_ON_FALSE(frame->data != NULL && frame->data_len >= pixel_count * sizeof(uint16_t),
+		ESP_RETURN_ON_FALSE(frame->data != NULL && frame->data_len >= source_pixel_count * sizeof(uint16_t),
 				    ESP_ERR_INVALID_SIZE,
 				    TAG,
 				    "camera rgb565 frame is incomplete");
-		for (uint16_t y = 0; y < frame->height; ++y) {
-			size_t row_offset = (size_t)y * frame->width;
-			size_t src_row_offset = (size_t)(mirror_y ? (uint16_t)(frame->height - 1U - y) : y) * frame->width;
+		for (uint16_t y = 0; y < image_height; ++y) {
+			uint16_t sampled_y = (uint16_t)(y * source_step_y);
+			size_t row_offset = (size_t)y * image_width;
+			size_t src_row_offset = (size_t)(mirror_y ?
+				(uint16_t)(frame->height - 1U - sampled_y) : sampled_y) * frame->width;
 
-			for (uint16_t x = 0; x < frame->width; ++x) {
-				size_t src_index = src_row_offset + (mirror_x ? (frame->width - 1U - x) : x);
+			for (uint16_t x = 0; x < image_width; ++x) {
+				uint16_t sampled_x = (uint16_t)(x * source_step_x);
+				size_t src_index = src_row_offset + (mirror_x ?
+					(frame->width - 1U - sampled_x) : sampled_x);
 				uint16_t pixel = qr_scanner_maybe_swap_rgb565(pixels[src_index], swap_bytes);
 				image[row_offset + x] = qr_scanner_luma_from_rgb565(pixel);
 			}
@@ -506,10 +557,14 @@ static esp_err_t qr_scanner_copy_frame_to_decoder(uint8_t *image,
 
 static esp_err_t qr_scanner_decode_frame(struct quirc *decoder,
 					 const camera_driver_frame_t *frame,
-					 qr_scanner_contact_t *contact)
+					 qr_scanner_contact_t *contact,
+					 uint16_t *decoder_width,
+					 uint16_t *decoder_height)
 {
 	int image_width = 0;
 	int image_height = 0;
+	uint16_t decode_width = 0;
+	uint16_t decode_height = 0;
 	uint8_t *image = NULL;
 	size_t pixel_count = 0;
 	esp_err_t first_error = ESP_ERR_NOT_FOUND;
@@ -522,30 +577,60 @@ static esp_err_t qr_scanner_decode_frame(struct quirc *decoder,
 		QR_SCANNER_IMAGE_MIRROR_Y_BYTE_SWAP,
 	};
 
-	ESP_RETURN_ON_FALSE(decoder != NULL && frame != NULL && contact != NULL,
+	ESP_RETURN_ON_FALSE(decoder != NULL && frame != NULL && contact != NULL &&
+			    decoder_width != NULL && decoder_height != NULL,
 			    ESP_ERR_INVALID_ARG,
 			    TAG,
 			    "invalid decode args");
 
-	pixel_count = (size_t)frame->width * frame->height;
+	decode_width = frame->width;
+	decode_height = frame->height;
+	if ((frame->pixel_format == CAMERA_DRIVER_PIXEL_FORMAT_YUV420_OUYY_EVYY ||
+	     frame->pixel_format == CAMERA_DRIVER_PIXEL_FORMAT_GRAYSCALE) &&
+	    frame->width >= 640U && frame->height >= 480U) {
+		decode_width = (uint16_t)(frame->width / 2U);
+		decode_height = (uint16_t)(frame->height / 2U);
+	}
+	pixel_count = (size_t)decode_width * decode_height;
 
 	for (size_t transform_index = 0; transform_index < sizeof(transforms) / sizeof(transforms[0]); ++transform_index) {
 		qr_scanner_image_transform_t transform = transforms[transform_index];
 		int code_count = 0;
+		/* The P4 camera provides an orientation-correct Y plane. Quirc handles
+		 * QR rotation itself, so mirror/byte-swap retries only waste two full
+		 * image scans and make the live preview visibly stall. Keep correction
+		 * retries for the legacy RGB565 input path only. */
+		if (frame->pixel_format != CAMERA_DRIVER_PIXEL_FORMAT_RGB565 &&
+		    transform != QR_SCANNER_IMAGE_NORMAL) {
+			continue;
+		}
 
-		ESP_RETURN_ON_FALSE(quirc_resize(decoder, frame->width, frame->height) >= 0,
-				    ESP_ERR_NO_MEM,
-				    TAG,
-				    "qr decoder resize failed");
+		/* quirc_resize always allocates replacement image and flood-fill
+		 * buffers, even when the dimensions are unchanged. The camera profile
+		 * is stable during a scan, so resize only when the decoded image shape
+		 * actually changes instead of churning two large heap blocks per frame. */
+		if (*decoder_width != decode_width || *decoder_height != decode_height) {
+			ESP_RETURN_ON_FALSE(quirc_resize(decoder, decode_width, decode_height) >= 0,
+					    ESP_ERR_NO_MEM,
+					    TAG,
+					    "qr decoder resize failed");
+			*decoder_width = decode_width;
+			*decoder_height = decode_height;
+		}
 
 		image = quirc_begin(decoder, &image_width, &image_height);
 		ESP_RETURN_ON_FALSE(image != NULL &&
-				    image_width == frame->width &&
-				    image_height == frame->height,
+				    image_width == decode_width &&
+				    image_height == decode_height,
 				    ESP_ERR_INVALID_SIZE,
 				    TAG,
 				    "qr decoder image buffer mismatch");
-		ESP_RETURN_ON_ERROR(qr_scanner_copy_frame_to_decoder(image, pixel_count, frame, transform),
+		ESP_RETURN_ON_ERROR(qr_scanner_copy_frame_to_decoder(image,
+							      pixel_count,
+							      decode_width,
+							      decode_height,
+							      frame,
+							      transform),
 				    TAG,
 				    "camera frame convert failed");
 		quirc_end(decoder);
@@ -695,20 +780,43 @@ static void qr_scanner_emit_preview(const qr_scanner_task_args_t *args,
 				    const camera_driver_frame_t *frame)
 {
 	if (args == NULL || args->preview_cb == NULL || frame == NULL ||
-	    frame->pixel_format != CAMERA_DRIVER_PIXEL_FORMAT_RGB565 ||
 	    frame->data == NULL) {
 		return;
 	}
 
-	size_t needed = (size_t)frame->width * frame->height * sizeof(uint16_t);
+	size_t pixel_count = (size_t)frame->width * frame->height;
+	size_t needed = 0U;
+	scan_preview_pixel_format_t preview_format = SCAN_PREVIEW_PIXEL_FORMAT_GRAYSCALE;
+	switch (frame->pixel_format) {
+	case CAMERA_DRIVER_PIXEL_FORMAT_RGB565:
+		preview_format = SCAN_PREVIEW_PIXEL_FORMAT_RGB565;
+		needed = pixel_count * sizeof(uint16_t);
+		break;
+	case CAMERA_DRIVER_PIXEL_FORMAT_YUV420_OUYY_EVYY:
+		preview_format = SCAN_PREVIEW_PIXEL_FORMAT_YUV420_OUYY_EVYY;
+		needed = pixel_count * 3U / 2U;
+		break;
+	case CAMERA_DRIVER_PIXEL_FORMAT_GRAYSCALE:
+	default:
+		preview_format = SCAN_PREVIEW_PIXEL_FORMAT_GRAYSCALE;
+		needed = pixel_count;
+		break;
+	}
 	if (frame->data_len < needed) {
 		return;
 	}
 
-	args->preview_cb((const uint16_t *)frame->data, frame->width, frame->height, args->ctx);
+	const scan_preview_frame_t preview = {
+		.data = frame->data,
+		.data_len = frame->data_len,
+		.width = frame->width,
+		.height = frame->height,
+		.pixel_format = preview_format,
+	};
+	args->preview_cb(&preview, args->ctx);
 }
 
-static void qr_scanner_live_task(void *arg)
+static void qr_scanner_run_live_session(const qr_scanner_task_args_t *session_args)
 {
 	qr_scanner_task_args_t args = {0};
 	qr_scanner_contact_t *contact = NULL;
@@ -717,13 +825,13 @@ static void qr_scanner_live_task(void *arg)
 	bool cancelled = false;
 	bool camera_acquired = false;
 	uint32_t frame_count = 0;
+	uint16_t decoder_width = 0;
+	uint16_t decoder_height = 0;
 	TickType_t last_progress_log_tick = xTaskGetTickCount();
 
-	if (arg != NULL) {
-		args = *(qr_scanner_task_args_t *)arg;
-		free(arg);
+	if (session_args != NULL) {
+		args = *session_args;
 	}
-
 	contact = qr_scanner_calloc(1, sizeof(*contact));
 	if (contact == NULL) {
 		ret = ESP_ERR_NO_MEM;
@@ -758,7 +866,11 @@ static void qr_scanner_live_task(void *arg)
 				camera_driver_release(&frame);
 				break;
 			}
-			ret = qr_scanner_decode_frame(decoder, &frame, contact);
+			ret = qr_scanner_decode_frame(decoder,
+						      &frame,
+						      contact,
+						      &decoder_width,
+						      &decoder_height);
 			camera_driver_release(&frame);
 			if (ret == ESP_OK || ret == ESP_ERR_INVALID_RESPONSE) {
 				break;
@@ -804,46 +916,62 @@ done:
 	}
 
 	free(contact);
-	vTaskDeleteWithCaps(NULL);
+}
+
+static void qr_scanner_live_task(void *arg)
+{
+	(void)arg;
+	ESP_LOGI(TAG, "contact qr scanner worker ready");
+
+	for (;;) {
+		qr_scanner_task_args_t args = {0};
+
+		(void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+		taskENTER_CRITICAL(&s_scan_state_lock);
+		args = s_scan_task_args;
+		taskEXIT_CRITICAL(&s_scan_state_lock);
+		qr_scanner_run_live_session(&args);
+	}
 }
 
 esp_err_t qr_scanner_start_contact(qr_scanner_preview_cb_t preview_cb,
 				   qr_scanner_result_cb_t result_cb,
 				   void *ctx)
 {
-	qr_scanner_task_args_t *args = NULL;
-	BaseType_t task_ret = pdFALSE;
-
 	if (!camera_driver_is_configured()) {
 		ESP_LOGW(TAG, "camera is not configured; check HARDWARE_BOARD_CAMERA_* in hardware_board_config.h");
 		return ESP_ERR_NOT_SUPPORTED;
 	}
+	ESP_RETURN_ON_ERROR(camera_driver_set_stream_target(QR_SCANNER_CAMERA_WIDTH,
+							 QR_SCANNER_CAMERA_HEIGHT,
+							 QR_SCANNER_CAMERA_FPS),
+			    TAG,
+			    "configure qr camera profile failed");
 	ESP_RETURN_ON_ERROR(qr_scanner_lock(), TAG, "qr scanner is busy");
 
-	args = qr_scanner_calloc(1, sizeof(*args));
-	if (args == NULL) {
-		xSemaphoreGive(s_scan_lock);
-		return ESP_ERR_NO_MEM;
+	if (s_scan_task == NULL) {
+		BaseType_t task_ret = xTaskCreatePinnedToCoreWithCaps(qr_scanner_live_task,
+								   "qr_scan_live",
+								   QR_SCANNER_TASK_STACK_SIZE,
+								   NULL,
+								   QR_SCANNER_TASK_PRIORITY,
+								   &s_scan_task,
+								   tskNO_AFFINITY,
+								   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+		if (task_ret != pdPASS) {
+			s_scan_task = NULL;
+			xSemaphoreGive(s_scan_lock);
+			return ESP_ERR_NO_MEM;
+		}
 	}
-	args->preview_cb = preview_cb;
-	args->result_cb = result_cb;
-	args->ctx = ctx;
 
+	taskENTER_CRITICAL(&s_scan_state_lock);
+	s_scan_task_args.preview_cb = preview_cb;
+	s_scan_task_args.result_cb = result_cb;
+	s_scan_task_args.ctx = ctx;
+	taskEXIT_CRITICAL(&s_scan_state_lock);
 	qr_scanner_set_running(true);
-	task_ret = xTaskCreatePinnedToCoreWithCaps(qr_scanner_live_task,
-						   "qr_scan_live",
-						   QR_SCANNER_TASK_STACK_SIZE,
-						   args,
-						   QR_SCANNER_TASK_PRIORITY,
-						   NULL,
-						   tskNO_AFFINITY,
-						   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-	if (task_ret != pdPASS) {
-		qr_scanner_set_running(false);
-		xSemaphoreGive(s_scan_lock);
-		free(args);
-		return ESP_ERR_NO_MEM;
-	}
+	xTaskNotifyGive(s_scan_task);
 
 	return ESP_OK;
 }
@@ -873,12 +1001,19 @@ esp_err_t qr_scanner_scan_contact(qr_scanner_contact_t *contact)
 	struct quirc *decoder = NULL;
 	esp_err_t ret = ESP_ERR_NOT_FOUND;
 	bool camera_acquired = false;
+	uint16_t decoder_width = 0;
+	uint16_t decoder_height = 0;
 
 	ESP_RETURN_ON_FALSE(contact != NULL, ESP_ERR_INVALID_ARG, TAG, "contact is null");
 	if (!camera_driver_is_configured()) {
 		ESP_LOGW(TAG, "camera is not configured; check HARDWARE_BOARD_CAMERA_* in hardware_board_config.h");
 		return ESP_ERR_NOT_SUPPORTED;
 	}
+	ESP_RETURN_ON_ERROR(camera_driver_set_stream_target(QR_SCANNER_CAMERA_WIDTH,
+							 QR_SCANNER_CAMERA_HEIGHT,
+							 QR_SCANNER_CAMERA_FPS),
+			    TAG,
+			    "configure qr camera profile failed");
 	ESP_RETURN_ON_ERROR(qr_scanner_lock(), TAG, "qr scanner is busy");
 
 	decoder = quirc_new();
@@ -898,7 +1033,11 @@ esp_err_t qr_scanner_scan_contact(qr_scanner_contact_t *contact)
 
 		ret = camera_driver_capture(&frame);
 		if (ret == ESP_OK) {
-			ret = qr_scanner_decode_frame(decoder, &frame, contact);
+			ret = qr_scanner_decode_frame(decoder,
+						      &frame,
+						      contact,
+						      &decoder_width,
+						      &decoder_height);
 			camera_driver_release(&frame);
 		}
 		if (ret == ESP_OK || ret == ESP_ERR_INVALID_RESPONSE) {

@@ -1,5 +1,59 @@
 # 版本变更记录
 
+## 2026.08.28：ESP32-P4 Device Monitor 1.5.0
+
+- 开发来源固定为 annotated Tag `esp32-p4-device-app-v1.5.0`、Tag object
+  `5cb49b6c82a2462c1c5c479040597e45a063591f`、commit
+  `97331363a0d3c4e6f89b5b93d39561e74087ba2a`、tree
+  `d0abdbe3139bdb1ae7486bb00747d1c58b593445`；比较基线为 `esp32-p4-device-app-v1.4.0`。
+- TiRTC SDK 保持 `2.3.0` API，Nano 为 `v2.3.0`，TGWebRTC 源码为 `tag.v1.5.12`；库内
+  TGTRP BuildInfo 为 `tagv1.5.11`。P4 静态库大小 `1,827,850` bytes，SHA-256 为
+  `6dc4d437ea444761ca21e203fc9babb1799bb1f7fc261d7c523248fde0a96e67`。
+- SDK/TGMP 码率控制默认开启，回调只投递绝对目标码率到应用控制任务；旧本地队列压力自动
+  降级保持关闭。P4 ICE/TGTRP 继续使用有界接收、公平调度和有界音频抖动处理。
+- 摄像头 USERPTR、H264 reference/deblocking、解码、显示和 AEC 使用持久 PSRAM 池；跨 APP
+  预热和会话代际清理减少重复媒体会话的大块内存碎片。
+- 设备呼叫上行为 `384x256@12fps`、`256kbps` H264，名义 GOP `192` 帧 / `16s`；H264 下行
+  使用 `24 x 256KB` 输入槽、4 个解码槽、20 个 RGB 输出槽和最大 16 帧的自适应播放队列。
+- 微信设备上行为 `480x320@15fps`、`480kbps` H264；下行继续请求 `640x480` MJPEG，并由 P4
+  硬解后一次 `cover` 到 `480x320`。本工程不声明微信手机端原始采集分辨率。
+- 音频增益、AEC 双讲近端保护、设备/微信联系人、二维码预览、Wi-Fi 后台恢复、结构化网络指标
+  和默认开启的物理串口回归 CLI 一并收口。串口日志可能含设备 ID，外发前应脱敏。
+- 唯一正式构建使用 ESP-IDF `5.5.4`、GCC `14.2.0_20260121` 和 `--no-ccache`，完成
+  `1837/1837` 且编译 warning、error、ICE 均为 0；app `6,955,728` bytes、SHA-256 为
+  `cf57693f03abb8d182a03823cff6764138365e4880e19e113f298292fe0bba26`，分区剩余
+  `580,912` bytes（`7.71%`）。
+- `0x0` 16 MiB 完整镜像 SHA-256 为
+  `6d83ba156aeb7026533e567e3834ed3eb600b102a75ce1b1ded52d0d4358a6ff`；固件只作为
+  GitHub Release 资产分发，不进入 Git 历史。
+- 开发侧已有双设备呼叫、AI、IPC 重复切换和内存恢复记录；最新持久池修改后，微信外部实呼
+  和弱网矩阵没有重新完成。COM7/COM11 上的启明板仍是旧版 `1.3.2`，不属于本版本证据。
+
+## 2026.08.26：ESP32-P4 Device Monitor 1.4.0
+
+- 开发来源固定为 annotated Tag `esp32-p4-device-app-v1.4.0`、Tag object
+  `3e4b1b8763fd506555f09794efccf53f41d648b2`、commit
+  `d7529030846277dd06fe7332ef61b913d4378d31`、tree
+  `dcfc01845f2901115fd11804230f14bc6f924923`。
+- TiRTC SDK 更新为 `2.3.0` 官方源码重建版。Nano 源码为 `v2.3.0`，TGWebRTC 源码基线为
+  `tag.v1.5.12 / 41c9a25768ffe265c07f17ef78a6439607b19364`；当前库内嵌 TGTRP
+  BuildInfo 仍为 `tagv1.5.11`，两项元数据分开记录。P4 静态库 SHA-256 为
+  `3f11a4ac6d047eaac1b2e65a82d78cbca41082165b3e3190010e27c727bd577a`。
+- P4 ICE UDP 接收加入数据报和耗时预算；NACK scratch 改为连接 heap 并传递真实容量；
+  TGTRP 弱网恢复增加有界探测、最低码率保持上限和发送积压门控。
+- 设备互呼改为 `384x256@15fps`、`320kbps` 双向 H264。下行使用固定 PSRAM 输入、解码和
+  RGB565 显示池，PPA 一次缩放到 `480x320`；控制层 5 秒后隐藏，点击视频恢复。
+- 微信 VoIP 保持 `480x320@15fps`、`420kbps` H264 上行；下行请求 `640x480` MJPEG，
+  由 P4 JPEG 硬解后居中 `cover` 到 `480x320`。本工程不声明微信手机端原始采集分辨率。
+- `esp_h264` 更新到 Espressif `1.3.8` 基线并保留 P4 项目补丁；ESP-Hosted/SDIO、V4L2
+  完成帧回收、PSRAM 队列和内存水位路径同步收口。
+- AI Chat 隔离旧 generation 命令；设备挂断返回 `40400` 时按幂等结束处理。网络、时间、
+  MQTT 和媒体阶段日志继续保留定位第一处异常所需的状态与水位。
+- 版本收口前的同一功能代码完成过 ESP-IDF `5.5.4` 构建、COM14/COM30 双机启动、54 次
+  双向设备呼叫及弱网矩阵和 12 次 AI 回归，动态画面约 `14.8-14.9fps`。这些记录不是精确
+  `1.4.0` Tag 的构建或烧录证明；正式 app、完整镜像和 SHA-256 以本版本 Release manifest
+  为准。微信小程序 VoIP 与外部 IPC/H5 对端本轮没有重新完成人工端到端验证。
+
 ## 2026.08.26：ESP32-S3 Device Monitor 1.9.6
 
 - 开发来源固定为 annotated Tag `v1.9.6`、Tag object

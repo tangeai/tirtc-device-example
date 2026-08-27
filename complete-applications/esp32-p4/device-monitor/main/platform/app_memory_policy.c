@@ -15,6 +15,12 @@ _Static_assert(APP_MEMORY_INTERNAL_FREE_CRITICAL_BYTES <
 _Static_assert(APP_MEMORY_INTERNAL_LARGEST_CRITICAL_BYTES <
                    APP_MEMORY_INTERNAL_LARGEST_WARNING_BYTES,
                "internal largest-block waterlines must be ordered");
+_Static_assert(APP_MEMORY_DMA_FREE_CRITICAL_BYTES <
+                   APP_MEMORY_DMA_FREE_WARNING_BYTES,
+               "DMA free waterlines must be ordered");
+_Static_assert(APP_MEMORY_DMA_LARGEST_CRITICAL_BYTES <
+                   APP_MEMORY_DMA_LARGEST_WARNING_BYTES,
+               "DMA largest-block waterlines must be ordered");
 _Static_assert(APP_MEMORY_PSRAM_FREE_CRITICAL_BYTES <
                    APP_MEMORY_PSRAM_FREE_WARNING_BYTES,
                "PSRAM free waterlines must be ordered");
@@ -127,6 +133,8 @@ app_memory_health_t app_memory_classify(const app_memory_snapshot_t *snapshot)
 
     if (snapshot->internal_free < APP_MEMORY_INTERNAL_FREE_CRITICAL_BYTES ||
         snapshot->internal_largest < APP_MEMORY_INTERNAL_LARGEST_CRITICAL_BYTES ||
+        snapshot->dma_free < APP_MEMORY_DMA_FREE_CRITICAL_BYTES ||
+        snapshot->dma_largest < APP_MEMORY_DMA_LARGEST_CRITICAL_BYTES ||
         snapshot->psram_free < APP_MEMORY_PSRAM_FREE_CRITICAL_BYTES ||
         snapshot->psram_largest < APP_MEMORY_PSRAM_LARGEST_CRITICAL_BYTES) {
         return APP_MEMORY_HEALTH_CRITICAL;
@@ -134,6 +142,8 @@ app_memory_health_t app_memory_classify(const app_memory_snapshot_t *snapshot)
 
     if (snapshot->internal_free < APP_MEMORY_INTERNAL_FREE_WARNING_BYTES ||
         snapshot->internal_largest < APP_MEMORY_INTERNAL_LARGEST_WARNING_BYTES ||
+        snapshot->dma_free < APP_MEMORY_DMA_FREE_WARNING_BYTES ||
+        snapshot->dma_largest < APP_MEMORY_DMA_LARGEST_WARNING_BYTES ||
         snapshot->psram_free < APP_MEMORY_PSRAM_FREE_WARNING_BYTES ||
         snapshot->psram_largest < APP_MEMORY_PSRAM_LARGEST_WARNING_BYTES) {
         return APP_MEMORY_HEALTH_WARNING;

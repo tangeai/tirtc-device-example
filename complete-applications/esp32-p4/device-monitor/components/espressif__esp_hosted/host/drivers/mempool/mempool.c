@@ -29,7 +29,8 @@ static char * MEM_TAG = "mpool";
 
 #endif
 
-struct mempool * mempool_create(uint32_t block_size)
+struct mempool * mempool_create_with_allocator(uint32_t block_size,
+		mempool_block_alloc_fn_t block_alloc)
 {
 #ifdef H_USE_MEMPOOL
 	struct mempool * new = (struct mempool *)g_h.funcs->_h_malloc(MEMPOOL_ALIGNED(sizeof(struct mempool)));
@@ -55,7 +56,9 @@ struct mempool * mempool_create(uint32_t block_size)
 
 	new->block_size = MEMPOOL_ALIGNED(block_size);
 	new->cached_count = 0;
+	new->cache_limit = MEMPOOL_MAX_CACHED_BLOCKS;
 	new->trimmed_count = 0;
+	new->block_alloc = block_alloc;
 	SLIST_INIT(&(new->head));
 
 
@@ -63,6 +66,58 @@ struct mempool * mempool_create(uint32_t block_size)
 	return new;
 #else
 	return NULL;
+#endif
+}
+
+struct mempool * mempool_create(uint32_t block_size)
+{
+	return mempool_create_with_allocator(block_size, NULL);
+}
+
+uint32_t mempool_reserve(struct mempool *mp, uint32_t block_count)
+{
+#ifdef H_USE_MEMPOOL
+	uint32_t cached_count = 0;
+
+	if (!mp || block_count == 0U) {
+		return 0U;
+	}
+
+	g_h.funcs->_h_lock_mempool(mp->spinlock);
+	if (mp->cache_limit < block_count) {
+		mp->cache_limit = block_count;
+	}
+	cached_count = mp->cached_count;
+	g_h.funcs->_h_unlock_mempool(mp->spinlock);
+
+	while (cached_count < block_count) {
+		void *block = mp->block_alloc ?
+			mp->block_alloc(MEMPOOL_ALIGNED(mp->block_size)) :
+			MEM_ALLOC(MEMPOOL_ALIGNED(mp->block_size));
+		bool stored = false;
+		if (block == NULL) {
+			break;
+		}
+
+		g_h.funcs->_h_lock_mempool(mp->spinlock);
+		if (mp->cached_count < block_count) {
+			SLIST_INSERT_HEAD(&(mp->head), (struct mempool_entry *)block, entries);
+			mp->cached_count++;
+			stored = true;
+		}
+		cached_count = mp->cached_count;
+		g_h.funcs->_h_unlock_mempool(mp->spinlock);
+
+		if (!stored) {
+			g_h.funcs->_h_free(block);
+		}
+	}
+
+	return cached_count;
+#else
+	(void)mp;
+	(void)block_count;
+	return 0U;
 #endif
 }
 
@@ -122,7 +177,9 @@ void * mempool_alloc(struct mempool* mp, int nbytes, int need_memset)
 
 		g_h.funcs->_h_unlock_mempool(mp->spinlock);
 
-		buf = MEM_ALLOC(MEMPOOL_ALIGNED(mp->block_size));
+		buf = mp->block_alloc ?
+			mp->block_alloc(MEMPOOL_ALIGNED(mp->block_size)) :
+			MEM_ALLOC(MEMPOOL_ALIGNED(mp->block_size));
 #if H_MEM_STATS
 		h_stats_g.mp_stats.num_fresh_alloc++;
 		ESP_LOGV(MEM_TAG, "%p: num_alloc: %lu", mp, (unsigned long int)(h_stats_g.mp_stats.num_fresh_alloc));
@@ -150,7 +207,7 @@ void mempool_free(struct mempool* mp, void *mem)
 
 	g_h.funcs->_h_lock_mempool(mp->spinlock);
 
-	if (mp->cached_count >= MEMPOOL_MAX_CACHED_BLOCKS) {
+	if (mp->cached_count >= mp->cache_limit) {
 		mp->trimmed_count++;
 		uint32_t trimmed_count = mp->trimmed_count;
 		g_h.funcs->_h_unlock_mempool(mp->spinlock);
@@ -161,7 +218,7 @@ void mempool_free(struct mempool* mp, void *mem)
 				 "trim mempool %p block_size=%lu cached=%lu trimmed=%lu",
 				 mp,
 				 (unsigned long)mp->block_size,
-				 (unsigned long)MEMPOOL_MAX_CACHED_BLOCKS,
+				 (unsigned long)mp->cache_limit,
 				 (unsigned long)trimmed_count);
 		}
 		return;

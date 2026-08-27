@@ -69,14 +69,6 @@ add_prebuilt_library(openh264 "${CMAKE_CURRENT_LIST_DIR}/sw/libs/${CONFIG_IDF_TA
                     REQUIRES freertos)
 target_link_libraries(${COMPONENT_LIB} INTERFACE tinyh264 openh264)
 
-# TinyH264's P4 dual-task decoder uses two non-overwriting task
-# notifications per slice.  Route those notifications through the local
-# guard so an SMP scheduling race cannot silently drop one phase and leave
-# both decoder tasks blocked at different barriers.
-IF (${IDF_TARGET} STREQUAL "esp32p4")
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=xTaskGenericNotify")
-ENDIF ()
-
 IF (${IDF_TARGET} STREQUAL "esp32s3")
 
 add_definitions(-DHAVE_ESP32S3 )

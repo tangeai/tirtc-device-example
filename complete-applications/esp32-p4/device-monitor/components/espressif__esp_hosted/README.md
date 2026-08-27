@@ -75,7 +75,7 @@ The host, ESP32-P4, lacks native Wi-Fi/Bluetooth support. Our [Quick Demo](docs/
 
 ### 4.3 Don't Have ESP32-P4-Function-EV-Board?
 
-No worries if you don't have an ESP32-P4. In fact, most users don't. You can choose and use any two ESP chipsets/SoCs/Modules/DevKits. DevKits are convenient to use as they have GPIO headers already in place. From these two ESP chipsets, one would act as host and another as slave/co-processor. However, as these are not connected directly, you would need to manually connect some transport, which is explained later in the section [`Detailed Setup`](#7-detailed-setup).
+No worries if you don't have an ESP32-P4. In fact, most users don't. You can choose and use any two ESP chipsets/SoCs/Modules/DevKits. DevKits are convenient to use as they have GPIO headers already in place. From these two ESP chipsets, one would act as host and another as slave/co-processor. However, as these are not connected directly, you would need to manually connect some transport, which is explained later in the section [`Detailed Setup`](#8-detailed-setup).
 
 ## 5 Source Code and Dependencies
 

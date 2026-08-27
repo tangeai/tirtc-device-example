@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -24,6 +25,7 @@ typedef struct {
 } thing_http_request_t;
 
 esp_err_t thing_http_join_url(char *out, size_t out_size, const char *base_url, const char *path);
+bool thing_http_error_is_recoverable(esp_err_t ret);
 esp_err_t thing_http_request_json(const thing_http_request_t *request,
                                   char *response_buf,
                                   size_t response_buf_size,

@@ -7,23 +7,22 @@
 
 /*
  * ESP32-P4 runtime ownership:
- * - CPU0 carries network/control and the bounded H264 decoder caller. The
- *   decoder is allowed to preserve the remote H264 reference chain without
- *   permanently trapping camera work on the same core.
- * - CPU1 carries LVGL/audio and downlink frame conversion. Audio remains at a
- *   higher priority; conversion shares LVGL's priority and yields after each
- *   frame so neither the screen nor touch input is starved.
- * - Camera uplink is SMP-migratable at a lower priority than decode, audio,
- *   conversion, and UI. Full-duplex calls can therefore consume residual time
- *   on either CPU instead of losing an entire capture deadline while CPU0 is
- *   decoding a complex remote frame.
+ * - CPU0 owns network/control deadlines and CPU1 owns UI/audio deadlines.
+ *   TinyH264 is SMP-migratable below both classes: it can consume an idle CPU,
+ *   while Wi-Fi/RTC, audio, conversion and LVGL preempt it when their deadlines
+ *   arrive. Pinning the decoder to CPU0 starved MQTT/HTTP; pinning it to CPU1
+ *   made high-motion streams accumulate compressed-frame latency.
+ * - Camera uplink runs one level above TinyH264 decode, while decode,
+ *   conversion, and UI share one priority. This keeps the sensor cadence
+ *   stable without letting a complex decode monopolize CPU1 and delay the
+ *   downlink conversion or touch/UI owner.
  * - The application video-TX worker is also SMP-migratable. Its SDK call can
  *   overlap a long decode window, so pinning it to CPU0 turns normal scheduler
  *   preemption into artificial send latency and leaves less time for transport
  *   receive processing. RTC control and audio-TX ownership remain on CPU0.
- * - TinyH264 uses CPU1 for its bounded helper while the caller remains on
- *   CPU0. The helper priority is part of the renderer policy because the
- *   precompiled decoder waits synchronously for it at slice barriers.
+ * - TinyH264 remains single-task. Its optional dual-task filter worker is
+ *   disabled because dynamic calls reproduced a race inside the prebuilt
+ *   decoder. Core separation uses both CPUs without entering that path.
  *
  * Keep task creation sites using these names instead of raw core numbers so the
  * scheduling contract stays visible when modules are moved or added.
@@ -49,6 +48,6 @@
 #define APP_TASK_CORE_RTC_VIDEO_TX tskNO_AFFINITY
 #define APP_TASK_CORE_CAMERA     tskNO_AFFINITY
 #define APP_TASK_CORE_BACKGROUND 0
-#define APP_TASK_CORE_VIDEO_DECODE  0
+#define APP_TASK_CORE_VIDEO_DECODE  tskNO_AFFINITY
 #define APP_TASK_CORE_VIDEO_CONVERT 1
 #endif

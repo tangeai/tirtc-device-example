@@ -1,9 +1,15 @@
 #include "system_time.h"
 
+#include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <strings.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include "esp_heap_caps.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_netif_sntp.h"
 #include "freertos/FreeRTOS.h"
@@ -23,8 +29,15 @@ static const char *TAG = "system_time";
 #define TIME_SYNC_SNTP_SERVER_1       "ntp.tencent.com"
 #define TIME_SYNC_SNTP_SERVER_2       "ntp.huaweicloud.com"
 #define TIME_SYNC_SNTP_SERVER_3       "cn.pool.ntp.org"
+/* Last-resort clock bootstrap only; no credentials or device identity are sent. */
+#define TIME_SYNC_HTTP_DATE_URL       "http://ep-open.tangeopen.com/services"
+#define TIME_SYNC_HTTP_TIMEOUT_MS     5000U
 #define TIME_SYNC_TASK_STACK_SIZE     (4U * 1024U)
 #define TIME_SYNC_TASK_PRIORITY       3U
+
+typedef struct {
+    char date[48];
+} system_time_http_ctx_t;
 
 static portMUX_TYPE s_time_sync_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_time_sync_running;
@@ -34,6 +47,134 @@ static void *s_time_sync_cb_ctx;
 
 static void system_time_sync_task(void *ctx);
 static void system_time_notify_sync_done(esp_err_t result);
+
+static int64_t system_time_days_from_civil(int year, unsigned month, unsigned day)
+{
+    year -= month <= 2U;
+    const int era = (year >= 0 ? year : year - 399) / 400;
+    const unsigned year_of_era = (unsigned)(year - era * 400);
+    const unsigned shifted_month = month > 2U ? month - 3U : month + 9U;
+    const unsigned day_of_year = (153U * shifted_month + 2U) / 5U + day - 1U;
+    const unsigned day_of_era =
+        year_of_era * 365U + year_of_era / 4U - year_of_era / 100U + day_of_year;
+    return (int64_t)era * 146097LL + (int64_t)day_of_era - 719468LL;
+}
+
+static int system_time_month_number(const char *month)
+{
+    static const char *const months[] = {
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    };
+
+    for (size_t index = 0; index < sizeof(months) / sizeof(months[0]); ++index) {
+        if (strcmp(month, months[index]) == 0) {
+            return (int)index + 1;
+        }
+    }
+    return 0;
+}
+
+static esp_err_t system_time_parse_http_date(const char *date, time_t *unix_time)
+{
+    char weekday[4] = {0};
+    char month_name[4] = {0};
+    char zone[4] = {0};
+    int day = 0;
+    int year = 0;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+
+    if (date == NULL || unix_time == NULL ||
+        sscanf(date,
+               "%3[^,], %d %3s %d %d:%d:%d %3s",
+               weekday,
+               &day,
+               month_name,
+               &year,
+               &hour,
+               &minute,
+               &second,
+               zone) != 8) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    const int month = system_time_month_number(month_name);
+    if (month == 0 || strcmp(zone, "GMT") != 0 || year < 2024 || year > 2100 ||
+        day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
+        second < 0 || second > 60) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    const int64_t days = system_time_days_from_civil(year, (unsigned)month, (unsigned)day);
+    const int64_t seconds = days * 86400LL + hour * 3600LL + minute * 60LL + second;
+    if (seconds < TIME_SYNC_MIN_VALID_UNIX_TIME) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    *unix_time = (time_t)seconds;
+    return ESP_OK;
+}
+
+static esp_err_t system_time_http_event_handler(esp_http_client_event_t *event)
+{
+    system_time_http_ctx_t *http_ctx = event != NULL ? event->user_data : NULL;
+
+    if (http_ctx != NULL && event->event_id == HTTP_EVENT_ON_HEADER &&
+        event->header_key != NULL && event->header_value != NULL &&
+        strcasecmp(event->header_key, "Date") == 0) {
+        strlcpy(http_ctx->date, event->header_value, sizeof(http_ctx->date));
+    }
+    return ESP_OK;
+}
+
+static esp_err_t system_time_sync_from_http_date(void)
+{
+    system_time_http_ctx_t http_ctx = {0};
+    esp_http_client_config_t config = {
+        .url = TIME_SYNC_HTTP_DATE_URL,
+        .method = HTTP_METHOD_HEAD,
+        .event_handler = system_time_http_event_handler,
+        .user_data = &http_ctx,
+        .timeout_ms = TIME_SYNC_HTTP_TIMEOUT_MS,
+        .buffer_size = 512,
+        .buffer_size_tx = 256,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_http_client_set_header(client, "Connection", "close");
+    esp_err_t ret = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    if (status < 200 || status >= 400 || http_ctx.date[0] == '\0') {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    time_t unix_time = 0;
+    ret = system_time_parse_http_date(http_ctx.date, &unix_time);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    struct timeval value = {
+        .tv_sec = unix_time,
+        .tv_usec = 0,
+    };
+    if (settimeofday(&value, NULL) != 0) {
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "system time synchronized from HTTP Date: unix=%lld", (long long)unix_time);
+    return ESP_OK;
+}
 
 bool system_time_has_valid_time(void)
 {
@@ -136,12 +277,22 @@ esp_err_t system_time_once(bool force_sync)
         return ESP_OK;
     }
 
-    ESP_LOGE(TAG,
-             "system time sync failed: %s (%d), unix=%lld",
+    ESP_LOGW(TAG,
+             "SNTP unavailable: %s (%d), unix=%lld; trying HTTP Date",
              esp_err_to_name(ret),
              ret,
              (long long)now);
-    return ret == ESP_OK ? ESP_FAIL : ret;
+    esp_err_t http_ret = system_time_sync_from_http_date();
+    if (http_ret == ESP_OK && system_time_has_valid_time()) {
+        return ESP_OK;
+    }
+
+    ESP_LOGE(TAG,
+             "system time sync failed: sntp=%s http=%s unix=%lld",
+             esp_err_to_name(ret),
+             esp_err_to_name(http_ret),
+             (long long)now);
+    return http_ret != ESP_OK ? http_ret : (ret == ESP_OK ? ESP_FAIL : ret);
 }
 
 static void system_time_notify_sync_done(esp_err_t result)

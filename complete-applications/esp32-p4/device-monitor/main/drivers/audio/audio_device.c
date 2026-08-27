@@ -68,6 +68,11 @@ esp_err_t microphone_set_gain_percent(uint8_t percent)
     return audio_set_capture_gain_percent(percent);
 }
 
+esp_err_t microphone_set_processing_config(const audio_capture_processing_config_t *config)
+{
+    return audio_set_capture_processing_config(config);
+}
+
 const audio_format_t *speaker_get_playback_format(void)
 {
     return audio_get_playback_format();

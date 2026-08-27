@@ -46,19 +46,19 @@ static const app_rtc_server_profile_t s_server_profiles[] = {
     {
         .env = APP_RTC_SERVER_ENV_TEST,
         .name = "test",
-        .access_url = "http://ep-test-tirtc.tange365.com",
+        .access_url = "https://ep-test-tirtc.tange365.com",
         .server_api = "https://api-test-tirtc.tange365.com",
     },
     {
         .env = APP_RTC_SERVER_ENV_PRE,
         .name = "pre",
-        .access_url = "http://ep-pre-tirtc.tange365.com",
+        .access_url = "https://ep-pre-tirtc.tange365.com",
         .server_api = "https://api-pre-tirtc.tange365.com",
     },
     {
         .env = APP_RTC_SERVER_ENV_PROD,
         .name = "prod",
-        .access_url = "http://ep-tirtc.tange365.com",
+        .access_url = "https://ep-tirtc.tange365.com",
         .server_api = "https://api-tirtc.tange365.com",
     },
 };

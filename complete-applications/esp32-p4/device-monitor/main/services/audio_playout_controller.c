@@ -28,12 +28,17 @@ static const audio_playout_tuning_t s_tunings[] = {
         .stable_windows_before_decay = 3,
     },
     [AUDIO_PLAYOUT_PROFILE_ADAPTIVE_CALL] = {
-        .initial_delay_ms = 20,
-        .base_delay_ms = 40,
-        .min_delay_ms = 20,
-        .max_delay_ms = 220,
-        .emergency_margin_ms = 240,
-        .stable_windows_before_decay = 5,
+        /* Device-call relay traces contain recoverable 300-500 ms delivery
+         * holes under 200 +/- 100 ms delay and 5% loss. Starting at one
+         * packet and capping the target at 220 ms made the PCM ring trim a
+         * recovered burst, then underflow again. Keep the recovered audio in
+         * the PSRAM ring and trade a bounded startup delay for continuity. */
+        .initial_delay_ms = 120,
+        .base_delay_ms = 140,
+        .min_delay_ms = 120,
+        .max_delay_ms = 560,
+        .emergency_margin_ms = 320,
+        .stable_windows_before_decay = 8,
     },
     [AUDIO_PLAYOUT_PROFILE_JITTER_SAFE] = {
         .initial_delay_ms = 120,

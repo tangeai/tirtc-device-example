@@ -74,6 +74,17 @@ esp_err_t video_frame_converter_i420_to_rgb565(video_frame_converter_handle_t ha
                                                uint16_t *output,
                                                video_frame_converter_mode_t *mode_used);
 
+/* ESP32-P4 camera and H264 hardware use packed O_UYY_E_VYY YUV420. Keep this
+ * contract separate from planar I420 so callers cannot silently reinterpret
+ * the same bytes with the wrong layout. */
+esp_err_t video_frame_converter_ouyy_evyy_to_rgb565(
+    video_frame_converter_handle_t handle,
+    const uint8_t *ouyy_evyy,
+    uint16_t source_width,
+    uint16_t source_height,
+    uint16_t *output,
+    video_frame_converter_mode_t *mode_used);
+
 /* Rotates and scales a packed RGB565 source into the configured viewport while
  * preserving aspect ratio. source_stride_pixels may be wider than source_width
  * when a hardware decoder pads each row. */

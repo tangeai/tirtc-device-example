@@ -18,11 +18,24 @@ active-connect `db7290f2404b15f2ab8567dd221853ca2ec054ab` 为功能基础，并�
 `components/tirtc_sdk/VERSION.md`、`VERSION.md`、`SOURCE_PROVENANCE.md` 和 Release
 manifest 为准；SDK 头文件和静态库保留供应方条款，不因本仓 MIT License 改为 MIT。
 
-ESP32-P4 Device App `1.3.2` 使用 TiRTC `2.3.0` 定制兼容快照。其公开 API 版本不变，
-P4 静态库以 Nano baseline `aaad3da251bac90e0642b51b3279a1f40ca9fa9a` 为基础，并带有从
-`fde4f1c58d2dc28f3d3d04e25dd49bc3a399fea6` 回移的 HTTP DNS cache disable 补丁。
-该快照的身份和逐文件 SHA-256 以项目 `components/tirtc_sdk/VERSION.md`、
-`SHA256SUMS.txt` 和 `SOURCE_PROVENANCE.md` 为准。
+ESP32-P4 Device Monitor `1.5.0` 使用 TiRTC `2.3.0` 官方源码重建版。Nano 源码为
+`v2.3.0 / 1baf7c95f3ca715c9367b9c998417f647934dc35`，TGWebRTC 源码基线为
+`tag.v1.5.12 / 41c9a25768ffe265c07f17ef78a6439607b19364`；静态库内嵌 TGTRP
+BuildInfo 为 `tagv1.5.11`，两项元数据分开保留。P4 `libTiRTC.a` 大小为
+`1,827,850` bytes，SHA-256 为
+`6dc4d437ea444761ca21e203fc9babb1799bb1f7fc261d7c523248fde0a96e67`。P4 公开包 SDK 6 项文件身份
+以项目 `components/tirtc_sdk/VERSION.md`、`SHA256SUMS.txt` 和 `SOURCE_PROVENANCE.md`
+为准；来源包内未被 P4 链接且含供应方构建路径的 S3 静态库不进入 P4 公开目录。
+
+该项目中的 `components/espressif__esp_h264/` 以 Espressif `esp_h264 1.3.8` 为基线，并
+包含 P4 项目所需的输出边界、参考帧池和码率控制补丁。组件不是整目录逐字节等同上游；
+Espressif 原始许可证文件继续随组件保留。
+
+P4 Device Monitor、S3 Device Monitor 和 S3/P4 最小集成示例复用同一份 TiRTC H264
+协议测试素材 `send_video.h264`。文件大小为 `298,486` bytes，SHA-256 为
+`06fe8e1cd3376ce1580b92d17a31ce6c89372d3d1195d258941a568199d04eea`；它只用于固定码流
+联调，不代表摄像头实采能力。该素材与 TiRTC SDK 均不适用仓库根 MIT License；使用和再分发
+应遵循 TiRTC SDK/测试素材供应方条款。
 
 ESP32-S3 最小系统例子的 `audio.g711a` 和 `video.h264` 测试输入来自
 [`tirtc-server-example/thing-connect/device-sim/assets`](https://github.com/tangeai/tirtc-server-example/tree/main/thing-connect/device-sim/assets)。
@@ -35,6 +48,7 @@ ESP-WiFi-Remote `1.6.3`。P4 固件复用同一组协议测试媒体，并保留
 ESP-Hosted 源码与 Apache-2.0 许可证；各组件具体身份以项目 `VERSION.md`、
 `SOURCE_PROVENANCE.md` 和 Release manifest 为准。
 
-具体许可证文件随对应组件保留在项目目录中。使用、修改或再分发前，请同时核对目标项目的
-`SOURCE_PROVENANCE.md`、组件目录中的 `LICENSE`/`NOTICE`，以及 SDK 或素材供应方提供的条款。
+已有许可证文件会随对应组件保留在项目目录中；TiRTC SDK 目录没有单独附带开源许可证。
+使用、修改或再分发前，请同时核对目标项目的 `SOURCE_PROVENANCE.md`、组件目录中的
+`LICENSE`/`NOTICE`，以及 SDK 或素材供应方提供的条款。
 未随公开仓分发的供应商 SDK、工具链和烧录工具，需要开发者从相应授权渠道单独获取。

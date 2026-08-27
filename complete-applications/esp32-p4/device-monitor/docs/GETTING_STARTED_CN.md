@@ -8,13 +8,13 @@ P4+C6 前置检查、构建、烧录、首次联网和基础功能确认。项�
 
 | 项目 | 本版本要求 |
 | --- | --- |
-| 应用 | TiRTC ESP32-P4 完整设备应用 `1.3.2` |
+| 应用 | TiRTC ESP32-P4 Device Monitor `1.5.0` |
 | 目标板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |
 | 主芯片 | ESP32-P4 |
 | 网络芯片 | ESP32-C6，运行 ESP-Hosted slave |
 | P4 与 C6 链路 | 4-bit、40 MHz SDIO |
 | ESP-IDF | `5.5.4` |
-| TiRTC SDK | `2.3.0` ESP32-P4 定制兼容快照 |
+| TiRTC SDK | `2.3.0` 官方源码重建版，含 P4 传输稳定性修复 |
 | Flash | `16MB` |
 | 网络 | 2.4 GHz Wi-Fi，可访问 TiRTC/ThingConnect 服务 |
 | 交付形式 | 源码与 `0x0` 完整烧录镜像 |
@@ -45,7 +45,7 @@ P4 负责 UI、摄像头、音频、编解码和 TiRTC 应用；C6 只负责 Wi-
 ```powershell
 git clone https://github.com/tangeai/tirtc-device-example.git
 cd tirtc-device-example
-git checkout esp32-p4-device-monitor-v1.3.2
+git checkout esp32-p4-device-monitor-v1.5.0
 cd complete-applications/esp32-p4/device-monitor
 ```
 
@@ -57,8 +57,9 @@ Select-String -Path CMakeLists.txt -Pattern 'PROJECT_VER'
 Select-String -Path components/tirtc_sdk/include/tiRTC.h -Pattern 'TIRTC_VERSION_'
 ```
 
-预期应用版本为 `1.3.2`，TiRTC SDK API 版本为 `2.3.0`。本项目使用包含 HTTP DNS disable
-回移的 ESP32-P4 定制兼容快照，不能只看版本号替换静态库。完整 commit 和哈希见
+预期应用版本为 `1.5.0`，TiRTC SDK API 版本为 `2.3.0`。SDK 使用 Nano `v2.3.0` 与
+TGWebRTC `tag.v1.5.12` 源码基线，并包含 P4 ICE/TGTRP 稳定性修复。库内 TGTRP BuildInfo
+仍显示 `tagv1.5.11`；不能只看一个版本字符串替换静态库。完整 commit 和哈希见
 [VERSION.md](../VERSION.md)。
 
 ## 4. 安装并进入 ESP-IDF 5.5.4
@@ -143,8 +144,9 @@ idf.py build
 idf.py menuconfig
 ```
 
-稳定配置已经启用 AEC、AI 视频、微信本地/远端视频和 direct-LCD；SDK 码率自适应、旧本地
-自动弱网降级、逐帧日志和 LAN 调试服务器默认关闭。没有明确验证目标时，先保留默认值。
+稳定配置已经启用 AEC、AI 视频、微信本地/远端视频、direct-LCD 和 SDK/TGMP 码率控制；
+旧本地队列压力自动弱网降级、逐帧日志和 LAN 调试服务器默认关闭。没有明确验证目标时，
+先保留默认值。
 
 不要提交真实 Wi-Fi 密码、device secret、access key、token 或平台账号。即使只是临时联调，
 也优先使用屏幕配置和 NVS。
@@ -153,22 +155,21 @@ idf.py menuconfig
 
 ### 7.1 快速体验：烧录 Release 完整镜像
 
-从 [`esp32-p4-device-monitor-v1.3.2` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.2) 下载：
+从 [`esp32-p4-device-monitor-v1.5.0` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.5.0) 下载以下三个文件：
 
 ```text
-esp32p4-tirtc-device-monitor-full-v1.3.2.bin
+esp32p4-tirtc-device-monitor-full-v1.5.0.bin
+release-manifest.json
+SHA256SUMS.txt
 ```
 
-文件大小应为 `16,777,216` bytes，SHA-256 应为：
-
-```text
-87bfb67d1ba30d7f79663f63891e29f7f4f4367c80ff0d5cecb1b46f301d40e9
-```
+文件大小应为 `16,777,216` bytes。SHA-256 以同一 Release 的 `SHA256SUMS.txt` 和
+`release-manifest.json` 为准，不要沿用旧版本数值。
 
 PowerShell 可执行：
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\esp32p4-tirtc-device-monitor-full-v1.3.2.bin
+Get-FileHash -Algorithm SHA256 .\esp32p4-tirtc-device-monitor-full-v1.5.0.bin
 ```
 
 然后：
@@ -177,12 +178,12 @@ Get-FileHash -Algorithm SHA256 .\esp32p4-tirtc-device-monitor-full-v1.3.2.bin
 2. 连接 P4 下载口；自动进入下载模式失败时，按住 `BOOT`，点按 `RESET`，再松开 `BOOT`。
 3. 选择浏览器弹出的 P4 串口，不要误选 C6 端口。
 4. 添加完整镜像，烧录地址填 `0x0`。
-5. Flash Size 选择 `16MB`，Flash Mode/频率使用 `DIO/80MHz`。
+5. Flash Size 选择 `16MB`；Flash Mode 和频率按同一 Release 的 manifest 填写。
 6. 开始烧录，校验完成后复位 P4。
 
-完整镜像包含 bootloader `0x2000`、partition table `0x8000`、空 otadata `0xd000`、APP
-`0x10000` 和 storage `0xe80000`。NVS 区域为 `FF`，所以完整烧录一定会清除原有 NVS、Wi-Fi
-和设备绑定。重启后从第 8 节重新配网和绑定，这是预期行为。
+完整镜像按本版本 `flasher_args.json` 合并 bootloader、partition table、OTA data、APP 和
+storage；各分段 offset、大小和 SHA-256 见同一 Release 的 manifest。NVS 区域保持擦除态，
+所以完整烧录会清除原有 NVS、Wi-Fi 和设备绑定。重启后从第 8 节重新配网和绑定，这是预期行为。
 
 ### 7.2 源码开发：烧录本地构建分片
 
@@ -209,7 +210,7 @@ Windows 端口示例为 `COM7`，Linux 示例为 `/dev/ttyACM0`；请使用电�
 复位后先看固件身份：
 
 ```text
-firmware version: 1.3.2 project=tirtc_esp32p4_device_app ...
+firmware version: 1.5.0 project=tirtc_esp32p4_device_app ...
 system ready: ESP32-P4 TiRTC dashboard
 ```
 
@@ -266,19 +267,20 @@ binding verification code ready: mqtt subscribed
 验证视频时按当前工程参数判断，不要混用方向：
 
 - IPC 的 P4 上行是 `1280x960@20fps`、`4Mbps` H264，GOP 为 `40` 帧 / `2s`。
-- 设备呼叫和微信 VoIP 的 P4 上行是 `480x320@15fps`、`800kbps` 起始 H264，
-  GOP 为 `30` 帧 / `2s`。
+- 设备呼叫上行是 `384x256@12fps`、`256kbps` H264，名义 GOP 为 `192` 帧 / `16s`；
+  流开始、订阅恢复和对端请求仍会触发关键帧。
+- 微信上行是 `480x320@15fps`、`480kbps` H264，名义 GOP 为 `30` 帧 / `2s`。
 - 微信服务端到 P4 的下行请求是 `640x480` MJPEG，P4 硬解后居中 `cover` 到 `480x320`。
 - 本工程没有配置或证明微信手机端为 720p；手机采集档位由微信和服务端决定。
 
 一次看到首帧还不够。继续观察帧率、码率、音频连续性、队列压力，再连续进入/退出场景，
 确认摄像头、音频、显示和连接都能被下一次会话重新获取。
 
-## 10. 用 1.3.2 的状态和日志定位第一处异常
+## 10. 用 1.5.0 的状态和日志定位第一处异常
 
-1.3.2 在保留媒体分阶段日志的基础上，进一步收紧 NVS 和 RTC 连接生命周期。遇到绑定失败、
-重复连接或媒体停滞时，先找最早停止推进的一层，不要直接擦除 NVS、反复重启、降分辨率或
-关闭功能。
+1.5.0 保留 NVS 与 RTC 生命周期门禁，并补充 TGMP 码率、持久 PSRAM 池、SDIO/Wi-Fi 恢复、
+AEC、解码/显示队列和结构化网络指标。遇到绑定失败、重复连接或媒体停滞时，先找最早停止
+推进的一层，不要直接擦除 NVS、反复重启、降分辨率或关闭功能。
 
 ### 10.1 NVS 和绑定重置
 
@@ -320,8 +322,8 @@ callback 耗时以及 internal/DMA/PSRAM 水位。
   `drain` 判断，不能只凭它认定丢帧。
 - `avg_gap_us` 明显偏离目标：继续对照 capture、encode 和 callback 耗时，找到节拍先被谁拖慢。
 
-应用节拍使用向上取整的帧间隔并保持原相位：15fps 约为 `67ms`，20fps 为 `50ms`。单次超时
-只跳过已经错过的周期，不会从当前时刻重新起算并不断漂移。
+应用节拍使用向上取整的帧间隔并保持原相位：12fps 约为 `84ms`，15fps 约为 `67ms`，
+20fps 为 `50ms`。单次超时只跳过已经错过的周期，不会从当前时刻重新起算并不断漂移。
 
 ### 10.4 TiRTC 上行和远端下行
 
@@ -342,9 +344,10 @@ callback 耗时以及 internal/DMA/PSRAM 水位。
 unit 先变慢。周期统计会分别显示 receive、queued、decoded、converted、presented fps，
 以及 input/display 队列、阶段耗时和 PTS 回退计数。
 
-TinyH264 helper 运行在 CPU1，优先级高于同步等待它的 caller。同步保护会等待 helper 消费
-前一阶段，再送达原阶段值；看到 `TinyH264 sync guard` 说明保护路径发生过等待，不等于业务
-已经失效。
+当前产品路径关闭 TinyH264 双任务 helper，由一个可在 SMP 调度的 decoder owner 处理
+`384x256` 设备下行。压缩输入池为 `24 x 256KB`，decoded pool 为 4 帧，output pool 为
+20 帧，自适应播放队列最大深度为 16；持久 reference/deblocking pool 避免跨会话反复申请
+大块 PSRAM。
 
 若出现 `H264 decoder stalled ... quarantined`，说明一次 decode 已阻塞至少 2 秒。系统会停止
 继续向该 decoder 投喂，并记录 caller、helper、音频 capture/playback 的任务状态。只有原调用
@@ -366,6 +369,13 @@ free 恢复但 largest block 持续下降，优先检查碎片化和大块资源
 常驻，并用请求序号隔离已取消或已被新请求替代的任务。遇到接听问题时依次看请求序号、
 worker 是否唤醒、会话 generation 是否仍有效，再看 SDK 返回值。
 
+### 10.8 串口回归 CLI
+
+`APP_SERIAL_CALL_CLI_ENABLE` 在稳定配置中默认开启，用于连接物理 UART 后执行
+`AT+APP`、`AT+CALL?`、`AT+CALL=<id>`、`AT+ANSWER` 和 `AT+HANGUP` 等回归命令。它不会打印
+Wi-Fi 密码、device secret、token 或 access key，但状态和呼叫命令可能显示对端 `device_id`
+或联系人运行状态。采集串口日志前应按测试对象授权处理，外发日志时先脱敏设备标识。
+
 ## 11. 常见问题
 
 | 现象 | 先检查 | 下一步 |
@@ -385,9 +395,9 @@ worker 是否唤醒、会话 generation 是否仍有效，再看 SDK 返回值�
 | 微信视频黑屏 | 先分清上行还是下行 | 上行查 `480x320` H264；下行查 `640x480` MJPEG 请求、首包和 JPEG 解码 |
 | 微信画面比例不对 | 服务端实际下发尺寸和方向 | 记录实际 MJPEG 尺寸；不要按“720p”假设修改 P4 缩放 |
 | 通话有明显回声 | AEC 是否 active、reference 是否有效 | 有同步录音证据后再调整 `APP_AUDIO_AEC_REF_DELAY_MS` |
-| 视频周期卡一下 | GOP、`avg_gap_us`、`video tx liveness` | 先确认 IPC 是 40 帧、通话是 30 帧 GOP，再定位采集、队列、SDK 哪一段先停 |
+| 设备视频周期卡一下 | GOP、`avg_gap_us`、`video tx liveness` | 先确认设备呼叫名义 GOP 为 192 帧，并检查强制 IDR、采集、队列和 SDK 哪一段先停 |
 | 下行停住但 UI 还能操作 | `VRX stall` 与 `video stall` 的 stage | 区分 transport、renderer、input、decode，不要用 UI 存活代替 decoder 存活 |
-| 出现 TinyH264 sync guard | 等待时间和后续 decoded/presented fps | 这是同步保护证据；继续确认链路是否恢复，不要把该日志本身当成错误或成功 |
+| 手动启用 TinyH264 双任务后出现 sync guard | 等待时间和后续 decoded/presented fps | 默认产品配置关闭双任务；实验配置需继续确认链路是否恢复 |
 | 切换场景后内存下降 | 队列、PSRAM slot、连接 owner 是否归零 | 连续进入/退出并记录 internal/PSRAM largest block 与 task HWM |
 
 ## 12. 开发时从哪里改
@@ -412,13 +422,14 @@ worker 是否唤醒、会话 generation 是否仍有效，再看 SDK 返回值�
 
 ## 13. 这份发布已经证明到哪里
 
-公开源码固定到来源 Tag 和 commit，应用/SDK 版本及静态库哈希已有记录。ESP-IDF `5.5.4`
-正式构建对应 `project_version=1.3.2`：应用镜像 `6,927,360` bytes，SHA-256
-`2df6d9d626a05f19a4fd1f15eb854c54119a32ccd475090f6713f2629afc90e2`。正式完整镜像只上传 GitHub Release，不进入 Git；大小
-`16,777,216` bytes，SHA-256 `87bfb67d1ba30d7f79663f63891e29f7f4f4367c80ff0d5cecb1b46f301d40e9`。
+公开源码固定到来源 Tag 和 commit，应用/SDK 版本及静态库哈希已有记录。公开候选已使用
+ESP-IDF `5.5.4`、`--no-ccache` 完成唯一一次干净构建；构建后仅补写 Markdown 证据，
+编译输入保持一致。应用镜像、分区余量、实际烧录分段和 SHA-256 全部写入
+`release-manifest.json`。16 MiB 完整镜像只上传 GitHub Release，不进入 Git。
 
 干净构建证明候选能在记录的环境中完成编译和链接。烧录成功、C6/SDIO 可用、平台在线、
 音视频首帧和长稳结果仍要按上面的步骤在目标板上分别确认。这样记录问题时，大家能立刻知道
-证据停在哪一层，不必从头猜。`1.3.2` 还应重点验证连续重绑定、NVS commit、快速切换业务、
-并发 WHIP 提交、过期回调和重复 disconnect；TinyH264 同步保护、decoder 隔离和返回后的重建
-仍需要连续呼叫、故障注入和长稳验证。
+证据停在哪一层，不必从头猜。开发侧已有双设备呼叫、AI、IPC 重复切换和内存恢复记录；
+最新持久池修改后，微信小程序外部实呼和弱网矩阵没有重新完成。COM7/COM11 上的启明板仍是
+旧版 `1.3.2`，不能当作 `1.5.0` 证据。精确 Release 固件仍应分别核对烧录、C6/SDIO、
+联网、绑定、媒体和长稳。

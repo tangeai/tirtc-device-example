@@ -28,6 +28,7 @@ static const char *TAG = "wifi_mgr";
 #define WIFI_SCAN_DONE_BIT      BIT2
 #define WIFI_MAX_RETRIES        8
 #define WIFI_WAIT_MS            22000
+#define WIFI_BACKGROUND_RECOVERY_INTERVAL_MS 30000U
 #define WIFI_INVALID_RSSI       (-127)
 #define WIFI_NVS_NAMESPACE      "wifi"
 #define WIFI_NVS_KEY_SSID       "ssid"
@@ -46,6 +47,7 @@ static const char *TAG = "wifi_mgr";
 #define WIFI_SCAN_TASK_CORE 1
 
 static EventGroupHandle_t s_wifi_event_group;
+static esp_netif_t *s_wifi_sta_netif;
 static wifi_status_t s_wifi_status;
 static wifi_scan_snapshot_t s_wifi_scan_snapshot;
 static bool s_wifi_initialized;
@@ -58,6 +60,7 @@ static bool s_wifi_release_requested;
 static bool s_wifi_reconfig_in_progress;
 static uint32_t s_wifi_connect_started_ms;
 static TickType_t s_wifi_connect_started_tick;
+static uint32_t s_wifi_background_recovery_due_ms;
 static esp_timer_handle_t s_wifi_connect_timer;
 static char s_wifi_saved_ssid[33];
 static char s_wifi_saved_password[WIFI_PASSWORD_MAX_LEN + 1];
@@ -83,6 +86,31 @@ static void wifi_scan_task(void *ctx);
 static wifi_scan_resume_action_t wifi_finish_scan_state_locked(void);
 static void wifi_resume_connect_if_needed(wifi_scan_resume_action_t action);
 
+static uint32_t wifi_uptime_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+
+static bool wifi_deadline_reached(uint32_t now_ms, uint32_t deadline_ms)
+{
+    return deadline_ms != 0U && (int32_t)(now_ms - deadline_ms) >= 0;
+}
+
+static bool wifi_disconnect_is_authentication_failure(uint8_t reason)
+{
+    return reason == WIFI_REASON_AUTH_FAIL || reason == WIFI_REASON_802_1X_AUTH_FAILED;
+}
+
+static void wifi_arm_background_recovery_locked(uint32_t now_ms, uint8_t reason)
+{
+    if (s_wifi_status.started && s_wifi_status.configured &&
+        !s_wifi_release_requested && !wifi_disconnect_is_authentication_failure(reason)) {
+        s_wifi_background_recovery_due_ms = now_ms + WIFI_BACKGROUND_RECOVERY_INTERVAL_MS;
+    } else {
+        s_wifi_background_recovery_due_ms = 0U;
+    }
+}
+
 static void wifi_sync_pending_with_saved(void)
 {
     if (s_wifi_pending_explicit) {
@@ -91,6 +119,55 @@ static void wifi_sync_pending_with_saved(void)
 
     strlcpy(s_wifi_pending_ssid, s_wifi_saved_ssid, sizeof(s_wifi_pending_ssid));
     strlcpy(s_wifi_pending_password, s_wifi_saved_password, sizeof(s_wifi_pending_password));
+}
+
+static esp_err_t wifi_apply_fallback_dns(void)
+{
+    const char *address = s_wifi_config.fallback_dns_ipv4;
+    esp_netif_dns_info_t dns = {0};
+
+    if (address == NULL || address[0] == '\0') {
+        return ESP_OK;
+    }
+    if (s_wifi_sta_netif == NULL || esp_netif_str_to_ip4(address, &dns.ip.u_addr.ip4) != ESP_OK) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    dns.ip.type = ESP_IPADDR_TYPE_V4;
+    return esp_netif_set_dns_info(s_wifi_sta_netif, ESP_NETIF_DNS_FALLBACK, &dns);
+}
+
+static void wifi_format_dns_server(esp_netif_dns_type_t type, char *buffer, size_t buffer_size)
+{
+    esp_netif_dns_info_t dns = {0};
+
+    if (buffer == NULL || buffer_size == 0U) {
+        return;
+    }
+    strlcpy(buffer, "none", buffer_size);
+    if (s_wifi_sta_netif == NULL ||
+        esp_netif_get_dns_info(s_wifi_sta_netif, type, &dns) != ESP_OK ||
+        dns.ip.type != ESP_IPADDR_TYPE_V4 ||
+        dns.ip.u_addr.ip4.addr == 0U) {
+        return;
+    }
+    snprintf(buffer, buffer_size, IPSTR, IP2STR(&dns.ip.u_addr.ip4));
+}
+
+static void wifi_log_dns_servers(void)
+{
+    char main_dns[16] = {0};
+    char backup_dns[16] = {0};
+    char fallback_dns[16] = {0};
+
+    wifi_format_dns_server(ESP_NETIF_DNS_MAIN, main_dns, sizeof(main_dns));
+    wifi_format_dns_server(ESP_NETIF_DNS_BACKUP, backup_dns, sizeof(backup_dns));
+    wifi_format_dns_server(ESP_NETIF_DNS_FALLBACK, fallback_dns, sizeof(fallback_dns));
+    ESP_LOGI(TAG,
+             "wifi DNS ready: main=%s backup=%s fallback=%s",
+             main_dns,
+             backup_dns,
+             fallback_dns);
 }
 
 static void wifi_load_initial_saved_config(void)
@@ -164,6 +241,7 @@ static void wifi_mark_connect_timeout_if_needed(void)
         s_wifi_status.rssi = WIFI_INVALID_RSSI;
         s_wifi_status.ip_addr[0] = '\0';
         strlcpy(current_ssid, s_wifi_status.ssid, sizeof(current_ssid));
+        wifi_arm_background_recovery_locked(now_ms, WIFI_REASON_NO_AP_FOUND);
         timed_out = true;
     }
     taskEXIT_CRITICAL(&s_wifi_lock);
@@ -253,6 +331,41 @@ static void wifi_connect_watchdog_task(void *ctx)
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
         wifi_mark_connect_timeout_if_needed();
+
+        bool recover = false;
+        char current_ssid[sizeof(s_wifi_status.ssid)] = {0};
+        const uint32_t now_ms = wifi_uptime_ms();
+
+        taskENTER_CRITICAL(&s_wifi_lock);
+        if (s_wifi_status.started && s_wifi_status.configured &&
+            !s_wifi_status.connected && !s_wifi_release_requested &&
+            !s_wifi_reconfig_in_progress && !s_wifi_scan_in_progress &&
+            !s_wifi_manual_scan_active &&
+            wifi_deadline_reached(now_ms, s_wifi_background_recovery_due_ms)) {
+            s_wifi_background_recovery_due_ms = 0U;
+            strlcpy(current_ssid, s_wifi_status.ssid, sizeof(current_ssid));
+            recover = true;
+        }
+        taskEXIT_CRITICAL(&s_wifi_lock);
+
+        if (!recover) {
+            continue;
+        }
+
+        ESP_LOGI(TAG,
+                 "wifi background recovery begins: ssid=%s interval_ms=%u",
+                 current_ssid,
+                 (unsigned)WIFI_BACKGROUND_RECOVERY_INTERVAL_MS);
+        esp_err_t ret = esp_wifi_connect();
+        if (ret == ESP_OK) {
+            wifi_note_connect_started();
+            continue;
+        }
+
+        ESP_LOGW(TAG, "wifi background recovery start failed: %s", esp_err_to_name(ret));
+        taskENTER_CRITICAL(&s_wifi_lock);
+        wifi_arm_background_recovery_locked(wifi_uptime_ms(), s_wifi_status.disconnect_reason);
+        taskEXIT_CRITICAL(&s_wifi_lock);
     }
 }
 
@@ -531,6 +644,7 @@ static void wifi_resume_connect_if_needed(wifi_scan_resume_action_t action)
         char current_ssid[sizeof(s_wifi_status.ssid)] = {0};
         taskENTER_CRITICAL(&s_wifi_lock);
         strlcpy(current_ssid, s_wifi_status.ssid, sizeof(current_ssid));
+        wifi_arm_background_recovery_locked(wifi_uptime_ms(), WIFI_REASON_NO_AP_FOUND);
         taskEXIT_CRITICAL(&s_wifi_lock);
         ESP_LOGW(TAG,
                  "wifi target not found: ssid=%s reason=%u(%s)",
@@ -830,12 +944,21 @@ static void wifi_event_handler(void *arg,
         reconfig_in_progress = s_wifi_reconfig_in_progress;
         strlcpy(current_ssid, s_wifi_status.ssid, sizeof(current_ssid));
         if (!release_requested && !reconfig_in_progress && s_wifi_status.configured && !manual_scan_active &&
+            !wifi_disconnect_is_authentication_failure(disconnected->reason) &&
             s_wifi_status.retry_count < WIFI_MAX_RETRIES) {
             if (s_wifi_status.retry_count < UINT8_MAX) {
                 s_wifi_status.retry_count++;
             }
             retry_count = s_wifi_status.retry_count;
             should_reconnect = true;
+            s_wifi_background_recovery_due_ms = 0U;
+        } else if (!release_requested && !reconfig_in_progress && s_wifi_status.configured &&
+                   !manual_scan_active) {
+            if (wifi_disconnect_is_authentication_failure(disconnected->reason)) {
+                s_wifi_status.retry_count = WIFI_MAX_RETRIES;
+            }
+            retry_count = s_wifi_status.retry_count;
+            wifi_arm_background_recovery_locked(wifi_uptime_ms(), disconnected->reason);
         }
         taskEXIT_CRITICAL(&s_wifi_lock);
 
@@ -882,6 +1005,11 @@ static void wifi_event_handler(void *arg,
                      "wifi reconnect stopped: attempts=%u reason=%u",
                      (unsigned)WIFI_MAX_RETRIES,
                      (unsigned)disconnected->reason);
+            if (!wifi_disconnect_is_authentication_failure(disconnected->reason)) {
+                ESP_LOGI(TAG,
+                         "wifi background recovery scheduled: interval_ms=%u",
+                         (unsigned)WIFI_BACKGROUND_RECOVERY_INTERVAL_MS);
+            }
         }
         xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
         return;
@@ -896,6 +1024,15 @@ static void wifi_event_handler(void *arg,
         char connected_ssid[sizeof(s_wifi_status.ssid)] = {0};
         char connected_ip[sizeof(s_wifi_status.ip_addr)] = {0};
 
+        esp_err_t dns_ret = wifi_apply_fallback_dns();
+        if (dns_ret != ESP_OK) {
+            ESP_LOGW(TAG,
+                     "wifi fallback DNS apply failed: address=%s ret=%s",
+                     s_wifi_config.fallback_dns_ipv4 != NULL ? s_wifi_config.fallback_dns_ipv4 : "",
+                     esp_err_to_name(dns_ret));
+        }
+        wifi_log_dns_servers();
+
         wifi_cancel_connect_timeout();
         taskENTER_CRITICAL(&s_wifi_lock);
         strlcpy(s_wifi_saved_ssid, s_wifi_pending_ssid, sizeof(s_wifi_saved_ssid));
@@ -903,6 +1040,7 @@ static void wifi_event_handler(void *arg,
         s_wifi_pending_explicit = false;
         s_wifi_status.connected = true;
         s_wifi_status.retry_count = 0;
+        s_wifi_background_recovery_due_ms = 0U;
         snprintf(s_wifi_status.ip_addr,
                  sizeof(s_wifi_status.ip_addr),
                  IPSTR,
@@ -983,6 +1121,7 @@ esp_err_t wifi_prepare(const wifi_driver_config_t *config)
         taskENTER_CRITICAL(&s_wifi_lock);
         s_wifi_release_requested = false;
         s_wifi_reconfig_in_progress = false;
+        s_wifi_background_recovery_due_ms = 0U;
         s_wifi_status.started = true;
         s_wifi_status.configured = wifi_is_configured();
         s_wifi_status.connected = false;
@@ -1062,6 +1201,7 @@ esp_err_t wifi_prepare(const wifi_driver_config_t *config)
     strlcpy(s_wifi_status.ssid, s_wifi_pending_ssid, sizeof(s_wifi_status.ssid));
     s_wifi_release_requested = false;
     s_wifi_reconfig_in_progress = false;
+    s_wifi_background_recovery_due_ms = 0U;
     taskEXIT_CRITICAL(&s_wifi_lock);
 
     esp_err_t ret = esp_netif_init();
@@ -1092,7 +1232,11 @@ esp_err_t wifi_prepare(const wifi_driver_config_t *config)
                             "wifi connect timeout timer create failed");
     }
 
-    esp_netif_create_default_wifi_sta();
+    s_wifi_sta_netif = esp_netif_create_default_wifi_sta();
+    ESP_RETURN_ON_FALSE(s_wifi_sta_netif != NULL,
+                        ESP_ERR_NO_MEM,
+                        TAG,
+                        "wifi sta netif create failed");
 
     wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&init_cfg), TAG, "esp_wifi_init failed");
@@ -1181,6 +1325,7 @@ void wifi_release(void)
     taskENTER_CRITICAL(&s_wifi_lock);
     started = s_wifi_status.started;
     s_wifi_release_requested = true;
+    s_wifi_background_recovery_due_ms = 0U;
     s_wifi_scan_in_progress = false;
     s_wifi_scan_snapshot.in_progress = false;
     s_wifi_manual_scan_active = false;
@@ -1189,6 +1334,7 @@ void wifi_release(void)
     s_wifi_status.connected = false;
     s_wifi_status.retry_count = 0;
     s_wifi_status.disconnect_reason = 0;
+    s_wifi_background_recovery_due_ms = 0U;
     s_wifi_status.rssi = WIFI_INVALID_RSSI;
     s_wifi_status.ip_addr[0] = '\0';
     taskEXIT_CRITICAL(&s_wifi_lock);
@@ -1263,6 +1409,7 @@ esp_err_t app_wifi_driver_connect(const char *ssid, const char *password)
     s_wifi_status.connected = false;
     s_wifi_status.retry_count = 0;
     s_wifi_status.disconnect_reason = 0;
+    s_wifi_background_recovery_due_ms = 0U;
     s_wifi_connect_started_ms = 0;
     s_wifi_connect_started_tick = 0;
     s_wifi_status.rssi = WIFI_INVALID_RSSI;

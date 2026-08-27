@@ -28,6 +28,24 @@ static bool thing_http_is_https(const char *url)
     return url != NULL && strncmp(url, "https://", 8) == 0;
 }
 
+bool thing_http_error_is_recoverable(esp_err_t ret)
+{
+    switch (ret) {
+    case ESP_ERR_TIMEOUT:
+    case ESP_ERR_HTTP_CONNECT:
+    case ESP_ERR_HTTP_WRITE_DATA:
+    case ESP_ERR_HTTP_FETCH_HEADER:
+    case ESP_ERR_HTTP_CONNECTING:
+    case ESP_ERR_HTTP_EAGAIN:
+    case ESP_ERR_HTTP_CONNECTION_CLOSED:
+    case ESP_ERR_HTTP_READ_TIMEOUT:
+    case ESP_ERR_HTTP_INCOMPLETE_DATA:
+        return true;
+    default:
+        return false;
+    }
+}
+
 esp_err_t thing_http_join_url(char *out, size_t out_size, const char *base_url, const char *path)
 {
     if (out == NULL || out_size == 0 || base_url == NULL || base_url[0] == '\0' ||
@@ -85,6 +103,10 @@ esp_err_t thing_http_request_json(const thing_http_request_t *request,
         response_buf == NULL || response_buf_size < 2) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (!thing_http_is_https(request->url)) {
+        ESP_LOGE(TAG, "plaintext HTTP request rejected");
+        return ESP_ERR_INVALID_ARG;
+    }
 
     thing_http_response_t response = {
         .data = response_buf,
@@ -104,7 +126,8 @@ esp_err_t thing_http_request_json(const thing_http_request_t *request,
         .timeout_ms = (int)timeout_ms,
         .buffer_size = THING_HTTP_BUFFER_SIZE,
         .buffer_size_tx = THING_HTTP_TX_BUFFER_SIZE,
-        .crt_bundle_attach = thing_http_is_https(request->url) ? esp_crt_bundle_attach : NULL,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .disable_auto_redirect = true,
     };
 
     int64_t start_us = esp_timer_get_time();

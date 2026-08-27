@@ -12,7 +12,7 @@ If you wish to skip the theory, you can refer the [Quick Start Guide](#1-quick-s
 
 2. [Introduction](#2-introduction)
 
-3. [Hardware Considerations](#3-hardware-considerations) || [3.1 General Considerations](#31-general-considerations) || [3.2 Pull-up Resistors](#32-pull-up-resistors) || [3.3 Voltage Levels & eFuse burning](#33-voltage-levels--efuse-burning) || [3.4 Jumper Wires](#34-jumper-wires) || [3.5 PCB Design](#35-pcb-design) || [3.6 Advanced Considerations](#36-advanced-considerations) || [3.7 Testing Connections](#37-testing-connections)
+3. [Hardware Considerations](#3-hardware-considerations) || [3.3 General Hardware Considerations](#33-general-hardware-considerations) || [3.4 Pull-up Resistors](#34-pull-up-resistors) || [3.5 Voltage Levels & eFuse burning](#35-voltage-levels--efuse-burning) || [3.6 Jumper Wires](#36-jumper-wires-only-for-sdio-1-bit-mode) || [3.7 PCB Design](#37-pcb-design) || [3.8 Advanced Considerations](#38-advanced-considerations) || [Testing and Troubleshooting](#8-testing-and-troubleshooting)
 
 4. [Hardware Setup](#4-hardware-setup)
 
@@ -319,7 +319,7 @@ Any host having SDIO master can be used as host. Please make sure the hardware c
   - ESP as host could be one of ESP32, ESP32-S3, ESP32-P4.
   - For ESP32 as host, may need additional **eFuse burning** for voltage correction on one of data pin. ESP32-S3 and ESP32-P4 does **not** need this.
 - Non ESP SDIO Master
-  - Any other host having SDIO master can be used as host. Please make sure the hardware configurations, like ([external Pull-up Resistors](#42-pull-up-resistors)) are installed correctly. Tthe voltage at SDIO pins is expected to be 3v3 volts.
+  - Any other host having SDIO master can be used as host. Please make sure the hardware configurations, like ([external Pull-up Resistors](#34-pull-up-resistors)) are installed correctly. Tthe voltage at SDIO pins is expected to be 3v3 volts.
 - Pull-ups required for CMD, DAT0, DAT1, DAT2, DAT3 lines (for both 1-Bit and 4-Bit SDIO)
 - eFuse burning may be required for classic ESP32.
 - Pull-Up and eFuse burning is detailed in [(3) Hardware Considerations](#3-hardware-considerations)
@@ -525,7 +525,7 @@ After flashing both the co-processor and host devices, follow these steps to con
    Note: Replace `<STA_IP>` with the IP address of the external STA, and `<HOST_IP>` with the IP address of the ESP-Hosted device.
 
 8. Troubleshooting:
-   - Consider using a lower clock speed or checking your [hardware setup](sdio.md#7-hardware-setup) if you experience communication problems.
+   - Consider using a lower clock speed or checking your [hardware setup](#4-hardware-setup) if you experience communication problems.
    - ESP-Hosted-MCU troubleshooting guide: [troubleshooting.md](troubleshooting.md)
 
 9. Monitoring and debugging:

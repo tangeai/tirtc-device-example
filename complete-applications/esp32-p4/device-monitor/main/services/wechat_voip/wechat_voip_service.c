@@ -352,6 +352,15 @@ esp_err_t wechat_voip_service_refresh_contacts_async(void)
     return wechat_voip_thing_refresh_contacts_async();
 }
 
+esp_err_t wechat_voip_service_update_contact_remark(const char *open_id,
+                                                    const char *remark)
+{
+    if (!APP_CONFIG_WECHAT_VOIP_ENABLE || !s_session_enabled) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return wechat_voip_thing_update_contact_remark_async(open_id, remark);
+}
+
 bool wechat_voip_service_is_enabled(void)
 {
     return APP_CONFIG_WECHAT_VOIP_ENABLE != 0;

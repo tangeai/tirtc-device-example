@@ -25,6 +25,9 @@
 #ifndef CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
 #define CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS 0
 #endif
+#ifndef CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG
+#define CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG 0
+#endif
 
 static const char *TAG = "call_video";
 
@@ -46,6 +49,11 @@ static const char *TAG = "call_video";
 #define CALL_VIDEO_MJPEG_PREVENT_UPSCALE    false
 #define CALL_VIDEO_MJPEG_STARTUP_SAMPLE_US  (1LL * 1000LL * 1000LL)
 #define CALL_VIDEO_MJPEG_GEOMETRY_LOG_LIMIT 4U
+#define CALL_VIDEO_MEMORY_TRACE_DECODE_BEGIN  (1U << 0)
+#define CALL_VIDEO_MEMORY_TRACE_DECODE_OUTPUT (1U << 1)
+#define CALL_VIDEO_MEMORY_TRACE_DECODE_QUEUE  (1U << 2)
+#define CALL_VIDEO_MEMORY_TRACE_CONVERT       (1U << 3)
+#define CALL_VIDEO_MEMORY_TRACE_PRESENT       (1U << 4)
 #define CALL_VIDEO_PSRAM_POOL_BYTES        \
     ((CALL_VIDEO_INPUT_SLOT_COUNT * CALL_VIDEO_INPUT_SLOT_CAPACITY) + \
      (CALL_VIDEO_DECODED_SLOT_COUNT * CALL_VIDEO_DECODED_SLOT_CAPACITY) + \
@@ -61,12 +69,16 @@ _Static_assert(CALL_VIDEO_SOURCE_CROP_Y + CALL_VIDEO_SOURCE_CROP_HEIGHT <=
 _Static_assert(CALL_VIDEO_RENDER_WIDTH * CALL_VIDEO_SOURCE_CROP_HEIGHT ==
                    CALL_VIDEO_RENDER_HEIGHT * CALL_VIDEO_SOURCE_CROP_WIDTH,
                "landscape downlink source and viewport must share one aspect ratio");
-_Static_assert(CALL_VIDEO_RENDER_WIDTH == CALL_VIDEO_SOURCE_CROP_WIDTH &&
-                   CALL_VIDEO_RENDER_HEIGHT == CALL_VIDEO_SOURCE_CROP_HEIGHT,
-               "full-screen downlink must remain on the PPA 1:1 conversion path");
 _Static_assert((CALL_VIDEO_RENDER_WIDTH % 16U) == 0U &&
                    (CALL_VIDEO_RENDER_HEIGHT % 16U) == 0U,
                "hardware JPEG output dimensions must be aligned to 16 pixels");
+_Static_assert(CALL_VIDEO_ADAPTIVE_PLAYOUT_DEPTH < CALL_VIDEO_OUTPUT_SLOT_COUNT,
+               "adaptive playout must leave one RGB slot retained by the LCD");
+_Static_assert(CALL_VIDEO_ADAPTIVE_PLAYOUT_MAX_DEPTH >=
+                   CALL_VIDEO_ADAPTIVE_PLAYOUT_DEPTH &&
+                   CALL_VIDEO_ADAPTIVE_PLAYOUT_MAX_DEPTH <
+                       CALL_VIDEO_OUTPUT_SLOT_COUNT,
+               "adaptive playout depth must fit the RGB reservoir");
 
 #if CALL_VIDEO_H264_DUAL_TASK_ENABLE
 #define CALL_VIDEO_H264_DECODER_MODE       "dual-task"
@@ -90,10 +102,8 @@ _Static_assert(CALL_VIDEO_H264_HELPER_TASK_PRIORITY <
                "audio capture must remain the highest-priority media deadline");
 #endif
 
-#if !CONFIG_FREERTOS_UNICORE
-_Static_assert(APP_TASK_CORE_VIDEO_DECODE != APP_TASK_CORE_VIDEO_CONVERT,
-               "H264 decode and display conversion must use separate cores");
-#endif
+_Static_assert(CALL_VIDEO_INGRESS_TASK_PRIORITY < CALL_VIDEO_TASK_PRIORITY,
+               "compressed ingress relay must not preempt the RTC callback");
 
 #if CONFIG_CACHE_L2_CACHE_LINE_SIZE > CONFIG_CACHE_L1_CACHE_LINE_SIZE
 #define CALL_VIDEO_CACHE_LINE_SIZE CONFIG_CACHE_L2_CACHE_LINE_SIZE
@@ -163,6 +173,7 @@ typedef struct {
 typedef struct {
     portMUX_TYPE lock;
     QueueHandle_t free_slots;
+    QueueHandle_t ingress_slots;
     QueueHandle_t ready_slots;
     QueueHandle_t decoded_free_slots;
     QueueHandle_t decoded_ready_slots;
@@ -170,8 +181,10 @@ typedef struct {
     SemaphoreHandle_t submit_mutex;
     SemaphoreHandle_t start_done;
     SemaphoreHandle_t stop_done;
+    SemaphoreHandle_t ingress_stop_done;
     SemaphoreHandle_t convert_stop_done;
     TaskHandle_t task;
+    TaskHandle_t ingress_task;
     TaskHandle_t convert_task;
     jpeg_decoder_handle_t mjpeg_decoder;
     video_frame_converter_handle_t mjpeg_converter;
@@ -183,6 +196,16 @@ typedef struct {
     uint8_t ready_output_head;
     uint8_t ready_output_count;
     uint8_t presented_output_slot;
+    uint32_t adaptive_playout_generation;
+    uint32_t adaptive_playout_generation_seen;
+    uint8_t adaptive_playout_depth;
+    uint8_t adaptive_gap_samples;
+    int64_t adaptive_gap_confirm_until_us;
+    int64_t adaptive_playout_activated_at_us;
+    int64_t adaptive_playout_until_us;
+    int64_t adaptive_next_present_at_us;
+    uint32_t adaptive_playout_interval_us;
+    bool adaptive_playout_started;
     bool start_pending;
     bool running;
     bool stop_requested;
@@ -195,6 +218,7 @@ typedef struct {
     bool decode_key_frame;
     bool waiting_for_key_frame;
     bool latency_recovery_pending;
+    uint8_t latency_pressure_samples;
     bool h264_profile_known;
     bool h264_profile_supported;
     bool h264_sps_queued;
@@ -264,6 +288,8 @@ typedef struct {
     uint32_t decoder_restarts;
     uint32_t discontinuities;
     uint32_t input_overflows;
+    uint32_t memory_trace_generation;
+    uint32_t memory_trace_mask;
     bool resources_preparing;
     bool resources_ready;
     bool mjpeg_decoder_preparing;
@@ -286,6 +312,64 @@ static uint32_t call_video_elapsed_us(int64_t started_at_us, int64_t finished_at
     return elapsed_us > UINT32_MAX ? UINT32_MAX : (uint32_t)elapsed_us;
 }
 
+static void call_video_log_memory_once(uint32_t generation,
+                                       uint32_t stage_bit,
+                                       const char *stage)
+{
+    bool should_log = false;
+
+    taskENTER_CRITICAL(&s_renderer.lock);
+    if (generation == s_renderer.generation) {
+        if (s_renderer.memory_trace_generation != generation) {
+            s_renderer.memory_trace_generation = generation;
+            s_renderer.memory_trace_mask = 0U;
+        }
+        if ((s_renderer.memory_trace_mask & stage_bit) == 0U) {
+            s_renderer.memory_trace_mask |= stage_bit;
+            should_log = true;
+        }
+    }
+    taskEXIT_CRITICAL(&s_renderer.lock);
+    if (!should_log) {
+        return;
+    }
+
+    ESP_LOGI(TAG,
+             "downlink first-frame memory: stage=%s gen=%lu internal=%u largest=%u "
+             "dma=%u largest=%u psram=%u largest=%u internal_min=%u",
+             stage,
+             (unsigned long)generation,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+}
+
+static bool call_video_adaptive_playout_is_active(int64_t now_us)
+{
+    int64_t adaptive_until_us = 0;
+
+    taskENTER_CRITICAL(&s_renderer.lock);
+    adaptive_until_us = s_renderer.adaptive_playout_until_us;
+    taskEXIT_CRITICAL(&s_renderer.lock);
+    return adaptive_until_us > now_us;
+}
+
+static uint32_t call_video_adaptive_playout_interval(uint8_t ready_frames,
+                                                     uint8_t target_depth)
+{
+    if (target_depth >= 4U && (uint32_t)ready_frames * 4U <= target_depth) {
+        return CALL_VIDEO_ADAPTIVE_CRITICAL_INTERVAL_US;
+    }
+    if (target_depth >= 2U && (uint32_t)ready_frames * 2U <= target_depth) {
+        return CALL_VIDEO_ADAPTIVE_REFILL_INTERVAL_US;
+    }
+    return CALL_VIDEO_ADAPTIVE_PLAYOUT_INTERVAL_US;
+}
+
 static bool call_video_pts_is_newer(uint32_t current, uint32_t previous)
 {
     return (int32_t)(current - previous) > 0;
@@ -293,6 +377,12 @@ static bool call_video_pts_is_newer(uint32_t current, uint32_t previous)
 
 static void call_video_note_received(int64_t received_at_us, uint32_t pts)
 {
+    bool adaptive_playout_activated = false;
+    bool adaptive_target_raised = false;
+    bool adaptive_gap_confirmed = false;
+    uint32_t adaptive_gap_us = 0U;
+    uint8_t adaptive_depth = CALL_VIDEO_ADAPTIVE_PLAYOUT_DEPTH;
+
     taskENTER_CRITICAL(&s_renderer.lock);
     if (s_renderer.last_received_at_us > 0 &&
         received_at_us > s_renderer.last_received_at_us) {
@@ -300,6 +390,61 @@ static void call_video_note_received(int64_t received_at_us, uint32_t pts)
                                                 received_at_us);
         if (gap_us > s_renderer.receive_gap_window_max_us) {
             s_renderer.receive_gap_window_max_us = gap_us;
+        }
+        if (gap_us >= CALL_VIDEO_ADAPTIVE_PLAYOUT_GAP_US) {
+            adaptive_gap_us = gap_us;
+            const bool adaptive_already_active =
+                s_renderer.adaptive_playout_until_us > received_at_us;
+            if (adaptive_already_active ||
+                gap_us >= CALL_VIDEO_ADAPTIVE_IMMEDIATE_GAP_US) {
+                adaptive_gap_confirmed = true;
+            } else {
+                if (received_at_us <= s_renderer.adaptive_gap_confirm_until_us) {
+                    if (s_renderer.adaptive_gap_samples < UINT8_MAX) {
+                        s_renderer.adaptive_gap_samples++;
+                    }
+                } else {
+                    s_renderer.adaptive_gap_samples = 1U;
+                }
+                s_renderer.adaptive_gap_confirm_until_us =
+                    received_at_us + CALL_VIDEO_ADAPTIVE_CONFIRM_WINDOW_US;
+                adaptive_gap_confirmed =
+                    s_renderer.adaptive_gap_samples >=
+                    CALL_VIDEO_ADAPTIVE_CONFIRM_SAMPLES;
+            }
+
+            if (adaptive_gap_confirmed) {
+                uint32_t required_depth =
+                    (gap_us + CALL_VIDEO_ADAPTIVE_PLAYOUT_INTERVAL_US - 1U) /
+                    CALL_VIDEO_ADAPTIVE_PLAYOUT_INTERVAL_US + 1U;
+                if (required_depth < CALL_VIDEO_ADAPTIVE_PLAYOUT_DEPTH) {
+                    required_depth = CALL_VIDEO_ADAPTIVE_PLAYOUT_DEPTH;
+                }
+                if (required_depth > CALL_VIDEO_ADAPTIVE_PLAYOUT_MAX_DEPTH) {
+                    required_depth = CALL_VIDEO_ADAPTIVE_PLAYOUT_MAX_DEPTH;
+                }
+                adaptive_depth = (uint8_t)required_depth;
+                if (!adaptive_already_active) {
+                    s_renderer.adaptive_playout_generation++;
+                    if (s_renderer.adaptive_playout_generation == 0U) {
+                        s_renderer.adaptive_playout_generation = 1U;
+                    }
+                    s_renderer.adaptive_playout_depth = adaptive_depth;
+                    s_renderer.adaptive_playout_activated_at_us = received_at_us;
+                    adaptive_playout_activated = true;
+                } else if (adaptive_depth > s_renderer.adaptive_playout_depth) {
+                    /* Raise the reserve target without restarting presentation.
+                     * The low-watermark pace controller refills continuously;
+                     * forcing a new prime for every larger jitter sample turns a
+                     * healthy growing reservoir into repeated visible freezes. */
+                    s_renderer.adaptive_playout_depth = adaptive_depth;
+                    adaptive_target_raised = true;
+                }
+                s_renderer.adaptive_playout_until_us =
+                    received_at_us + CALL_VIDEO_ADAPTIVE_PLAYOUT_HOLD_US;
+                s_renderer.adaptive_gap_samples = 0U;
+                s_renderer.adaptive_gap_confirm_until_us = 0;
+            }
         }
     }
     s_renderer.last_received_at_us = received_at_us;
@@ -312,6 +457,20 @@ static void call_video_note_received(int64_t received_at_us, uint32_t pts)
         s_renderer.received_pts_valid = true;
     }
     taskEXIT_CRITICAL(&s_renderer.lock);
+
+    if (adaptive_playout_activated) {
+        ESP_LOGI(TAG,
+                 "adaptive video playout active: input_gap=%lums depth=%u pace=%lums hold=%lus",
+                 (unsigned long)(adaptive_gap_us / 1000U),
+                 (unsigned)adaptive_depth,
+                 (unsigned long)(CALL_VIDEO_ADAPTIVE_PLAYOUT_INTERVAL_US / 1000U),
+                 (unsigned long)(CALL_VIDEO_ADAPTIVE_PLAYOUT_HOLD_US / 1000000LL));
+    } else if (adaptive_target_raised) {
+        ESP_LOGI(TAG,
+                 "adaptive video reserve target raised: input_gap=%lums depth=%u",
+                 (unsigned long)(adaptive_gap_us / 1000U),
+                 (unsigned)adaptive_depth);
+    }
 }
 
 static const char *call_video_codec_name(call_video_codec_t codec)
@@ -598,6 +757,8 @@ static esp_err_t call_video_prepare_h264_access_unit(const uint8_t *data,
     return ESP_OK;
 }
 
+static uint32_t call_video_input_queue_depth(void);
+
 static bool call_video_stop_requested(void)
 {
     bool requested = false;
@@ -695,8 +856,7 @@ static bool call_video_renderer_detect_decode_fault(int64_t now_us)
                  (unsigned long)pts,
                  (unsigned)payload_bytes,
                  key_frame ? 1 : 0,
-                 s_renderer.ready_slots != NULL ?
-                     (unsigned long)uxQueueMessagesWaiting(s_renderer.ready_slots) : 0UL,
+                 (unsigned long)call_video_input_queue_depth(),
                  s_renderer.decoded_ready_slots != NULL ?
                      (unsigned long)uxQueueMessagesWaiting(s_renderer.decoded_ready_slots) : 0UL);
         call_video_log_task_snapshot("caller", "call_h264_rx", decode_task);
@@ -712,6 +872,68 @@ static void call_video_return_slot(uint8_t index)
     if (s_renderer.free_slots != NULL) {
         (void)xQueueSend(s_renderer.free_slots, &index, 0);
     }
+}
+
+static uint32_t call_video_input_queue_depth(void)
+{
+    uint32_t depth = 0U;
+
+    if (s_renderer.ingress_slots != NULL) {
+        depth += (uint32_t)uxQueueMessagesWaiting(s_renderer.ingress_slots);
+    }
+    if (s_renderer.ready_slots != NULL) {
+        depth += (uint32_t)uxQueueMessagesWaiting(s_renderer.ready_slots);
+    }
+    return depth;
+}
+
+static void call_video_drain_ingress_queue(void)
+{
+    uint8_t index = 0U;
+
+    while (s_renderer.ingress_slots != NULL &&
+           xQueueReceive(s_renderer.ingress_slots, &index, 0) == pdTRUE) {
+        call_video_return_slot(index);
+    }
+}
+
+/*
+ * The TiRTC socket thread must only copy and enqueue compressed access units.
+ * Sending directly to the high-priority decoder queue wakes the decoder before
+ * the SDK callback can return, so the 40-80 ms software decode is charged to
+ * one ICE receive iteration. This lower-priority relay transfers slot ownership
+ * after the socket thread blocks again; it adds no payload copy.
+ */
+static void call_video_ingress_task(void *arg)
+{
+    (void)arg;
+
+    while (!call_video_stop_requested()) {
+        uint8_t index = 0U;
+        if (xQueueReceive(s_renderer.ingress_slots,
+                          &index,
+                          pdMS_TO_TICKS(10)) != pdTRUE) {
+            continue;
+        }
+
+        bool accept = false;
+        taskENTER_CRITICAL(&s_renderer.lock);
+        accept = !s_renderer.stop_requested &&
+                 s_renderer.running &&
+                 index < CALL_VIDEO_INPUT_SLOT_COUNT &&
+                 s_renderer.slots[index].generation == s_renderer.generation;
+        taskEXIT_CRITICAL(&s_renderer.lock);
+
+        if (!accept ||
+            xQueueSend(s_renderer.ready_slots, &index, 0) != pdTRUE) {
+            call_video_return_slot(index);
+        }
+    }
+
+    call_video_drain_ingress_queue();
+    xSemaphoreGive(s_renderer.ingress_stop_done);
+    vTaskSuspend(NULL);
+    abort();
 }
 
 static void call_video_drain_ready_queue(void)
@@ -753,6 +975,15 @@ static bool call_video_take_latest_decoded_slot(uint8_t *slot_index,
                       &newest_index,
                       wait_ticks) != pdTRUE) {
         return false;
+    }
+
+    /* A transport recovery burst is useful playout inventory. Preserve its
+     * order while adaptive playout is active; the fixed RGB reservoir remains
+     * the latency bound. Normal calls still collapse a decode burst to the
+     * newest frame for minimum glass-to-glass delay. */
+    if (call_video_adaptive_playout_is_active(esp_timer_get_time())) {
+        *slot_index = newest_index;
+        return true;
     }
 
     uint32_t stale_count = 0U;
@@ -854,10 +1085,12 @@ static void call_video_mark_discontinuity(void)
     s_renderer.generation++;
     s_renderer.waiting_for_key_frame = true;
     s_renderer.latency_recovery_pending = false;
+    s_renderer.latency_pressure_samples = 0U;
     s_renderer.h264_sps_queued = false;
     s_renderer.h264_pps_queued = false;
     s_renderer.discontinuities++;
     taskEXIT_CRITICAL(&s_renderer.lock);
+    call_video_drain_ingress_queue();
     call_video_drain_ready_queue();
     call_video_drain_decoded_ready_queue();
 }
@@ -868,14 +1101,8 @@ static esp_err_t call_video_decoder_create(esp_h264_dec_handle_t *decoder,
     esp_h264_dec_cfg_sw_t config = {
         .pic_type = ESP_H264_RAW_FMT_I420,
     };
-    const esp_h264_dec_sw_task_cfg_t task_config = {
-        .dual_task_enable = CALL_VIDEO_H264_DUAL_TASK_ENABLE != 0U,
-        .dual_task_core = CALL_VIDEO_H264_HELPER_TASK_CORE,
-        .dual_task_priority = CALL_VIDEO_H264_HELPER_TASK_PRIORITY,
-    };
 
-    if (esp_h264_dec_sw_new_with_task_config(&config, &task_config, decoder) !=
-        ESP_H264_ERR_OK) {
+    if (esp_h264_dec_sw_new(&config, decoder) != ESP_H264_ERR_OK) {
         return ESP_ERR_NO_MEM;
     }
     if (esp_h264_dec_sw_get_param_hd(*decoder, parameters) != ESP_H264_ERR_OK ||
@@ -921,14 +1148,13 @@ static void call_video_decoder_dma_guard_end(bool escrow_lent,
                                              esp_err_t decoder_ret,
                                              const char *codec_name)
 {
-    if (!escrow_lent) {
-        return;
+    esp_err_t reclaim_ret = ESP_OK;
+    if (escrow_lent) {
+        reclaim_ret = media_dma_reserve_reclaim(
+            decoder_ret == ESP_OK ? "downlink-decoder-bootstrap-done" :
+                                    "downlink-decoder-bootstrap-failed");
     }
-
-    esp_err_t reclaim_ret = media_dma_reserve_reclaim(
-        decoder_ret == ESP_OK ? "downlink-decoder-bootstrap-done" :
-                                "downlink-decoder-bootstrap-failed");
-    if (reclaim_ret != ESP_OK) {
+    if (escrow_lent && reclaim_ret != ESP_OK) {
         ESP_LOGW(TAG,
                  "%s downlink DMA escrow remains lent: decoder=%s reclaim=%s",
                  codec_name,
@@ -936,9 +1162,10 @@ static void call_video_decoder_dma_guard_end(bool escrow_lent,
                  esp_err_to_name(reclaim_ret));
     }
     ESP_LOGI(TAG,
-             "%s downlink decoder bootstrap: ret=%s escrow_restore=%s internal_free=%u internal_largest=%u dma_free=%u dma_largest=%u psram_free=%u",
+             "%s downlink decoder bootstrap: ret=%s escrow_lent=%d escrow_restore=%s internal_free=%u internal_largest=%u dma_free=%u dma_largest=%u psram_free=%u",
              codec_name,
              esp_err_to_name(decoder_ret),
+             escrow_lent ? 1 : 0,
              esp_err_to_name(reclaim_ret),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
@@ -1203,10 +1430,21 @@ static void call_video_log_stats_if_due(call_video_log_window_t *window,
                                 (uint32_t)(swap_time_delta / ppa_frames_delta) : 0U;
     uint32_t average_software_us = software_frames_delta > 0U ?
                                     (uint32_t)(software_time_delta / software_frames_delta) : 0U;
-    uint32_t input_queue_depth = s_renderer.ready_slots != NULL ?
-                                 (uint32_t)uxQueueMessagesWaiting(s_renderer.ready_slots) : 0U;
+    uint32_t input_queue_depth = call_video_input_queue_depth();
     uint32_t decoded_queue_depth = s_renderer.decoded_ready_slots != NULL ?
                                    (uint32_t)uxQueueMessagesWaiting(s_renderer.decoded_ready_slots) : 0U;
+    uint32_t output_queue_depth = 0U;
+    uint32_t adaptive_target_depth = 0U;
+    uint32_t adaptive_interval_us = CALL_VIDEO_ADAPTIVE_PLAYOUT_INTERVAL_US;
+    bool adaptive_playout_active =
+        call_video_adaptive_playout_is_active(esp_timer_get_time());
+    if (s_renderer.frame_mutex != NULL &&
+        xSemaphoreTake(s_renderer.frame_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        output_queue_depth = s_renderer.ready_output_count;
+        adaptive_target_depth = s_renderer.adaptive_playout_depth;
+        adaptive_interval_us = s_renderer.adaptive_playout_interval_us;
+        xSemaphoreGive(s_renderer.frame_mutex);
+    }
 
     if (!session_active) {
         *window = current;
@@ -1267,11 +1505,13 @@ static void call_video_log_stats_if_due(call_video_log_window_t *window,
                  present_gap_max_us / 1000U,
                  stale_received_delta,
                  stale_presented_delta);
-    } else {
+    } else if (CONFIG_APP_MEDIA_COMPACT_HEALTH_LOG) {
         ESP_LOGI(TAG,
                  "VRX %ux%u in=%u.%u/%uk q/d/c/o=%u.%u/%u.%u/%u.%u/%u.%u "
                  "drop=%u/%u fail=%u/%u age=%u/%ums depth=%u/%u "
-                 "ms=au/cvt/ppa:%u/%u/%u gap=%u/%u old=%u/%u reset=%u/%u",
+                 "buf=%u/%u@%ums adapt=%u ms=au/cvt/ppa:%u/%u/%u kd=%u/%u gap=%u/%u "
+                 "old=%u/%u reset=%u/%u ovf=%u parts=pack/swap/ui:%u/%u/%u "
+                 "max=au/cvt/ppa:%u/%u/%u",
                  source_width,
                  source_height,
                  received_fps_x10 / 10U,
@@ -1293,15 +1533,28 @@ static void call_video_log_stats_if_due(call_video_log_window_t *window,
                  current.input_queue_age_max_us / 1000U,
                  input_queue_depth,
                  decoded_queue_depth,
+                 output_queue_depth,
+                 adaptive_target_depth,
+                 adaptive_interval_us / 1000U,
+                 adaptive_playout_active ? 1U : 0U,
                  average_access_unit_us / 1000U,
                  average_convert_us / 1000U,
                  average_ppa_us / 1000U,
+                 average_key_us / 1000U,
+                 average_delta_us / 1000U,
                  receive_gap_max_us / 1000U,
                  present_gap_max_us / 1000U,
                  stale_received_delta,
                  stale_presented_delta,
                  decoder_restarts_delta,
-                 discontinuities_delta);
+                 discontinuities_delta,
+                 input_overflows_delta,
+                 average_pack_us / 1000U,
+                 average_swap_us / 1000U,
+                 average_present_copy_us / 1000U,
+                 current.decode_access_unit_max_us / 1000U,
+                 current.convert_max_us / 1000U,
+                 current.converter.ppa_max_us / 1000U);
     }
     *window = current;
 }
@@ -1474,6 +1727,10 @@ static esp_err_t call_video_queue_decoded_frame(const esp_h264_dec_out_frame_t *
         return ESP_ERR_NOT_FINISHED;
     }
 
+    call_video_log_memory_once(input_slot->generation,
+                               CALL_VIDEO_MEMORY_TRACE_DECODE_QUEUE,
+                               "decoded-queue");
+
     taskENTER_CRITICAL(&s_renderer.lock);
     s_renderer.source_width = resolution.width;
     s_renderer.source_height = resolution.height;
@@ -1510,11 +1767,43 @@ static esp_err_t call_video_decode_slot(esp_h264_dec_handle_t decoder,
         taskEXIT_CRITICAL(&s_renderer.lock);
 
         if (decode_ret != ESP_H264_ERR_OK || input.consume == 0U) {
+            const call_video_h264_access_unit_t au =
+                call_video_h264_inspect_access_unit(slot->data, slot->data_len);
+            const uint32_t au_hash =
+                call_video_h264_hash_nal(slot->data, slot->data_len);
+            const size_t tail = slot->data_len >= 4U ? slot->data_len - 4U : 0U;
+            ESP_LOGW(TAG,
+                     "H264 AU rejected: decoder=%d consume=%u remaining=%u "
+                     "pts=%lu key=%d len=%u hash=%08lx "
+                     "annexb=%d sps=%d pps=%d idr=%d "
+                     "head=%02X%02X%02X%02X tail=%02X%02X%02X%02X",
+                     (int)decode_ret,
+                     (unsigned)input.consume,
+                     (unsigned)input.raw_data.len,
+                     (unsigned long)slot->pts,
+                     slot->key_frame ? 1 : 0,
+                     (unsigned)slot->data_len,
+                     (unsigned long)au_hash,
+                     au.annexb ? 1 : 0,
+                     au.has_sps ? 1 : 0,
+                     au.has_pps ? 1 : 0,
+                     au.has_idr ? 1 : 0,
+                     slot->data_len > 0U ? slot->data[0] : 0U,
+                     slot->data_len > 1U ? slot->data[1] : 0U,
+                     slot->data_len > 2U ? slot->data[2] : 0U,
+                     slot->data_len > 3U ? slot->data[3] : 0U,
+                     slot->data_len > tail ? slot->data[tail] : 0U,
+                     slot->data_len > tail + 1U ? slot->data[tail + 1U] : 0U,
+                     slot->data_len > tail + 2U ? slot->data[tail + 2U] : 0U,
+                     slot->data_len > tail + 3U ? slot->data[tail + 3U] : 0U);
             return ESP_FAIL;
         }
         input.raw_data.buffer += input.consume;
         input.raw_data.len -= input.consume;
         if (output.out_size > 0U) {
+            call_video_log_memory_once(slot->generation,
+                                       CALL_VIDEO_MEMORY_TRACE_DECODE_OUTPUT,
+                                       "decoder-output");
             esp_err_t queue_ret = call_video_queue_decoded_frame(&output,
                                                                   parameters,
                                                                   slot);
@@ -1622,6 +1911,7 @@ static void call_video_output_finish_write(uint8_t slot_index,
 static void call_video_converter_task(void *arg)
 {
     video_frame_converter_handle_t converter = (video_frame_converter_handle_t)arg;
+    int64_t last_stall_log_at_us = 0;
 
     while (!call_video_stop_requested()) {
         uint8_t index = 0;
@@ -1656,10 +1946,10 @@ static void call_video_converter_task(void *arg)
         }
 
         int64_t convert_started_us = esp_timer_get_time();
+        uint32_t decoded_wait_us = call_video_elapsed_us(slot->trace_ready_at_us,
+                                                         convert_started_us);
         if (slot->trace.frame_index > 0U) {
-            slot->trace.decoded_wait_us = call_video_elapsed_us(
-                slot->trace_ready_at_us,
-                convert_started_us);
+            slot->trace.decoded_wait_us = decoded_wait_us;
         }
         esp_err_t convert_ret = video_frame_converter_i420_to_rgb565(converter,
                                                                      slot->data,
@@ -1669,6 +1959,7 @@ static void call_video_converter_task(void *arg)
                                                                      NULL);
         uint32_t convert_elapsed_us =
             (uint32_t)(esp_timer_get_time() - convert_started_us);
+        int64_t convert_finished_us = esp_timer_get_time();
         if (output_index < CALL_VIDEO_OUTPUT_SLOT_COUNT &&
             slot->trace.frame_index > 0U) {
             s_renderer.output_slots[output_index].trace = slot->trace;
@@ -1677,6 +1968,27 @@ static void call_video_converter_task(void *arg)
         }
         video_frame_converter_stats_t converter_stats = {0};
         video_frame_converter_get_stats(converter, &converter_stats);
+        if ((decoded_wait_us >= CALL_VIDEO_LATENCY_RECOVERY_US ||
+             convert_elapsed_us >= CALL_VIDEO_LATENCY_RECOVERY_US) &&
+            (last_stall_log_at_us == 0 ||
+             convert_finished_us - last_stall_log_at_us >=
+                 CALL_VIDEO_STALL_LOG_INTERVAL_US)) {
+            ESP_LOGW(TAG,
+                     "video stall: stage=%s decoded_wait=%luus convert=%luus "
+                     "pack_max=%luus ppa_max=%luus swap_max=%luus q=%lu/%u hwm=%u",
+                     decoded_wait_us >= CALL_VIDEO_LATENCY_RECOVERY_US ?
+                         "convert-schedule" : "convert",
+                     (unsigned long)decoded_wait_us,
+                     (unsigned long)convert_elapsed_us,
+                     (unsigned long)converter_stats.pack_max_us,
+                     (unsigned long)converter_stats.ppa_max_us,
+                     (unsigned long)converter_stats.swap_max_us,
+                     (unsigned long)uxQueueMessagesWaiting(
+                         s_renderer.decoded_ready_slots),
+                     (unsigned)s_renderer.ready_output_count,
+                     (unsigned)uxTaskGetStackHighWaterMark(NULL));
+            last_stall_log_at_us = convert_finished_us;
+        }
         taskENTER_CRITICAL(&s_renderer.lock);
         generation = s_renderer.generation;
         s_renderer.convert_pack_time_us = converter_stats.pack_time_us;
@@ -1691,6 +2003,11 @@ static void call_video_converter_task(void *arg)
                                        convert_ret == ESP_OK && generation_matches,
                                        convert_elapsed_us,
                                        slot->pts);
+        if (convert_ret == ESP_OK && generation_matches) {
+            call_video_log_memory_once(slot->generation,
+                                       CALL_VIDEO_MEMORY_TRACE_CONVERT,
+                                       "converted");
+        }
         if (convert_ret != ESP_OK && generation_matches) {
             taskENTER_CRITICAL(&s_renderer.lock);
             s_renderer.conversion_failures++;
@@ -1700,20 +2017,23 @@ static void call_video_converter_task(void *arg)
                      esp_err_to_name(convert_ret));
         }
         call_video_return_decoded_slot(index);
-        /*
-         * Large-motion frames can keep both the decoder helper and converter
-         * runnable continuously. Reserve a deterministic CPU1 window for
-         * LVGL and the idle watchdog after each expensive frame conversion.
-         */
-        vTaskDelay(pdMS_TO_TICKS(1));
+        /* Conversion and LVGL intentionally share CPU1 and the same priority.
+         * Yield to a ready UI owner without adding one mandatory tick to every
+         * frame when the converter is the only runnable peer. */
+        taskYIELD();
     }
 
     call_video_drain_decoded_ready_queue();
-    taskENTER_CRITICAL(&s_renderer.lock);
-    s_renderer.convert_task = NULL;
-    taskEXIT_CRITICAL(&s_renderer.lock);
     xSemaphoreGive(s_renderer.convert_stop_done);
-    vTaskDeleteWithCaps(NULL);
+    /*
+     * Tasks created with xTaskCreate*WithCaps must be deleted by their owner.
+     * Self deletion creates a temporary cleanup task in ESP-IDF and can return
+     * the stop semaphore before the stack is actually freed. The H264 owner
+     * needs that contiguous memory immediately when restoring the full uplink
+     * encoder, so suspend here and let the parent delete this task explicitly.
+     */
+    vTaskSuspend(NULL);
+    abort();
 }
 
 static void call_video_renderer_task(void *arg)
@@ -1728,6 +2048,8 @@ static void call_video_renderer_task(void *arg)
     int64_t last_stall_log_at_us = 0;
     uint32_t last_trace_generation = UINT32_MAX;
     uint32_t decoder_generation = UINT32_MAX;
+    uint32_t idle_window_countdown =
+        CALL_VIDEO_DECODE_IDLE_WINDOW_EVERY_FRAMES;
     const video_frame_converter_config_t converter_config = {
         .output_width = CALL_VIDEO_RENDER_WIDTH,
         .output_height = CALL_VIDEO_RENDER_HEIGHT,
@@ -1794,7 +2116,7 @@ static void call_video_renderer_task(void *arg)
     ESP_LOGI(TAG,
              "H264 downlink renderer ready: decoder=%s conversion=pipelined-%s output=%ux%u "
              "source_crop=%ux%u+%u+%u orientation=panel-owned input_slots=%u input_cap=%u decoded_slots=%u "
-             "decoded_cap=%u presentation=latest-%u priorities=decode:%u helper:%u convert:%u "
+             "decoded_cap=%u presentation=latest-%u priorities=decode:%u ingress:%u helper:%u convert:%u "
              "cores=decode:%d helper:%d convert:%d ui:%d camera:%d",
              CALL_VIDEO_H264_DECODER_MODE,
              video_frame_converter_mode_name(video_frame_converter_get_mode(converter)),
@@ -1810,6 +2132,7 @@ static void call_video_renderer_task(void *arg)
              CALL_VIDEO_DECODED_SLOT_CAPACITY,
              CALL_VIDEO_OUTPUT_SLOT_COUNT,
              CALL_VIDEO_TASK_PRIORITY,
+             CALL_VIDEO_INGRESS_TASK_PRIORITY,
              CALL_VIDEO_H264_HELPER_TASK_PRIORITY,
              CALL_VIDEO_CONVERT_TASK_PRIORITY,
              APP_TASK_CORE_VIDEO_DECODE,
@@ -1850,29 +2173,52 @@ static void call_video_renderer_task(void *arg)
             last_input_received_at_us = 0;
             last_decode_completed_at_us = 0;
             last_stall_log_at_us = 0;
+            idle_window_countdown =
+                CALL_VIDEO_DECODE_IDLE_WINDOW_EVERY_FRAMES;
         }
 
         int64_t dequeued_at_us = esp_timer_get_time();
         uint32_t queue_age_us = slot->queued_at_us > 0 && dequeued_at_us > slot->queued_at_us ?
                                     (uint32_t)(dequeued_at_us - slot->queued_at_us) : 0U;
         bool latency_recovery_armed = false;
+        uint32_t input_queue_depth = call_video_input_queue_depth();
+        bool adaptive_playout_active = call_video_adaptive_playout_is_active(dequeued_at_us);
         taskENTER_CRITICAL(&s_renderer.lock);
         s_renderer.input_queue_age_samples++;
         s_renderer.input_queue_age_us += queue_age_us;
         if (queue_age_us > s_renderer.input_queue_age_max_us) {
             s_renderer.input_queue_age_max_us = queue_age_us;
         }
-        if (queue_age_us >= CALL_VIDEO_LATENCY_RECOVERY_US &&
+        /* Queue age means stale glass-to-glass latency only on the normal
+         * latest-frame path. During adaptive weak-network playout the same age
+         * is intentional reservoir inventory from a TGTRP recovery burst.
+         * Outside that mode, require sustained depth as well as age: a dynamic
+         * frame burst can briefly make one dequeued frame old while the decoder
+         * still catches up in the next window. */
+        if (!adaptive_playout_active &&
+            queue_age_us >= CALL_VIDEO_LATENCY_RECOVERY_US &&
+            input_queue_depth >= CALL_VIDEO_LATENCY_RECOVERY_DEPTH) {
+            if (s_renderer.latency_pressure_samples < UINT8_MAX) {
+                s_renderer.latency_pressure_samples++;
+            }
+        } else if (adaptive_playout_active ||
+                   queue_age_us < CALL_VIDEO_LATENCY_RECOVERY_CLEAR_US ||
+                   input_queue_depth < CALL_VIDEO_LATENCY_RECOVERY_DEPTH / 2U) {
+            s_renderer.latency_pressure_samples = 0U;
+        }
+        if (s_renderer.latency_pressure_samples >= CALL_VIDEO_LATENCY_RECOVERY_SAMPLES &&
             !s_renderer.latency_recovery_pending) {
             s_renderer.latency_recovery_pending = true;
+            s_renderer.latency_pressure_samples = 0U;
             latency_recovery_armed = true;
         }
         taskEXIT_CRITICAL(&s_renderer.lock);
         if (latency_recovery_armed) {
             ESP_LOGW(TAG,
-                     "H264 latency recovery armed: queue_age=%luus q=%lu; waiting for fresh IDR",
+                     "H264 latency recovery armed: queue_age=%luus q=%lu sustained=%u; waiting for fresh IDR",
                      (unsigned long)queue_age_us,
-                     (unsigned long)uxQueueMessagesWaiting(s_renderer.ready_slots));
+                     (unsigned long)input_queue_depth,
+                     CALL_VIDEO_LATENCY_RECOVERY_SAMPLES);
         }
 
         bool dma_escrow_lent = false;
@@ -1901,9 +2247,16 @@ static void call_video_renderer_task(void *arg)
                     decoder_generation = slot->generation;
                 }
             }
+            /* Decoder creation is the only operation that borrows the DMA
+             * escrow. Restore it and record the memory snapshot once per real
+             * bootstrap/restart, never once per decoded frame. */
+            call_video_decoder_dma_guard_end(dma_escrow_lent, decode_ret, "H264");
         }
         int64_t access_unit_started_us = esp_timer_get_time();
         slot->trace_decode_started_at_us = access_unit_started_us;
+        call_video_log_memory_once(slot->generation,
+                                   CALL_VIDEO_MEMORY_TRACE_DECODE_BEGIN,
+                                   "decode-begin");
         taskENTER_CRITICAL(&s_renderer.lock);
         s_renderer.decode_in_progress = true;
         s_renderer.decode_started_at_us = access_unit_started_us;
@@ -1969,8 +2322,7 @@ static void call_video_renderer_task(void *arg)
             (last_stall_log_at_us == 0 ||
              access_unit_finished_us - last_stall_log_at_us >=
                  CALL_VIDEO_STALL_LOG_INTERVAL_US)) {
-            uint32_t input_queue_depth = s_renderer.ready_slots != NULL ?
-                (uint32_t)uxQueueMessagesWaiting(s_renderer.ready_slots) : 0U;
+            uint32_t input_queue_depth = call_video_input_queue_depth();
             uint32_t conversion_queue_depth = s_renderer.decoded_ready_slots != NULL ?
                 (uint32_t)uxQueueMessagesWaiting(s_renderer.decoded_ready_slots) : 0U;
             ESP_LOGW(TAG,
@@ -1988,14 +2340,30 @@ static void call_video_renderer_task(void *arg)
                      (unsigned)uxTaskGetStackHighWaterMark(NULL));
             last_stall_log_at_us = access_unit_finished_us;
         }
-        call_video_decoder_dma_guard_end(dma_escrow_lent, decode_ret, "H264");
         call_video_return_slot(index);
-        if (s_renderer.ready_slots != NULL &&
-            uxQueueMessagesWaiting(s_renderer.ready_slots) > 0U) {
-            /* At a 1 kHz tick, a one-tick delay can expire almost immediately
-             * at the tick boundary. Two milliseconds guarantee an IDLE0
-             * scheduling window while preserving normal no-backlog latency. */
-            vTaskDelay(pdMS_TO_TICKS(CALL_VIDEO_DECODE_BACKLOG_YIELD_MS));
+        /* The RTC task runs above this worker and already preempts it whenever
+         * compressed input arrives. Sleeping after every access unit therefore
+         * adds pure latency when high-motion frames consume the full 66.7 ms
+         * budget. Only reserve an explicit scheduling window after the input
+         * backlog has been drained; while backlog exists, continue decoding so
+         * the queue cannot accumulate one tick per frame. */
+        uint32_t queued_after_decode = call_video_input_queue_depth();
+        if (idle_window_countdown > 0U) {
+            idle_window_countdown--;
+        }
+        if (idle_window_countdown == 0U) {
+            /* IDLE0 must run before the five-second TWDT deadline even while
+             * continuous motion keeps compressed input queued. Reserve a short
+             * window every two seconds; a 20 ms window every second consumed
+             * the entire remaining budget when TinyH264 needed about 66 ms per
+             * high-motion access unit. */
+            vTaskDelay(pdMS_TO_TICKS(CALL_VIDEO_DECODE_IDLE_WINDOW_MS));
+            idle_window_countdown =
+                CALL_VIDEO_DECODE_IDLE_WINDOW_EVERY_FRAMES;
+        } else if (queued_after_decode == 0U) {
+            uint32_t scheduling_window_ms =
+                CALL_VIDEO_DECODE_SCHEDULING_WINDOW_MS;
+            vTaskDelay(pdMS_TO_TICKS(scheduling_window_ms));
         }
         if (generation_stale) {
             if (decoder != NULL) {
@@ -2026,18 +2394,36 @@ static void call_video_renderer_task(void *arg)
     }
 
 task_exit:
+    if (!heap_caps_check_integrity_all(true)) {
+        ESP_LOGE(TAG, "heap integrity failed before H264 downlink teardown");
+    }
     call_video_decoder_destroy(&decoder);
     parameters = NULL;
+    if (!heap_caps_check_integrity_all(true)) {
+        ESP_LOGE(TAG, "heap integrity failed after H264 decoder teardown");
+    }
     call_video_drain_decoded_ready_queue();
-    if (s_renderer.convert_task != NULL) {
-        (void)xSemaphoreTake(s_renderer.convert_stop_done,
-                             pdMS_TO_TICKS(CALL_VIDEO_STOP_TIMEOUT_MS));
+    TaskHandle_t convert_task = NULL;
+    taskENTER_CRITICAL(&s_renderer.lock);
+    convert_task = s_renderer.convert_task;
+    taskEXIT_CRITICAL(&s_renderer.lock);
+    if (convert_task != NULL) {
+        if (xSemaphoreTake(s_renderer.convert_stop_done,
+                           pdMS_TO_TICKS(CALL_VIDEO_STOP_TIMEOUT_MS)) == pdTRUE) {
+            vTaskDeleteWithCaps(convert_task);
+            taskENTER_CRITICAL(&s_renderer.lock);
+            if (s_renderer.convert_task == convert_task) {
+                s_renderer.convert_task = NULL;
+            }
+            taskEXIT_CRITICAL(&s_renderer.lock);
+        } else {
+            ESP_LOGE(TAG, "H264 downlink converter stop timed out");
+        }
     }
     video_frame_converter_destroy(converter);
     converter = NULL;
     taskENTER_CRITICAL(&s_renderer.lock);
     s_renderer.running = false;
-    s_renderer.task = NULL;
     s_renderer.decode_in_progress = false;
     s_renderer.decode_started_at_us = 0;
     s_renderer.decode_generation = 0U;
@@ -2046,7 +2432,8 @@ task_exit:
     s_renderer.decode_key_frame = false;
     taskEXIT_CRITICAL(&s_renderer.lock);
     xSemaphoreGive(s_renderer.stop_done);
-    vTaskDeleteWithCaps(NULL);
+    vTaskSuspend(NULL);
+    abort();
 }
 
 typedef struct {
@@ -2114,8 +2501,7 @@ static void call_video_log_mjpeg_stats_if_due(call_video_mjpeg_log_window_t *win
         (uint32_t)((bytes_delta * 8ULL * 1000ULL) / (uint64_t)elapsed_us);
     uint32_t average_decode_us =
         process_delta > 0U ? (uint32_t)(decode_time_delta / process_delta) : 0U;
-    uint32_t queue_depth = s_renderer.ready_slots != NULL ?
-                           (uint32_t)uxQueueMessagesWaiting(s_renderer.ready_slots) : 0U;
+    uint32_t queue_depth = call_video_input_queue_depth();
 
     ESP_LOGI(TAG,
              "MJPEG downlink stats: src=%ux%u rx=%u.%ufps/%ukbps "
@@ -2567,10 +2953,10 @@ task_exit:
     decode_buffer = NULL;
     taskENTER_CRITICAL(&s_renderer.lock);
     s_renderer.running = false;
-    s_renderer.task = NULL;
     taskEXIT_CRITICAL(&s_renderer.lock);
     xSemaphoreGive(s_renderer.stop_done);
-    vTaskDeleteWithCaps(NULL);
+    vTaskSuspend(NULL);
+    abort();
 }
 
 static esp_err_t call_video_prepare_output_pool(void)
@@ -2611,6 +2997,9 @@ static void call_video_reset_session_queues(bool populate)
 {
     if (s_renderer.free_slots != NULL) {
         (void)xQueueReset(s_renderer.free_slots);
+    }
+    if (s_renderer.ingress_slots != NULL) {
+        (void)xQueueReset(s_renderer.ingress_slots);
     }
     if (s_renderer.ready_slots != NULL) {
         (void)xQueueReset(s_renderer.ready_slots);
@@ -2674,6 +3063,11 @@ static esp_err_t call_video_prepare_persistent_resources(void)
                                                      sizeof(uint8_t),
                                                      APP_QUEUE_CAPS_CONTROL);
     }
+    if (s_renderer.ingress_slots == NULL) {
+        s_renderer.ingress_slots = xQueueCreateWithCaps(CALL_VIDEO_INPUT_SLOT_COUNT,
+                                                        sizeof(uint8_t),
+                                                        APP_QUEUE_CAPS_CONTROL);
+    }
     if (s_renderer.ready_slots == NULL) {
         s_renderer.ready_slots = xQueueCreateWithCaps(CALL_VIDEO_INPUT_SLOT_COUNT,
                                                       sizeof(uint8_t),
@@ -2695,14 +3089,19 @@ static esp_err_t call_video_prepare_persistent_resources(void)
     if (s_renderer.stop_done == NULL) {
         s_renderer.stop_done = xSemaphoreCreateBinaryWithCaps(APP_SYNC_CAPS_CONTROL);
     }
+    if (s_renderer.ingress_stop_done == NULL) {
+        s_renderer.ingress_stop_done = xSemaphoreCreateBinaryWithCaps(APP_SYNC_CAPS_CONTROL);
+    }
     if (s_renderer.convert_stop_done == NULL) {
         s_renderer.convert_stop_done = xSemaphoreCreateBinaryWithCaps(APP_SYNC_CAPS_CONTROL);
     }
-    if (s_renderer.free_slots == NULL || s_renderer.ready_slots == NULL ||
+    if (s_renderer.free_slots == NULL || s_renderer.ingress_slots == NULL ||
+        s_renderer.ready_slots == NULL ||
         s_renderer.decoded_free_slots == NULL || s_renderer.decoded_ready_slots == NULL ||
         s_renderer.frame_mutex == NULL || s_renderer.submit_mutex == NULL ||
         s_renderer.start_done == NULL ||
-        s_renderer.stop_done == NULL || s_renderer.convert_stop_done == NULL) {
+        s_renderer.stop_done == NULL || s_renderer.ingress_stop_done == NULL ||
+        s_renderer.convert_stop_done == NULL) {
         return ESP_ERR_NO_MEM;
     }
 
@@ -2816,7 +3215,7 @@ esp_err_t call_video_renderer_start_for_codec(call_video_codec_t codec)
         taskEXIT_CRITICAL(&s_renderer.lock);
         return same_codec ? ESP_OK : ESP_ERR_INVALID_STATE;
     }
-    if (s_renderer.task != NULL) {
+    if (s_renderer.task != NULL || s_renderer.ingress_task != NULL) {
         taskEXIT_CRITICAL(&s_renderer.lock);
         return ESP_ERR_INVALID_STATE;
     }
@@ -2832,6 +3231,7 @@ esp_err_t call_video_renderer_start_for_codec(call_video_codec_t codec)
     s_renderer.decode_key_frame = false;
     s_renderer.waiting_for_key_frame = codec == CALL_VIDEO_CODEC_H264;
     s_renderer.latency_recovery_pending = false;
+    s_renderer.latency_pressure_samples = 0U;
     call_video_reset_h264_stream_state_locked();
     s_renderer.frame_ready = false;
     s_renderer.session_active = false;
@@ -2859,6 +3259,16 @@ esp_err_t call_video_renderer_start_for_codec(call_video_codec_t codec)
     s_renderer.presented_pts = 0;
     s_renderer.last_received_at_us = 0;
     s_renderer.receive_gap_window_max_us = 0;
+    s_renderer.adaptive_playout_generation = 0U;
+    s_renderer.adaptive_playout_generation_seen = 0U;
+    s_renderer.adaptive_playout_depth = CALL_VIDEO_ADAPTIVE_PLAYOUT_DEPTH;
+    s_renderer.adaptive_gap_samples = 0U;
+    s_renderer.adaptive_gap_confirm_until_us = 0;
+    s_renderer.adaptive_playout_activated_at_us = 0;
+    s_renderer.adaptive_playout_until_us = 0;
+    s_renderer.adaptive_next_present_at_us = 0;
+    s_renderer.adaptive_playout_interval_us = CALL_VIDEO_ADAPTIVE_PLAYOUT_INTERVAL_US;
+    s_renderer.adaptive_playout_started = false;
     s_renderer.last_presented_at_us = 0;
     s_renderer.present_gap_window_max_us = 0;
     s_renderer.decode_process_calls = 0;
@@ -2890,12 +3300,14 @@ esp_err_t call_video_renderer_start_for_codec(call_video_codec_t codec)
     s_renderer.decoder_restarts = 0;
     s_renderer.discontinuities = 0;
     s_renderer.input_overflows = 0;
+    s_renderer.ingress_task = NULL;
     s_renderer.convert_task = NULL;
     taskEXIT_CRITICAL(&s_renderer.lock);
 
     call_video_reset_session_queues(true);
     call_video_drain_binary_semaphore(s_renderer.start_done);
     call_video_drain_binary_semaphore(s_renderer.stop_done);
+    call_video_drain_binary_semaphore(s_renderer.ingress_stop_done);
     call_video_drain_binary_semaphore(s_renderer.convert_stop_done);
     call_video_reset_output_pool_for_start();
 
@@ -2908,9 +3320,14 @@ esp_err_t call_video_renderer_start_for_codec(call_video_codec_t codec)
     uint32_t task_stack_size = codec == CALL_VIDEO_CODEC_MJPEG ?
                                CALL_VIDEO_MJPEG_TASK_STACK_SIZE :
                                CALL_VIDEO_TASK_STACK_SIZE;
+    uint32_t task_stack_caps = codec == CALL_VIDEO_CODEC_H264 ?
+                               APP_TASK_STACK_CAPS_BACKGROUND :
+                               APP_TASK_STACK_CAPS_REALTIME;
 
-    /* Codec state and task stacks use internal RAM; compressed, decoded, and
-     * RGB frame payloads remain in the preallocated PSRAM pools. */
+    /* The H264 worker is a long-lived owner with a large stack. Keep it in
+     * PSRAM so RTC, Wi-Fi and codec DMA retain enough contiguous internal RAM;
+     * compressed, decoded and RGB frame payloads are preallocated in PSRAM as
+     * well. MJPEG keeps the smaller real-time stack in internal memory. */
     BaseType_t task_ret = xTaskCreatePinnedToCoreWithCaps(task_entry,
                                                           task_name,
                                                           task_stack_size,
@@ -2918,7 +3335,7 @@ esp_err_t call_video_renderer_start_for_codec(call_video_codec_t codec)
                                                           CALL_VIDEO_TASK_PRIORITY,
                                                           &s_renderer.task,
                                                           APP_TASK_CORE_VIDEO_DECODE,
-                                                          APP_TASK_STACK_CAPS_REALTIME);
+                                                          task_stack_caps);
     if (task_ret != pdPASS) {
         call_video_reset_session_queues(false);
         taskENTER_CRITICAL(&s_renderer.lock);
@@ -2938,11 +3355,42 @@ esp_err_t call_video_renderer_start_for_codec(call_video_codec_t codec)
     ret = s_renderer.start_result;
     taskEXIT_CRITICAL(&s_renderer.lock);
     if (ret != ESP_OK) {
-        (void)xSemaphoreTake(s_renderer.stop_done,
-                             pdMS_TO_TICKS(CALL_VIDEO_STOP_TIMEOUT_MS));
+        if (xSemaphoreTake(s_renderer.stop_done,
+                           pdMS_TO_TICKS(CALL_VIDEO_STOP_TIMEOUT_MS)) == pdTRUE) {
+            TaskHandle_t failed_task = NULL;
+            taskENTER_CRITICAL(&s_renderer.lock);
+            failed_task = s_renderer.task;
+            taskEXIT_CRITICAL(&s_renderer.lock);
+            if (failed_task != NULL) {
+                vTaskDeleteWithCaps(failed_task);
+                taskENTER_CRITICAL(&s_renderer.lock);
+                if (s_renderer.task == failed_task) {
+                    s_renderer.task = NULL;
+                }
+                taskEXIT_CRITICAL(&s_renderer.lock);
+            }
+        }
         call_video_reset_session_queues(false);
+        return ret;
     }
-    return ret;
+
+    BaseType_t ingress_task_ret = xTaskCreatePinnedToCoreWithCaps(
+        call_video_ingress_task,
+        "call_video_in",
+        CALL_VIDEO_INGRESS_TASK_STACK_SIZE,
+        NULL,
+        CALL_VIDEO_INGRESS_TASK_PRIORITY,
+        &s_renderer.ingress_task,
+        APP_TASK_CORE_VIDEO_DECODE,
+        APP_TASK_STACK_CAPS_BACKGROUND);
+    if (ingress_task_ret != pdPASS) {
+        taskENTER_CRITICAL(&s_renderer.lock);
+        s_renderer.ingress_task = NULL;
+        taskEXIT_CRITICAL(&s_renderer.lock);
+        (void)call_video_renderer_stop();
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }
 
 esp_err_t call_video_renderer_start(void)
@@ -2953,12 +3401,14 @@ esp_err_t call_video_renderer_start(void)
 esp_err_t call_video_renderer_stop(void)
 {
     TaskHandle_t task = NULL;
+    TaskHandle_t ingress_task = NULL;
     bool submit_locked = false;
     bool frame_locked = false;
     call_video_codec_t codec = CALL_VIDEO_CODEC_H264;
 
     taskENTER_CRITICAL(&s_renderer.lock);
     task = s_renderer.task;
+    ingress_task = s_renderer.ingress_task;
     codec = s_renderer.codec;
     s_renderer.stop_requested = true;
     s_renderer.generation++;
@@ -2977,22 +3427,52 @@ esp_err_t call_video_renderer_stop(void)
             return ESP_ERR_TIMEOUT;
         }
     }
+    if (ingress_task != NULL) {
+        if (xSemaphoreTake(s_renderer.ingress_stop_done,
+                           pdMS_TO_TICKS(CALL_VIDEO_STOP_TIMEOUT_MS)) != pdTRUE) {
+            ESP_LOGE(TAG, "%s downlink ingress stop timed out",
+                     call_video_codec_name(codec));
+            if (submit_locked) {
+                xSemaphoreGive(s_renderer.submit_mutex);
+            }
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDeleteWithCaps(ingress_task);
+        taskENTER_CRITICAL(&s_renderer.lock);
+        if (s_renderer.ingress_task == ingress_task) {
+            s_renderer.ingress_task = NULL;
+        }
+        taskEXIT_CRITICAL(&s_renderer.lock);
+    }
+    call_video_drain_ingress_queue();
     call_video_drain_ready_queue();
 
-    if (task != NULL && xSemaphoreTake(s_renderer.stop_done,
-                                       pdMS_TO_TICKS(CALL_VIDEO_STOP_TIMEOUT_MS)) != pdTRUE) {
-        ESP_LOGE(TAG,
-                 "%s downlink renderer stop timed out",
-                 call_video_codec_name(codec));
-        if (!call_video_renderer_detect_decode_fault(esp_timer_get_time())) {
-            taskENTER_CRITICAL(&s_renderer.lock);
-            s_renderer.faulted = true;
-            taskEXIT_CRITICAL(&s_renderer.lock);
+    if (task != NULL) {
+        if (xSemaphoreTake(s_renderer.stop_done,
+                           pdMS_TO_TICKS(CALL_VIDEO_STOP_TIMEOUT_MS)) != pdTRUE) {
+            ESP_LOGE(TAG,
+                     "%s downlink renderer stop timed out",
+                     call_video_codec_name(codec));
+            if (!call_video_renderer_detect_decode_fault(esp_timer_get_time())) {
+                taskENTER_CRITICAL(&s_renderer.lock);
+                s_renderer.faulted = true;
+                taskEXIT_CRITICAL(&s_renderer.lock);
+            }
+            if (submit_locked) {
+                xSemaphoreGive(s_renderer.submit_mutex);
+            }
+            return ESP_ERR_TIMEOUT;
         }
-        if (submit_locked) {
-            xSemaphoreGive(s_renderer.submit_mutex);
+
+        /* The worker suspended after releasing all codec/converter resources.
+         * Delete it from this owner context so WithCaps stack memory is freed
+         * synchronously before the caller rebuilds another media profile. */
+        vTaskDeleteWithCaps(task);
+        taskENTER_CRITICAL(&s_renderer.lock);
+        if (s_renderer.task == task) {
+            s_renderer.task = NULL;
         }
-        return ESP_ERR_TIMEOUT;
+        taskEXIT_CRITICAL(&s_renderer.lock);
     }
     if (s_renderer.frame_mutex != NULL) {
         frame_locked = xSemaphoreTake(s_renderer.frame_mutex,
@@ -3042,6 +3522,7 @@ void call_video_renderer_flush(void)
     s_renderer.generation++;
     s_renderer.waiting_for_key_frame = codec == CALL_VIDEO_CODEC_H264;
     s_renderer.latency_recovery_pending = false;
+    s_renderer.latency_pressure_samples = 0U;
     call_video_reset_h264_stream_state_locked();
     s_renderer.frame_ready = false;
     s_renderer.session_active = false;
@@ -3052,14 +3533,28 @@ void call_video_renderer_flush(void)
     s_renderer.presented_pts = 0;
     s_renderer.last_received_at_us = 0;
     s_renderer.receive_gap_window_max_us = 0;
+    s_renderer.adaptive_playout_generation++;
+    if (s_renderer.adaptive_playout_generation == 0U) {
+        s_renderer.adaptive_playout_generation = 1U;
+    }
+    s_renderer.adaptive_playout_until_us = 0;
+    s_renderer.adaptive_playout_activated_at_us = 0;
+    s_renderer.adaptive_gap_samples = 0U;
+    s_renderer.adaptive_gap_confirm_until_us = 0;
     s_renderer.last_presented_at_us = 0;
     s_renderer.present_gap_window_max_us = 0;
     taskEXIT_CRITICAL(&s_renderer.lock);
     if (s_renderer.frame_mutex != NULL &&
         xSemaphoreTake(s_renderer.frame_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
         call_video_output_release_ready_locked();
+        s_renderer.adaptive_playout_generation_seen =
+            s_renderer.adaptive_playout_generation;
+        s_renderer.adaptive_next_present_at_us = 0;
+        s_renderer.adaptive_playout_interval_us = CALL_VIDEO_ADAPTIVE_PLAYOUT_INTERVAL_US;
+        s_renderer.adaptive_playout_started = false;
         xSemaphoreGive(s_renderer.frame_mutex);
     }
+    call_video_drain_ingress_queue();
     call_video_drain_ready_queue();
     call_video_drain_decoded_ready_queue();
     if (s_renderer.submit_mutex != NULL) {
@@ -3203,10 +3698,11 @@ esp_err_t call_video_renderer_submit_h264(const uint8_t *data,
     slot->trace_frame_index = trace_frame_index;
     slot->trace_received_at_us = trace_received_at_us;
     slot->trace_decode_started_at_us = 0;
-    if (xQueueSend(s_renderer.ready_slots, &index, 0) != pdTRUE) {
+    if (xQueueSend(s_renderer.ingress_slots, &index, 0) != pdTRUE) {
         call_video_return_slot(index);
         taskENTER_CRITICAL(&s_renderer.lock);
         s_renderer.dropped_frames++;
+        s_renderer.input_overflows++;
         s_renderer.latency_recovery_pending = true;
         taskEXIT_CRITICAL(&s_renderer.lock);
         xSemaphoreGive(s_renderer.submit_mutex);
@@ -3288,7 +3784,7 @@ esp_err_t call_video_renderer_submit_mjpeg(const uint8_t *data,
     slot->pts = pts;
     slot->generation = generation;
     slot->queued_at_us = esp_timer_get_time();
-    if (xQueueSend(s_renderer.ready_slots, &index, 0) != pdTRUE) {
+    if (xQueueSend(s_renderer.ingress_slots, &index, 0) != pdTRUE) {
         call_video_return_slot(index);
         taskENTER_CRITICAL(&s_renderer.lock);
         s_renderer.dropped_frames++;
@@ -3321,10 +3817,95 @@ esp_err_t call_video_renderer_present_next_rgb565(const uint16_t **pixels,
         return ESP_ERR_TIMEOUT;
     }
     uint8_t ready_index = CALL_VIDEO_OUTPUT_SLOT_INVALID;
-    if (!call_video_output_pop_latest_locked(&ready_index) ||
-        ready_index >= CALL_VIDEO_OUTPUT_SLOT_COUNT) {
+    const int64_t now_us = esp_timer_get_time();
+    uint32_t adaptive_generation = 0U;
+    uint8_t adaptive_depth = CALL_VIDEO_ADAPTIVE_PLAYOUT_DEPTH;
+    int64_t adaptive_activated_at_us = 0;
+    int64_t adaptive_until_us = 0;
+    taskENTER_CRITICAL(&s_renderer.lock);
+    adaptive_generation = s_renderer.adaptive_playout_generation;
+    adaptive_depth = s_renderer.adaptive_playout_depth;
+    adaptive_activated_at_us = s_renderer.adaptive_playout_activated_at_us;
+    adaptive_until_us = s_renderer.adaptive_playout_until_us;
+    taskEXIT_CRITICAL(&s_renderer.lock);
+
+    /*
+     * Normal calls remain a latest-frame, minimum-latency path. A measured
+     * receive outage switches temporarily to an ordered PSRAM reservoir paced
+     * at the source rate. Its depth is derived from the measured access-unit
+     * gap, so a retransmit burst becomes playout inventory instead of being
+     * rendered back-to-back. This is a presentation policy only: it does not
+     * hide decode/transport errors or keep a stale weak-network mode after the
+     * input cadence has recovered.
+     */
+    const bool adaptive_playout = adaptive_until_us > now_us;
+    if (adaptive_generation != s_renderer.adaptive_playout_generation_seen) {
+        s_renderer.adaptive_playout_generation_seen = adaptive_generation;
+        /* When weak-network mode is detected after video is already visible,
+         * keep presenting from the recovery burst and let the waterline pace
+         * build reserve progressively. Waiting for a full target depth here
+         * adds avoidable startup freeze on top of the outage already seen.
+         * A stream with no presented frame still follows the prime path. */
+        s_renderer.adaptive_playout_started =
+            s_renderer.presented_output_slot < CALL_VIDEO_OUTPUT_SLOT_COUNT;
+        s_renderer.adaptive_next_present_at_us =
+            s_renderer.adaptive_playout_started ? now_us : 0;
+        s_renderer.adaptive_playout_interval_us = CALL_VIDEO_ADAPTIVE_PLAYOUT_INTERVAL_US;
+    }
+    if (!adaptive_playout) {
+        s_renderer.adaptive_playout_started = false;
+        s_renderer.adaptive_next_present_at_us = 0;
+        s_renderer.adaptive_playout_interval_us = CALL_VIDEO_ADAPTIVE_PLAYOUT_INTERVAL_US;
+    } else {
+        if (!s_renderer.adaptive_playout_started) {
+            if (s_renderer.ready_output_count < adaptive_depth) {
+                xSemaphoreGive(s_renderer.frame_mutex);
+                return ESP_ERR_NOT_FOUND;
+            }
+            s_renderer.adaptive_playout_started = true;
+            s_renderer.adaptive_next_present_at_us = now_us;
+            s_renderer.adaptive_playout_interval_us =
+                CALL_VIDEO_ADAPTIVE_PLAYOUT_INTERVAL_US;
+            ESP_LOGI(TAG,
+                     "adaptive video playout primed: depth=%u delay=%lums",
+                     (unsigned)s_renderer.ready_output_count,
+                     (unsigned long)(call_video_elapsed_us(adaptive_activated_at_us,
+                                                           now_us) /
+                                     1000U));
+        }
+        if (now_us < s_renderer.adaptive_next_present_at_us) {
+            xSemaphoreGive(s_renderer.frame_mutex);
+            return ESP_ERR_NOT_FOUND;
+        }
+    }
+
+    bool frame_available = adaptive_playout ?
+        call_video_output_pop_ready_locked(&ready_index) :
+        call_video_output_pop_latest_locked(&ready_index);
+    if (!frame_available || ready_index >= CALL_VIDEO_OUTPUT_SLOT_COUNT) {
         xSemaphoreGive(s_renderer.frame_mutex);
         return ESP_ERR_NOT_FOUND;
+    }
+    if (adaptive_playout) {
+        uint32_t next_interval_us = call_video_adaptive_playout_interval(
+            s_renderer.ready_output_count,
+            adaptive_depth);
+        s_renderer.adaptive_playout_interval_us = next_interval_us;
+        /* Advance a stable deadline instead of restarting the interval after
+         * each blocking LCD transfer. Restart only after a real outage so the
+         * timer quantization and the 30 ms panel DMA do not erode the source
+         * cadence. When the reservoir falls below its watermarks, the
+         * source-derived refill/critical cadence trades a small, temporary
+         * frame-rate reduction for avoiding a much longer empty-queue freeze. */
+        if (s_renderer.adaptive_next_present_at_us <= 0 ||
+            now_us - s_renderer.adaptive_next_present_at_us >
+                (int64_t)(next_interval_us * 2U)) {
+            s_renderer.adaptive_next_present_at_us =
+                now_us + next_interval_us;
+        } else {
+            s_renderer.adaptive_next_present_at_us +=
+                next_interval_us;
+        }
     }
 
     call_video_output_slot_t *ready = &s_renderer.output_slots[ready_index];
@@ -3366,7 +3947,9 @@ esp_err_t call_video_renderer_present_next_rgb565(const uint16_t **pixels,
     }
     uint32_t handoff_elapsed_us = (uint32_t)(esp_timer_get_time() - handoff_started_us);
     int64_t presented_at_us = esp_timer_get_time();
+    uint32_t presented_generation = 0U;
     taskENTER_CRITICAL(&s_renderer.lock);
+    presented_generation = s_renderer.generation;
     s_renderer.presented_frames++;
     if (s_renderer.last_presented_at_us > 0 &&
         presented_at_us > s_renderer.last_presented_at_us) {
@@ -3382,6 +3965,9 @@ esp_err_t call_video_renderer_present_next_rgb565(const uint16_t **pixels,
         s_renderer.present_copy_max_us = handoff_elapsed_us;
     }
     taskEXIT_CRITICAL(&s_renderer.lock);
+    call_video_log_memory_once(presented_generation,
+                               CALL_VIDEO_MEMORY_TRACE_PRESENT,
+                               "presented");
     xSemaphoreGive(s_renderer.frame_mutex);
     return ESP_OK;
 }
@@ -3439,8 +4025,7 @@ void call_video_renderer_get_stats(call_video_renderer_stats_t *stats)
     stats->input_overflows = s_renderer.input_overflows;
     stats->latest_sequence = s_renderer.latest_sequence;
     taskEXIT_CRITICAL(&s_renderer.lock);
-    stats->queue_depth = s_renderer.ready_slots != NULL ?
-                         (uint32_t)uxQueueMessagesWaiting(s_renderer.ready_slots) : 0U;
+    stats->queue_depth = call_video_input_queue_depth();
     stats->conversion_queue_depth = s_renderer.decoded_ready_slots != NULL ?
                                     (uint32_t)uxQueueMessagesWaiting(
                                         s_renderer.decoded_ready_slots) : 0U;

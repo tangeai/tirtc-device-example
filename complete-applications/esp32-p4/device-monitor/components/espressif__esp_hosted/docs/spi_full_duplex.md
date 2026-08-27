@@ -13,7 +13,7 @@ If you wish to skip the theory, you can refer the [Quick Start Guide](#1-quick-s
 
 2. [Introduction](#2-introduction)
 
-3. [High Level Design and Implementation](#3-high-level-design-and-implementation) || [3.1 Number of Pins Required](#31-number-of-pins-required) || [3.2 SPI Full Duplex Mode Implementation](#32-spi-full-duplex-mode-implementation) || [3.3 Code Reference](#35-code-reference)
+3. [High Level Design and Implementation](#3-high-level-design-and-implementation) || [3.1 Number of Pins Required](#31-number-of-pins-required) || [3.2 SPI Full Duplex Mode Implementation](#32-spi-full-duplex-mode-implementation) || [3.3 Code Reference](#33-code-reference)
 
 4. [Hardware Considerations](#4-hardware-considerations) || [4.1 General Considerations](#41-general-considerations) || [4.2 Jumper Wires](#42-jumper-wires) || [4.3 PCB Design](#43-pcb-design) || [4.4 Advanced Considerations](#44-advanced-considerations)
 

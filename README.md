@@ -65,7 +65,7 @@ git checkout esp32-s3-device-monitor-v1.9.6
 | 平台 | 应用 | 版本 | TiRTC SDK | 来源版本 | 公开 Release |
 | --- | --- | --- | --- | --- | --- |
 | ESP32-S3 | [Device Monitor](complete-applications/esp32-s3/device-monitor/README.md) | `1.9.6` | `2.3.0 mini` | Tag `v1.9.6` / commit `cdb5d7b` | [`esp32-s3-device-monitor-v1.9.6`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.9.6) |
-| ESP32-P4 | [Device App](complete-applications/esp32-p4/device-monitor/README.md) | `1.3.2` | `2.3.0` 定制兼容快照 | Tag `esp32-p4-device-app-v1.3.2` / commit `bc1ae8f` | [`esp32-p4-device-monitor-v1.3.2`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.3.2) |
+| ESP32-P4 | [Device Monitor](complete-applications/esp32-p4/device-monitor/README.md) | `1.5.0` | `2.3.0` 官方源码重建版 | Tag `esp32-p4-device-app-v1.5.0` / commit `9733136` | [`esp32-p4-device-monitor-v1.5.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.5.0) |
 | G32S10X | [Device Monitor](complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | Tag `v0.1.1` / commit `5630152` | [`g32s10x-device-monitor-v0.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-device-monitor-v0.1.1) |
 
 八个项目独立使用 SemVer Tag。某个项目更新时，只提升并发布该项目版本；共享 SDK 或公共代码
@@ -92,8 +92,10 @@ AI 对讲和设备互呼，并用预录媒体验证链路；它不依赖完整 U
 不进入 Git 历史。ESP32 固件使用
 [Espressif ESP Tool](https://espressif.github.io/esptool-js/) 按 Release 清单烧录。
 
-ESP32-P4 Device App `1.3.2` 提供源码和
-`esp32p4-tirtc-device-monitor-full-v1.3.2.bin`。完整镜像只在 GitHub Release 中分发，
+ESP32-P4 Device Monitor `1.5.0` 提供源码和
+`esp32p4-tirtc-device-monitor-full-v1.5.0.bin`。设备视频呼叫使用最高 `384x256` 双向 H264；
+本版补齐 TGMP 码率反馈、持久 PSRAM 摄像头/H264 池、跨 APP 媒体生命周期、AEC、联系人、
+二维码、Wi-Fi 恢复和串口回归接口。完整镜像只在 GitHub Release 中分发，
 从 `0x0` 烧录；它会清除现有 NVS、Wi-Fi 和绑定信息，具体步骤见
 [固件下载与校验](docs/RELEASES_CN.md)。
 
@@ -117,8 +119,8 @@ ESP32-S3/P4：
 idf.py reconfigure build
 ```
 
-请先进入对应项目目录。P4 使用 ESP32-C6 Hosted/SDIO 提供 Wi-Fi，首次构建会按工程锁定文件
-获取相关组件。
+请先进入对应项目目录。P4 使用 ESP32-C6 Hosted/SDIO 提供 Wi-Fi，首次构建会按工程声明的
+组件版本约束解析依赖；正式 Release 的实际解析版本和生成锁文件哈希记录在 manifest 中。
 
 G32S10X 的供应商 SDK、工具链和 Cloner 不随本仓分发，具体入口见对应项目 README。
 

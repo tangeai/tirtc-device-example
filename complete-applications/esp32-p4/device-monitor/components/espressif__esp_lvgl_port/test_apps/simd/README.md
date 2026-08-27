@@ -1,6 +1,6 @@
 # HW Acceleration using SIMD assembly instructions
 
-Test app accommodates two types of tests: [`functionality test`](#Functionality-test) and [`benchmark test`](#Benchmark-test). Both tests are provided per each function written in assembly (typically per each assembly file). Both test apps use a hard copy of LVGL blending API, representing an ANSI implementation of the LVGL blending functions. The hard copy is present in [`lv_blend`](main/lv_blend/) folder.
+Test app accommodates two types of tests: [`functionality test`](#functionality-test) and [`benchmark test`](#benchmark-test). Both tests are provided per each function written in assembly (typically per each assembly file). Both test apps use a hard copy of LVGL blending API, representing an ANSI implementation of the LVGL blending functions. The hard copy is present in [`lv_blend`](main/lv_blend/) folder.
 
 Assembly source files could be found in the [`lvgl_port`](../../src/lvgl9/simd/) component. Header file with the assembly function prototypes is provided into the LVGL using Kconfig option `LV_DRAW_SW_ASM_CUSTOM_INCLUDE` and can be found in the [`lvgl_port/include`](../../include/esp_lvgl_port_lv_blend.h)
 

@@ -16,8 +16,9 @@
 static const char *TAG = "thing_services";
 
 #define THING_SERVICE_DISCOVERY_RESPONSE_MAX 2048
-#define THING_SERVICE_DISCOVERY_RETRY_COUNT  2U
-#define THING_SERVICE_DISCOVERY_RETRY_MS     500U
+#define THING_SERVICE_DISCOVERY_MAX_ATTEMPTS     4U
+#define THING_SERVICE_DISCOVERY_RETRY_INITIAL_MS 1000U
+#define THING_SERVICE_DISCOVERY_RETRY_MAX_MS     4000U
 #define THING_SERVICE_DISCOVERY_TIMEOUT_MS   5000U
 
 typedef struct {
@@ -47,16 +48,20 @@ static bool thing_service_has_prefix(const char *value, const char *prefix)
     return value != NULL && prefix != NULL && strncmp(value, prefix, strlen(prefix)) == 0;
 }
 
-static bool thing_service_is_http_url(const char *value)
+static bool thing_service_is_https_url(const char *value)
 {
-    return thing_service_has_prefix(value, "https://") ||
-           thing_service_has_prefix(value, "http://");
+    return thing_service_has_prefix(value, "https://");
 }
 
-static bool thing_service_is_mqtt_uri(const char *value)
+static bool thing_service_is_mqtts_uri(const char *value)
 {
-    return thing_service_has_prefix(value, "mqtts://") ||
-           thing_service_has_prefix(value, "mqtt://");
+    return thing_service_has_prefix(value, "mqtts://");
+}
+
+static bool thing_service_http_status_is_recoverable(int status)
+{
+    return status == 408 || status == 425 || status == 429 ||
+           (status >= 500 && status <= 599);
 }
 
 static esp_err_t thing_service_copy(char *destination,
@@ -109,12 +114,13 @@ static esp_err_t thing_service_parse_response(const char *json,
     mqtt_uri = thing_service_json_string(root, "mqtt-srv");
     tirtc_endpoint = thing_service_json_string(root, "tirtc-srv");
 
-    if (!thing_service_is_http_url(device_api) ||
-        !thing_service_is_http_url(voip_api) ||
-        !thing_service_is_http_url(ai_api) ||
-        !thing_service_is_mqtt_uri(mqtt_uri) ||
-        (call_api != NULL && !thing_service_is_http_url(call_api)) ||
-        (tirtc_endpoint != NULL && !thing_service_is_http_url(tirtc_endpoint))) {
+    if (!thing_service_is_https_url(device_api) ||
+        !thing_service_is_https_url(voip_api) ||
+        !thing_service_is_https_url(ai_api) ||
+        !thing_service_is_mqtts_uri(mqtt_uri) ||
+        (call_api != NULL && !thing_service_is_https_url(call_api)) ||
+        (tirtc_endpoint != NULL && !thing_service_is_https_url(tirtc_endpoint))) {
+        ESP_LOGE(TAG, "service discovery rejected insecure endpoint scheme");
         ret = ESP_ERR_INVALID_RESPONSE;
         goto cleanup;
     }
@@ -156,13 +162,14 @@ cleanup:
 esp_err_t thing_service_registry_init(const thing_service_registry_config_t *config)
 {
     if (config == NULL ||
-        !thing_service_is_http_url(config->discovery_url) ||
-        !thing_service_is_http_url(config->device_api_base) ||
-        !thing_service_is_http_url(config->voip_api_base) ||
-        !thing_service_is_http_url(config->ai_api_base) ||
-        !thing_service_is_http_url(config->call_api_base) ||
-        !thing_service_is_mqtt_uri(config->mqtt_uri) ||
-        !thing_service_is_http_url(config->tirtc_endpoint)) {
+        !thing_service_is_https_url(config->discovery_url) ||
+        !thing_service_is_https_url(config->device_api_base) ||
+        !thing_service_is_https_url(config->voip_api_base) ||
+        !thing_service_is_https_url(config->ai_api_base) ||
+        !thing_service_is_https_url(config->call_api_base) ||
+        !thing_service_is_mqtts_uri(config->mqtt_uri) ||
+        !thing_service_is_https_url(config->tirtc_endpoint)) {
+        ESP_LOGE(TAG, "service registry requires HTTPS and MQTTS endpoints");
         return ESP_ERR_INVALID_ARG;
     }
     if (s_registry.lock == NULL) {
@@ -266,7 +273,8 @@ esp_err_t thing_service_registry_refresh(void)
          */
         .timeout_ms = THING_SERVICE_DISCOVERY_TIMEOUT_MS,
     };
-    for (uint8_t attempt = 0; attempt <= THING_SERVICE_DISCOVERY_RETRY_COUNT; ++attempt) {
+    uint32_t retry_delay_ms = THING_SERVICE_DISCOVERY_RETRY_INITIAL_MS;
+    for (uint8_t attempt = 1U; attempt <= THING_SERVICE_DISCOVERY_MAX_ATTEMPTS; ++attempt) {
         response[0] = '\0';
         status = 0;
         ret = thing_http_request_json(&request,
@@ -276,8 +284,26 @@ esp_err_t thing_service_registry_refresh(void)
         if (ret == ESP_OK && status == 200) {
             break;
         }
-        if (attempt < THING_SERVICE_DISCOVERY_RETRY_COUNT) {
-            vTaskDelay(pdMS_TO_TICKS(THING_SERVICE_DISCOVERY_RETRY_MS));
+        bool recoverable = ret != ESP_OK ?
+                               thing_http_error_is_recoverable(ret) :
+                               thing_service_http_status_is_recoverable(status);
+        if (!recoverable ||
+            attempt == THING_SERVICE_DISCOVERY_MAX_ATTEMPTS) {
+            break;
+        }
+        ESP_LOGW(TAG,
+                 "service discovery retry: attempt=%u/%u wait_ms=%u ret=%s status=%d",
+                 (unsigned)attempt,
+                 (unsigned)THING_SERVICE_DISCOVERY_MAX_ATTEMPTS,
+                 (unsigned)retry_delay_ms,
+                 esp_err_to_name(ret),
+                 status);
+        vTaskDelay(pdMS_TO_TICKS(retry_delay_ms));
+        if (retry_delay_ms < THING_SERVICE_DISCOVERY_RETRY_MAX_MS) {
+            retry_delay_ms *= 2U;
+            if (retry_delay_ms > THING_SERVICE_DISCOVERY_RETRY_MAX_MS) {
+                retry_delay_ms = THING_SERVICE_DISCOVERY_RETRY_MAX_MS;
+            }
         }
     }
     if (ret != ESP_OK) {

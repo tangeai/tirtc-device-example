@@ -29,6 +29,7 @@
 #define MEMSET_REQUIRED                  1
 #define MEMSET_NOT_REQUIRED              0
 
+typedef void *(*mempool_block_alloc_fn_t)(size_t size);
 
 #ifdef H_USE_MEMPOOL
 struct mempool_entry {
@@ -42,11 +43,16 @@ struct mempool {
 	void * spinlock;
 	uint32_t block_size;
 	uint32_t cached_count;
+	uint32_t cache_limit;
 	uint32_t trimmed_count;
+	mempool_block_alloc_fn_t block_alloc;
 };
 #endif
 
 struct mempool * mempool_create(uint32_t block_size);
+struct mempool * mempool_create_with_allocator(uint32_t block_size,
+		mempool_block_alloc_fn_t block_alloc);
+uint32_t mempool_reserve(struct mempool *mp, uint32_t block_count);
 void mempool_destroy(struct mempool* mp);
 void * mempool_alloc(struct mempool* mp, int nbytes, int need_memset);
 void mempool_free(struct mempool* mp, void *mem);

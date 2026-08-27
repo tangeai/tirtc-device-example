@@ -3,12 +3,21 @@ set(TIRTC_DEVICE_VIDEO_SPIFFS_DIR "${CMAKE_CURRENT_BINARY_DIR}/tirtc_device_vide
 
 set(APP_DEBUG_SCREEN_SERVER_SRCS "")
 set(APP_DEBUG_SCREEN_SERVER_INCLUDE_DIRS "")
+set(APP_SERIAL_CALL_CLI_SRCS "")
+set(APP_SERIAL_CALL_CLI_INCLUDE_DIRS "")
 
 if(CONFIG_APP_DEBUG_SCREEN_SERVER_ENABLE)
     list(APPEND APP_DEBUG_SCREEN_SERVER_SRCS
         "debug/screen_server/screen_debug_server.c")
     list(APPEND APP_DEBUG_SCREEN_SERVER_INCLUDE_DIRS
         "debug/screen_server")
+endif()
+
+if(CONFIG_APP_SERIAL_CALL_CLI_ENABLE)
+    list(APPEND APP_SERIAL_CALL_CLI_SRCS
+        "debug/serial_call_cli/serial_call_cli.c")
+    list(APPEND APP_SERIAL_CALL_CLI_INCLUDE_DIRS
+        "debug/serial_call_cli")
 endif()
 
 file(REMOVE_RECURSE "${TIRTC_DEVICE_VIDEO_SPIFFS_DIR}")
@@ -86,6 +95,7 @@ idf_component_register(
         "services/device_binding/device_identity.c"
         "services/device_online/device_online.c"
         "services/device_call/device_call.c"
+        "services/device_call/device_call_ringtone.c"
         "services/audio_playout_controller.c"
         "services/call_video_renderer.c"
         "services/thing_connect/thing_service_registry.c"
@@ -102,6 +112,7 @@ idf_component_register(
         "services/wechat_voip/wechat_voip_session.c"
         "services/wechat_voip/wechat_voip_thing.c"
         ${APP_DEBUG_SCREEN_SERVER_SRCS}
+        ${APP_SERIAL_CALL_CLI_SRCS}
     INCLUDE_DIRS "."
                  "application"
                  "hardware"
@@ -126,6 +137,7 @@ idf_component_register(
                  "services/thing_connect"
                  "services/wechat_voip"
                  ${APP_DEBUG_SCREEN_SERVER_INCLUDE_DIRS}
+                 ${APP_SERIAL_CALL_CLI_INCLUDE_DIRS}
     REQUIRES driver esp_driver_jpeg esp_driver_ppa esp_event esp_netif esp_wifi nvs_flash esp_timer esp_codec_dev tirtc_sdk esp_lcd lwip esp_hw_support esp_http_client app_update esp_app_format json mbedtls mqtt esp_video esp_h264 esp32_p4_wifi6_touch_lcd_35 espressif__esp_jpeg espressif__esp-sr espressif__quirc spiffs
     WHOLE_ARCHIVE
 )

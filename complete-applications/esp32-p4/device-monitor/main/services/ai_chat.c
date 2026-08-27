@@ -42,7 +42,7 @@ static const char *DIALOG_TAG = "ai_dialog";
 #define AI_CHAT_MEDIA_TASK_PRIORITY   10
 #define AI_CHAT_MEDIA_ALLOC_CAPS      (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
 #define AI_CHAT_TASK_ALLOC_CAPS       (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
-#define AI_CHAT_MEDIA_TX_LOG_INTERVAL_MS 1000U
+#define AI_CHAT_MEDIA_TX_LOG_INTERVAL_MS 10000U
 #define AI_CHAT_VIDEO_START_TASK_STACK (4 * 1024)
 #define AI_CHAT_VIDEO_START_TASK_PRIORITY 5
 #define AI_CHAT_START_TASK_STACK      (16 * 1024)
@@ -73,6 +73,7 @@ static const char *DIALOG_TAG = "ai_dialog";
 #define AI_CHAT_START_SESSION_TIMEOUT_TASK_STACK (3 * 1024)
 #define AI_CHAT_START_SESSION_TIMEOUT_TASK_PRIORITY 5
 #define AI_CHAT_HEARTBEAT_INTERVAL_MS 30000U
+#define AI_CHAT_LIFECYCLE_WAIT_POLL_MS 100U
 #define AI_CHAT_START_SESSION_RPC_ID  "start-session-001"
 
 #if AI_CHAT_VIDEO_STREAM_ID == AI_CHAT_AUDIO_STREAM_ID
@@ -530,6 +531,11 @@ static uint32_t ai_chat_next_generation_locked(void)
     s_ai.generation++;
     if (s_ai.generation == 0U) {
         s_ai.generation = 1U;
+    }
+    /* A generation change invalidates the current session. Wake the heartbeat
+     * immediately instead of retaining its task stack for another 30 seconds. */
+    if (s_heartbeat_task != NULL) {
+        xTaskNotifyGive(s_heartbeat_task);
     }
     return s_ai.generation;
 }
@@ -1241,6 +1247,7 @@ static void ai_chat_video_start_task(void *ctx)
         (ai_chat_video_start_context_t *)ctx;
     uint32_t generation = video_ctx != NULL ? video_ctx->generation : 0U;
     tirtc_conn_t conn = video_ctx != NULL ? video_ctx->conn : NULL;
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
 
     free(video_ctx);
     if (generation != 0U && conn != NULL &&
@@ -1255,7 +1262,11 @@ static void ai_chat_video_start_task(void *ctx)
                      esp_err_to_name(ret));
         }
     }
-    s_video_start_task = NULL;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_video_start_task == self) {
+        s_video_start_task = NULL;
+    }
+    xSemaphoreGive(s_lock);
     vTaskDeleteWithCaps(NULL);
 }
 
@@ -1273,10 +1284,6 @@ static esp_err_t ai_chat_schedule_video_start(tirtc_conn_t conn,
     if (conn == NULL || generation == 0U) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (s_video_start_task != NULL) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
     ai_chat_video_start_context_t *video_ctx =
         ai_chat_calloc_psram(1, sizeof(*video_ctx));
     if (video_ctx == NULL) {
@@ -1284,6 +1291,13 @@ static esp_err_t ai_chat_schedule_video_start(tirtc_conn_t conn,
     }
     video_ctx->generation = generation;
     video_ctx->conn = conn;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_video_start_task != NULL) {
+        xSemaphoreGive(s_lock);
+        free(video_ctx);
+        return ESP_ERR_INVALID_STATE;
+    }
 
     BaseType_t task_ret = xTaskCreateWithCaps(ai_chat_video_start_task,
                                               "ai_video_start",
@@ -1295,8 +1309,10 @@ static esp_err_t ai_chat_schedule_video_start(tirtc_conn_t conn,
     if (task_ret != pdPASS) {
         free(video_ctx);
         s_video_start_task = NULL;
+        xSemaphoreGive(s_lock);
         return ESP_ERR_NO_MEM;
     }
+    xSemaphoreGive(s_lock);
     return ESP_OK;
 }
 
@@ -1448,14 +1464,6 @@ static void ai_chat_start_heartbeat_once(uint32_t generation)
         return;
     }
 
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    bool already_running = s_heartbeat_task != NULL &&
-                           s_heartbeat_generation == generation;
-    xSemaphoreGive(s_lock);
-    if (already_running) {
-        return;
-    }
-
     ai_chat_heartbeat_context_t *heartbeat_ctx = ai_chat_calloc_psram(1, sizeof(*heartbeat_ctx));
     if (heartbeat_ctx == NULL) {
         ESP_LOGW(TAG, "create heartbeat context failed");
@@ -1463,23 +1471,30 @@ static void ai_chat_start_heartbeat_once(uint32_t generation)
     }
     heartbeat_ctx->generation = generation;
 
-    TaskHandle_t task = NULL;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (!ai_chat_generation_matches_locked(generation) ||
+        s_ai.state != AI_CHAT_STATE_IN_SESSION ||
+        s_heartbeat_task != NULL) {
+        xSemaphoreGive(s_lock);
+        free(heartbeat_ctx);
+        return;
+    }
+
     BaseType_t ret = xTaskCreateWithCaps(ai_chat_heartbeat_task,
                                          "ai_heartbeat",
                                          AI_CHAT_HEARTBEAT_TASK_STACK,
                                          heartbeat_ctx,
                                          AI_CHAT_HEARTBEAT_TASK_PRIORITY,
-                                         &task,
+                                         &s_heartbeat_task,
                                          AI_CHAT_TASK_ALLOC_CAPS);
     if (ret != pdPASS) {
+        s_heartbeat_task = NULL;
+        xSemaphoreGive(s_lock);
         free(heartbeat_ctx);
         ai_chat_log_heap("heartbeat task create failed");
         ESP_LOGW(TAG, "create heartbeat task failed");
         return;
     }
-
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_heartbeat_task = task;
     s_heartbeat_generation = generation;
     xSemaphoreGive(s_lock);
 }
@@ -1493,7 +1508,10 @@ static void ai_chat_heartbeat_task(void *ctx)
     free(heartbeat_ctx);
 
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(AI_CHAT_HEARTBEAT_INTERVAL_MS));
+        if (ulTaskNotifyTake(pdTRUE,
+                             pdMS_TO_TICKS(AI_CHAT_HEARTBEAT_INTERVAL_MS)) > 0U) {
+            break;
+        }
 
         tirtc_conn_t conn = NULL;
         ai_chat_state_t state = AI_CHAT_STATE_IDLE;
@@ -1768,7 +1786,25 @@ static void ai_chat_connect_timeout_task(void *ctx)
     bool retry_requested = false;
 
     free(timeout_ctx);
-    vTaskDelay(pdMS_TO_TICKS(AI_CHAT_CONNECT_TIMEOUT_MS));
+    uint32_t waited_ms = 0U;
+    while (waited_ms < AI_CHAT_CONNECT_TIMEOUT_MS) {
+        uint32_t wait_ms = AI_CHAT_CONNECT_TIMEOUT_MS - waited_ms;
+        if (wait_ms > AI_CHAT_LIFECYCLE_WAIT_POLL_MS) {
+            wait_ms = AI_CHAT_LIFECYCLE_WAIT_POLL_MS;
+        }
+        vTaskDelay(pdMS_TO_TICKS(wait_ms));
+        waited_ms += wait_ms;
+
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        bool still_connecting = ai_chat_generation_matches_locked(generation) &&
+                                s_ai.state == AI_CHAT_STATE_CONNECTING &&
+                                s_ai.conn == NULL;
+        xSemaphoreGive(s_lock);
+        if (!still_connecting) {
+            vTaskDeleteWithCaps(NULL);
+            return;
+        }
+    }
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (ai_chat_generation_matches_locked(generation) &&
@@ -1855,7 +1891,25 @@ static void ai_chat_start_session_timeout_task(void *ctx)
     bool timed_out = false;
 
     free(timeout_ctx);
-    vTaskDelay(pdMS_TO_TICKS(AI_CHAT_START_SESSION_TIMEOUT_MS));
+    uint32_t waited_ms = 0U;
+    while (waited_ms < AI_CHAT_START_SESSION_TIMEOUT_MS) {
+        uint32_t wait_ms = AI_CHAT_START_SESSION_TIMEOUT_MS - waited_ms;
+        if (wait_ms > AI_CHAT_LIFECYCLE_WAIT_POLL_MS) {
+            wait_ms = AI_CHAT_LIFECYCLE_WAIT_POLL_MS;
+        }
+        vTaskDelay(pdMS_TO_TICKS(wait_ms));
+        waited_ms += wait_ms;
+
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        bool still_starting = ai_chat_generation_matches_locked(generation) &&
+                              s_ai.state == AI_CHAT_STATE_STARTING_SESSION &&
+                              s_ai.conn != NULL;
+        xSemaphoreGive(s_lock);
+        if (!still_starting) {
+            vTaskDeleteWithCaps(NULL);
+            return;
+        }
+    }
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (ai_chat_generation_matches_locked(generation) &&
@@ -1916,13 +1970,18 @@ static void ai_chat_session_task(void *ctx)
     ai_chat_session_context_t *session_ctx = (ai_chat_session_context_t *)ctx;
     uint32_t generation = session_ctx != NULL ? session_ctx->generation : 0U;
     tirtc_conn_t conn = session_ctx != NULL ? session_ctx->conn : NULL;
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
     int64_t media_start_us = 0;
     uint32_t media_elapsed_ms = 0;
     uint32_t settle_wait_ms = 0;
 
     free(session_ctx);
     if (generation == 0U || conn == NULL || !ai_chat_generation_matches(generation)) {
-        s_session_task = NULL;
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (s_session_task == self) {
+            s_session_task = NULL;
+        }
+        xSemaphoreGive(s_lock);
         vTaskDeleteWithCaps(NULL);
         return;
     }
@@ -1942,7 +2001,11 @@ static void ai_chat_session_task(void *ctx)
         }
         xSemaphoreGive(s_lock);
         (void)ai_chat_disconnect_conn(conn);
-        s_session_task = NULL;
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (s_session_task == self) {
+            s_session_task = NULL;
+        }
+        xSemaphoreGive(s_lock);
         vTaskDeleteWithCaps(NULL);
         return;
     }
@@ -1959,7 +2022,11 @@ static void ai_chat_session_task(void *ctx)
     if (!ai_chat_generation_matches(generation)) {
         ai_chat_video_stop(conn);
         ai_chat_media_stop(conn);
-        s_session_task = NULL;
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (s_session_task == self) {
+            s_session_task = NULL;
+        }
+        xSemaphoreGive(s_lock);
         vTaskDeleteWithCaps(NULL);
         return;
     }
@@ -1981,7 +2048,11 @@ static void ai_chat_session_task(void *ctx)
         ai_chat_start_start_session_timeout(generation);
     }
 
-    s_session_task = NULL;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_session_task == self) {
+        s_session_task = NULL;
+    }
+    xSemaphoreGive(s_lock);
     vTaskDeleteWithCaps(NULL);
 }
 
@@ -1990,16 +2061,19 @@ static esp_err_t ai_chat_schedule_start_session(tirtc_conn_t conn, uint32_t gene
     if (conn == NULL || generation == 0U) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (s_session_task != NULL) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
     ai_chat_session_context_t *session_ctx = ai_chat_calloc_psram(1, sizeof(*session_ctx));
     if (session_ctx == NULL) {
         return ESP_ERR_NO_MEM;
     }
     session_ctx->generation = generation;
     session_ctx->conn = conn;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_session_task != NULL) {
+        xSemaphoreGive(s_lock);
+        free(session_ctx);
+        return ESP_ERR_INVALID_STATE;
+    }
 
     BaseType_t task_ret = xTaskCreateWithCaps(ai_chat_session_task,
                                               "ai_session",
@@ -2011,9 +2085,11 @@ static esp_err_t ai_chat_schedule_start_session(tirtc_conn_t conn, uint32_t gene
     if (task_ret != pdPASS) {
         free(session_ctx);
         s_session_task = NULL;
+        xSemaphoreGive(s_lock);
         ai_chat_log_heap("session task create failed");
         return ESP_ERR_NO_MEM;
     }
+    xSemaphoreGive(s_lock);
     return ESP_OK;
 }
 
@@ -2560,7 +2636,14 @@ static bool ai_chat_on_command(tirtc_conn_t conn, uint32_t cmdw, const void *dat
     xSemaphoreGive(s_lock);
 
     if (!mine) {
-        return false;
+        /* The command family still belongs to AI Chat after close() has
+         * detached its connection. Consume a late server response here so it
+         * cannot fall through to the generic device-call command decoder. */
+        ESP_LOGD(TAG,
+                 "ignore stale AI Chat command: hconn=%p cmdw=0x%08lx",
+                 conn,
+                 (unsigned long)cmdw);
+        return true;
     }
 
     ESP_LOGI(TAG,
@@ -2803,6 +2886,7 @@ esp_err_t ai_chat_open(void)
 esp_err_t ai_chat_close(void)
 {
     tirtc_conn_t conn = NULL;
+    TaskHandle_t heartbeat_task = NULL;
 
     if (s_lock == NULL) {
         return ESP_OK;
@@ -2810,12 +2894,16 @@ esp_err_t ai_chat_close(void)
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     conn = s_ai.conn;
+    heartbeat_task = s_heartbeat_task;
     if (s_ai.state == AI_CHAT_STATE_IDLE && conn == NULL) {
         memset(s_ai.captions, 0, sizeof(s_ai.captions));
         ai_chat_clear_messages_locked();
         s_ai.device_action_pending = false;
         s_ai.start_retries = 0U;
         xSemaphoreGive(s_lock);
+        if (heartbeat_task != NULL) {
+            xTaskNotifyGive(heartbeat_task);
+        }
         ai_chat_video_stop(NULL);
         return ESP_OK;
     }
@@ -2826,6 +2914,10 @@ esp_err_t ai_chat_close(void)
     s_ai.device_action_pending = false;
     s_ai.start_retries = 0U;
     xSemaphoreGive(s_lock);
+
+    if (heartbeat_task != NULL) {
+        xTaskNotifyGive(heartbeat_task);
+    }
 
     if (conn != NULL) {
         ai_chat_video_stop(conn);
@@ -2852,6 +2944,63 @@ esp_err_t ai_chat_close(void)
     ai_chat_set_state_locked(AI_CHAT_STATE_IDLE, "idle");
     xSemaphoreGive(s_lock);
     return ESP_OK;
+}
+
+esp_err_t ai_chat_wait_until_quiescent(uint32_t timeout_ms)
+{
+    uint32_t waited_ms = 0U;
+    ai_chat_state_t state = AI_CHAT_STATE_IDLE;
+    tirtc_conn_t conn = NULL;
+    TaskHandle_t start_task = NULL;
+    TaskHandle_t start_retry_task = NULL;
+    TaskHandle_t session_task = NULL;
+    TaskHandle_t video_start_task = NULL;
+    TaskHandle_t heartbeat_task = NULL;
+
+    if (s_lock == NULL) {
+        return ESP_OK;
+    }
+
+    while (true) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        state = s_ai.state;
+        conn = s_ai.conn;
+        start_task = s_start_task;
+        start_retry_task = s_start_retry_task;
+        session_task = s_session_task;
+        video_start_task = s_video_start_task;
+        heartbeat_task = s_heartbeat_task;
+        xSemaphoreGive(s_lock);
+
+        if (state == AI_CHAT_STATE_IDLE && conn == NULL &&
+            start_task == NULL && start_retry_task == NULL &&
+            session_task == NULL && video_start_task == NULL &&
+            heartbeat_task == NULL) {
+            return ESP_OK;
+        }
+        if (waited_ms >= timeout_ms) {
+            break;
+        }
+
+        uint32_t wait_ms = timeout_ms - waited_ms;
+        if (wait_ms > AI_CHAT_LIFECYCLE_WAIT_POLL_MS) {
+            wait_ms = AI_CHAT_LIFECYCLE_WAIT_POLL_MS;
+        }
+        vTaskDelay(pdMS_TO_TICKS(wait_ms));
+        waited_ms += wait_ms;
+    }
+
+    ESP_LOGW(TAG,
+             "AI Chat quiesce timeout: waited=%ums state=%s conn=%p tasks=start:%p retry:%p session:%p video:%p heartbeat:%p",
+             (unsigned)waited_ms,
+             ai_chat_state_name(state),
+             conn,
+             start_task,
+             start_retry_task,
+             session_task,
+             video_start_task,
+             heartbeat_task);
+    return ESP_ERR_TIMEOUT;
 }
 
 esp_err_t ai_chat_clear_messages(void)

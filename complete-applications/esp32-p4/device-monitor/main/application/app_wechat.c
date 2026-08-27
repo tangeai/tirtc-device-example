@@ -83,17 +83,13 @@ static void app_defer_wechat_scan_resources(bool restore)
 	}
 }
 
-static void app_wechat_scan_preview_cb(const uint16_t *rgb565_pixels,
-				       uint16_t width,
-				       uint16_t height,
+static void app_wechat_scan_preview_cb(const scan_preview_frame_t *frame,
 				       void *ctx)
 {
 	(void)ctx;
 
 	if (s_wechat_contact_scan.preview_cb != NULL) {
-		s_wechat_contact_scan.preview_cb(rgb565_pixels,
-						width,
-						height,
+		s_wechat_contact_scan.preview_cb(frame,
 						s_wechat_contact_scan.ctx);
 	}
 }
@@ -187,6 +183,23 @@ esp_err_t app_wechat_remove_contact(const char *open_id)
 
 	ESP_LOGD(TAG, "wechat contact remove requested");
 	return wechat_voip_service_remove_contact(open_id);
+}
+
+esp_err_t app_wechat_update_contact_remark(const char *open_id,
+					   const char *remark)
+{
+	if (open_id == NULL || open_id[0] == '\0' || remark == NULL) {
+		return ESP_ERR_INVALID_ARG;
+	}
+	if (strlen(open_id) >= APP_WECHAT_OPEN_ID_MAX ||
+	    !wechat_voip_remark_is_valid(remark)) {
+		return ESP_ERR_INVALID_SIZE;
+	}
+	if (app_get_active_app() != APP_ID_WECHAT || !network_is_connected()) {
+		return ESP_ERR_INVALID_STATE;
+	}
+
+	return wechat_voip_service_update_contact_remark(open_id, remark);
 }
 
 esp_err_t app_scan_wechat_contact(void)

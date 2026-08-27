@@ -22,6 +22,7 @@ esp_err_t audio_set_capture_observer_enabled(audio_capture_frame_cb_t cb,
 esp_err_t audio_set_capture_enabled(bool enabled);
 esp_err_t audio_set_speaker_volume(uint8_t percent);
 esp_err_t audio_set_capture_gain_percent(uint8_t percent);
+esp_err_t audio_set_capture_processing_config(const audio_capture_processing_config_t *config);
 esp_err_t audio_prepare_playback_path(void);
 esp_err_t audio_play_pcm_frame_with_format(const uint8_t *data,
                                                     size_t data_len,

@@ -43,11 +43,21 @@
 #define AUDIO_AEC_REF_RESYNC_TOLERANCE_SAMPLES (AUDIO_AEC_SAMPLE_RATE_HZ / 25U)
 #define AUDIO_AEC_SOFTWARE_CONVERGENCE_FRAMES 12U
 #define AUDIO_AEC_CODEC_CONVERGENCE_FRAMES    4U
-#define AUDIO_AEC_PROFILE_NAME                "fd-high-perf-veryaggr"
+#define AUDIO_AEC_PROFILE_NAME                "fd-high-perf-double-talk"
 #define AUDIO_AEC_FILTER_LENGTH               4
 #define AUDIO_AEC_BUFFER_ALIGNMENT            64U
 #define AUDIO_AEC_PSRAM_CAPS                  (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
 #define AUDIO_AEC_DEINIT_WAIT_MS              60U
+#define AUDIO_AEC_ANALYSIS_SHIFT              8U
+#define AUDIO_AEC_COHERENCE_MAX_LAG_SAMPLES   64
+#define AUDIO_AEC_COHERENCE_LAG_STEP          4
+#define AUDIO_AEC_COHERENCE_SAMPLE_STEP       4U
+#define AUDIO_AEC_NEAR_END_MIN_OUT_PEAK       256U
+#define AUDIO_AEC_NEAR_END_MIN_RETAINED_PERCENT 2U
+#define AUDIO_AEC_NEAR_END_MAX_COHERENCE_PERCENT 25U
+#define AUDIO_AEC_NEAR_END_ADAPT_FRAMES       12U
+#define AUDIO_AEC_NEAR_END_CONFIRM_FRAMES     2U
+#define AUDIO_AEC_NEAR_END_HANGOVER_FRAMES    8U
 
 static const char *TAG = "audio_aec";
 
@@ -59,6 +69,8 @@ static int16_t *s_ref_ring;
 static int16_t *s_mic_frame;
 static int16_t *s_ref_frame;
 static int16_t *s_out_frame;
+static int16_t *s_analysis_mic_frame;
+static int16_t *s_analysis_ref_frame;
 static int16_t *s_out_fifo;
 static uint32_t s_ref_write_pos;
 static uint32_t s_ref_filled_samples;
@@ -86,6 +98,12 @@ static uint32_t s_active_users;
 static uint32_t s_process_frames;
 static uint64_t s_process_us_total;
 static uint32_t s_process_us_max;
+static aec_nlp_level_t s_requested_nlp_level = AEC_NLP_LEVEL_AGGR;
+static aec_nlp_level_t s_applied_nlp_level = AEC_NLP_LEVEL_AGGR;
+static uint32_t s_reference_active_frames;
+static uint32_t s_near_end_candidate_frames;
+static uint32_t s_near_end_hangover_frames;
+static bool s_last_near_end_detected;
 
 typedef enum {
     AUDIO_AEC_REF_INACTIVE = 0,
@@ -149,7 +167,9 @@ static void audio_aec_log_heap(const char *stage)
 }
 #endif
 
-static aec_handle_t *audio_aec_create_handle(aec_mode_t mode, int filter_length)
+static aec_handle_t *audio_aec_create_handle(aec_mode_t mode,
+                                              int filter_length,
+                                              aec_nlp_level_t nlp_level)
 {
     aec_config_t config = {
         .mic_num = 1,
@@ -159,13 +179,154 @@ static aec_handle_t *audio_aec_create_handle(aec_mode_t mode, int filter_length)
         .sample_rate = (int)AUDIO_AEC_SAMPLE_RATE_HZ,
         .caps = AUDIO_AEC_PSRAM_CAPS,
         .mode = mode,
-        .nlp_level = AEC_NLP_LEVEL_VERYAGGR,
+        .nlp_level = nlp_level,
     };
     aec_handle_t *handle = aec_create_from_config(&config);
     if (handle != NULL) {
-        (void)aec_set_nlp_level(handle, AEC_NLP_LEVEL_VERYAGGR);
+        (void)aec_set_nlp_level(handle, nlp_level);
     }
     return handle;
+}
+
+static aec_nlp_level_t audio_aec_suppression_to_nlp(
+    audio_echo_suppression_t suppression)
+{
+    return suppression == AUDIO_ECHO_SUPPRESSION_STRONG ?
+           AEC_NLP_LEVEL_VERYAGGR : AEC_NLP_LEVEL_AGGR;
+}
+
+static void audio_aec_apply_requested_suppression(void)
+{
+    aec_nlp_level_t requested = AEC_NLP_LEVEL_AGGR;
+    aec_nlp_level_t applied = AEC_NLP_LEVEL_AGGR;
+
+    taskENTER_CRITICAL(&s_aec_lock);
+    requested = s_requested_nlp_level;
+    applied = s_applied_nlp_level;
+    taskEXIT_CRITICAL(&s_aec_lock);
+    if (requested == applied || s_aec == NULL) {
+        return;
+    }
+
+    aec_nlp_level_t actual = aec_set_nlp_level(s_aec, requested);
+    taskENTER_CRITICAL(&s_aec_lock);
+    s_applied_nlp_level = actual;
+    taskEXIT_CRITICAL(&s_aec_lock);
+    APP_LOG_DETAIL(TAG,
+                   "AEC suppression changed: requested=%s applied=%s",
+                   aec_get_nlp_string(requested),
+                   aec_get_nlp_string(actual));
+}
+
+static uint8_t audio_aec_reference_coherence_percent(const int16_t *mic,
+                                                       const int16_t *reference,
+                                                       uint32_t sample_count)
+{
+    uint32_t best_percent = 0U;
+
+    if (mic == NULL || reference == NULL || sample_count == 0U) {
+        return 0U;
+    }
+
+    for (int lag = -AUDIO_AEC_COHERENCE_MAX_LAG_SAMPLES;
+         lag <= AUDIO_AEC_COHERENCE_MAX_LAG_SAMPLES;
+         lag += AUDIO_AEC_COHERENCE_LAG_STEP) {
+        uint32_t mic_start = lag < 0 ? (uint32_t)(-lag) : 0U;
+        uint32_t ref_start = lag > 0 ? (uint32_t)lag : 0U;
+        uint32_t start_offset = mic_start > ref_start ? mic_start : ref_start;
+        int64_t cross = 0;
+        uint64_t mic_energy = 0U;
+        uint64_t ref_energy = 0U;
+
+        if (sample_count <= start_offset) {
+            continue;
+        }
+        uint32_t overlap = sample_count - start_offset;
+        if (overlap <= AUDIO_AEC_COHERENCE_SAMPLE_STEP) {
+            continue;
+        }
+        for (uint32_t index = 0U; index < overlap;
+             index += AUDIO_AEC_COHERENCE_SAMPLE_STEP) {
+            int32_t mic_sample = mic[mic_start + index] >> AUDIO_AEC_ANALYSIS_SHIFT;
+            int32_t ref_sample = reference[ref_start + index] >> AUDIO_AEC_ANALYSIS_SHIFT;
+            cross += (int64_t)mic_sample * ref_sample;
+            mic_energy += (uint64_t)((int64_t)mic_sample * mic_sample);
+            ref_energy += (uint64_t)((int64_t)ref_sample * ref_sample);
+        }
+        if (mic_energy == 0U || ref_energy == 0U) {
+            continue;
+        }
+
+        uint64_t cross_abs = (uint64_t)(cross < 0 ? -cross : cross);
+        uint64_t numerator = cross_abs * cross_abs * 100U;
+        uint64_t denominator = mic_energy * ref_energy;
+        uint32_t percent = denominator == 0U ? 0U :
+                           (uint32_t)(numerator / denominator);
+        if (percent > 100U) {
+            percent = 100U;
+        }
+        if (percent > best_percent) {
+            best_percent = percent;
+        }
+    }
+
+    return (uint8_t)best_percent;
+}
+
+static void audio_aec_update_near_end_state(bool reference_active,
+                                             const int16_t *mic,
+                                             const int16_t *reference,
+                                             const int16_t *output,
+                                             uint32_t sample_count)
+{
+    if (!reference_active || mic == NULL || reference == NULL || output == NULL) {
+        s_reference_active_frames = 0U;
+        s_near_end_candidate_frames = 0U;
+        s_near_end_hangover_frames = 0U;
+        s_last_near_end_detected = false;
+        return;
+    }
+
+    uint64_t mic_energy = 0U;
+    uint64_t output_energy = 0U;
+    uint32_t output_peak = 0U;
+    for (uint32_t index = 0U; index < sample_count; ++index) {
+        int32_t mic_sample = mic[index] >> AUDIO_AEC_ANALYSIS_SHIFT;
+        int32_t output_sample = output[index] >> AUDIO_AEC_ANALYSIS_SHIFT;
+        uint32_t output_abs = audio_aec_abs_i16(output[index]);
+        mic_energy += (uint64_t)((int64_t)mic_sample * mic_sample);
+        output_energy += (uint64_t)((int64_t)output_sample * output_sample);
+        if (output_abs > output_peak) {
+            output_peak = output_abs;
+        }
+    }
+
+    if (s_reference_active_frames < UINT32_MAX) {
+        s_reference_active_frames++;
+    }
+    uint64_t retained_percent = mic_energy == 0U ? 0U :
+                                (output_energy * 100U) / mic_energy;
+    uint8_t coherence_percent =
+        audio_aec_reference_coherence_percent(mic, reference, sample_count);
+    bool candidate =
+        s_reference_active_frames >= AUDIO_AEC_NEAR_END_ADAPT_FRAMES &&
+        output_peak >= AUDIO_AEC_NEAR_END_MIN_OUT_PEAK &&
+        retained_percent >= AUDIO_AEC_NEAR_END_MIN_RETAINED_PERCENT &&
+        coherence_percent <= AUDIO_AEC_NEAR_END_MAX_COHERENCE_PERCENT;
+
+    if (candidate) {
+        if (s_near_end_candidate_frames < AUDIO_AEC_NEAR_END_CONFIRM_FRAMES) {
+            s_near_end_candidate_frames++;
+        }
+    } else {
+        s_near_end_candidate_frames = 0U;
+    }
+    if (s_near_end_candidate_frames >= AUDIO_AEC_NEAR_END_CONFIRM_FRAMES) {
+        s_near_end_hangover_frames = AUDIO_AEC_NEAR_END_HANGOVER_FRAMES;
+    } else if (s_near_end_hangover_frames > 0U) {
+        s_near_end_hangover_frames--;
+    }
+    s_last_near_end_detected = s_near_end_hangover_frames > 0U;
 }
 
 static void audio_aec_reset_state_locked(void)
@@ -191,6 +352,10 @@ static void audio_aec_reset_state_locked(void)
     s_process_frames = 0;
     s_process_us_total = 0;
     s_process_us_max = 0;
+    s_reference_active_frames = 0;
+    s_near_end_candidate_frames = 0;
+    s_near_end_hangover_frames = 0;
+    s_last_near_end_detected = false;
 }
 
 static void audio_aec_free_handle_and_buffers(aec_handle_t *handle,
@@ -198,6 +363,8 @@ static void audio_aec_free_handle_and_buffers(aec_handle_t *handle,
                                               int16_t *mic_frame,
                                               int16_t *ref_frame,
                                               int16_t *out_frame,
+                                              int16_t *analysis_mic_frame,
+                                              int16_t *analysis_ref_frame,
                                               int16_t *out_fifo)
 {
     if (handle != NULL) {
@@ -207,6 +374,8 @@ static void audio_aec_free_handle_and_buffers(aec_handle_t *handle,
     heap_caps_free(mic_frame);
     heap_caps_free(ref_frame);
     heap_caps_free(out_frame);
+    heap_caps_free(analysis_mic_frame);
+    heap_caps_free(analysis_ref_frame);
     heap_caps_free(out_fifo);
 }
 
@@ -224,9 +393,18 @@ static bool audio_aec_ensure_ready(void)
     s_initializing = true;
     taskEXIT_CRITICAL(&s_aec_lock);
 
-    aec_handle_t *handle = audio_aec_create_handle(AEC_MODE_FD_HIGH_PERF, AUDIO_AEC_FILTER_LENGTH);
+    aec_nlp_level_t requested_nlp = AEC_NLP_LEVEL_AGGR;
+    taskENTER_CRITICAL(&s_aec_lock);
+    requested_nlp = s_requested_nlp_level;
+    taskEXIT_CRITICAL(&s_aec_lock);
+
+    aec_handle_t *handle = audio_aec_create_handle(AEC_MODE_FD_HIGH_PERF,
+                                                    AUDIO_AEC_FILTER_LENGTH,
+                                                    requested_nlp);
     if (handle == NULL) {
-        handle = audio_aec_create_handle(AEC_MODE_FD_LOW_COST, AUDIO_AEC_FILTER_LENGTH);
+        handle = audio_aec_create_handle(AEC_MODE_FD_LOW_COST,
+                                         AUDIO_AEC_FILTER_LENGTH,
+                                         requested_nlp);
     }
 
     int frame_size = handle == NULL ? 0 : aec_get_chunksize(handle);
@@ -234,6 +412,8 @@ static bool audio_aec_ensure_ready(void)
     int16_t *mic_frame = NULL;
     int16_t *ref_frame = NULL;
     int16_t *out_frame = NULL;
+    int16_t *analysis_mic_frame = NULL;
+    int16_t *analysis_ref_frame = NULL;
     int16_t *out_fifo = NULL;
 
     if (handle != NULL && frame_size > 0) {
@@ -241,12 +421,22 @@ static bool audio_aec_ensure_ready(void)
         mic_frame = audio_aec_aligned_calloc((size_t)frame_size, sizeof(int16_t));
         ref_frame = audio_aec_aligned_calloc((size_t)frame_size, sizeof(int16_t));
         out_frame = audio_aec_aligned_calloc((size_t)frame_size, sizeof(int16_t));
+        analysis_mic_frame = audio_aec_aligned_calloc((size_t)frame_size, sizeof(int16_t));
+        analysis_ref_frame = audio_aec_aligned_calloc((size_t)frame_size, sizeof(int16_t));
         out_fifo = audio_aec_aligned_calloc(AUDIO_AEC_OUT_FIFO_SAMPLES, sizeof(int16_t));
     }
 
     if (handle == NULL || frame_size <= 0 || ref_ring == NULL || mic_frame == NULL ||
-        ref_frame == NULL || out_frame == NULL || out_fifo == NULL) {
-        audio_aec_free_handle_and_buffers(handle, ref_ring, mic_frame, ref_frame, out_frame, out_fifo);
+        ref_frame == NULL || out_frame == NULL || analysis_mic_frame == NULL ||
+        analysis_ref_frame == NULL || out_fifo == NULL) {
+        audio_aec_free_handle_and_buffers(handle,
+                                          ref_ring,
+                                          mic_frame,
+                                          ref_frame,
+                                          out_frame,
+                                          analysis_mic_frame,
+                                          analysis_ref_frame,
+                                          out_fifo);
         taskENTER_CRITICAL(&s_aec_lock);
         s_initializing = false;
         taskEXIT_CRITICAL(&s_aec_lock);
@@ -261,7 +451,14 @@ static bool audio_aec_ensure_ready(void)
     if (s_deinit_requested) {
         s_initializing = false;
         taskEXIT_CRITICAL(&s_aec_lock);
-        audio_aec_free_handle_and_buffers(handle, ref_ring, mic_frame, ref_frame, out_frame, out_fifo);
+        audio_aec_free_handle_and_buffers(handle,
+                                          ref_ring,
+                                          mic_frame,
+                                          ref_frame,
+                                          out_frame,
+                                          analysis_mic_frame,
+                                          analysis_ref_frame,
+                                          out_fifo);
         return false;
     }
     s_aec = handle;
@@ -270,7 +467,10 @@ static bool audio_aec_ensure_ready(void)
     s_mic_frame = mic_frame;
     s_ref_frame = ref_frame;
     s_out_frame = out_frame;
+    s_analysis_mic_frame = analysis_mic_frame;
+    s_analysis_ref_frame = analysis_ref_frame;
     s_out_fifo = out_fifo;
+    s_applied_nlp_level = handle->config.nlp_level;
     audio_aec_reset_state_locked();
     s_runtime_active = false;
     s_initializing = false;
@@ -285,7 +485,7 @@ static bool audio_aec_ensure_ready(void)
                    handle->config.filter_length,
                    (unsigned)AUDIO_AEC_REF_DELAY_MS,
                    (unsigned)((AUDIO_AEC_REF_RING_SAMPLES + AUDIO_AEC_OUT_FIFO_SAMPLES +
-                               (uint32_t)frame_size * 3U) * sizeof(int16_t)));
+                               (uint32_t)frame_size * 5U) * sizeof(int16_t)));
 #if CONFIG_APP_VERBOSE_RUNTIME_LOGS
     audio_aec_log_heap("AEC ready");
 #endif
@@ -432,6 +632,13 @@ static bool audio_aec_codec_reference_snapshot(const int16_t *reference,
                 s_codec_reference_detected = true;
                 s_codec_reference_probe_frames = 0;
                 detected_now = true;
+                /*
+                 * Silent capture before the first playback can fill the AEC
+                 * output FIFO without training the echo path. Treat the first
+                 * real codec reference as a new reference epoch so capture is
+                 * held only while the filter adapts to the loudspeaker path.
+                 */
+                changed = true;
             } else if (++s_codec_reference_probe_frames >= AUDIO_AEC_CODEC_REF_PROBE_FRAMES) {
                 s_codec_reference_rejected = true;
                 ready = false;
@@ -589,6 +796,7 @@ static bool audio_aec_mute_capture_during_warmup(int16_t *samples,
 
     if (metrics != NULL) {
         metrics->active = true;
+        metrics->warming_up = true;
         metrics->reference_active = reference_active;
         metrics->reference = reference;
         metrics->ref_peak = ref_peak;
@@ -611,6 +819,15 @@ static bool audio_aec_mute_capture_during_warmup(int16_t *samples,
 esp_err_t audio_echo_cancel_prepare(void)
 {
     return audio_aec_ensure_ready() ? ESP_OK : ESP_FAIL;
+}
+
+void audio_echo_cancel_set_suppression(audio_echo_suppression_t suppression)
+{
+    aec_nlp_level_t requested = audio_aec_suppression_to_nlp(suppression);
+
+    taskENTER_CRITICAL(&s_aec_lock);
+    s_requested_nlp_level = requested;
+    taskEXIT_CRITICAL(&s_aec_lock);
 }
 
 esp_err_t audio_echo_cancel_set_active(bool active)
@@ -777,6 +994,7 @@ void audio_echo_cancel_process_capture_with_reference(
     if (!audio_aec_enter()) {
         return;
     }
+    audio_aec_apply_requested_suppression();
 
     int16_t *ref_ring = NULL;
     uint32_t read_start = 0;
@@ -887,8 +1105,25 @@ void audio_echo_cancel_process_capture_with_reference(
         s_frame_fill++;
 
         if (s_frame_fill >= (uint32_t)s_aec_frame_size) {
+            /*
+             * ESP-SR accepts writable input buffers and does not promise to
+             * preserve them. Keep an immutable copy for double-talk analysis;
+             * otherwise the detector can classify samples already changed by
+             * aec_process() instead of the real aligned microphone/reference.
+             */
+            memcpy(s_analysis_mic_frame,
+                   s_mic_frame,
+                   (size_t)s_aec_frame_size * sizeof(s_analysis_mic_frame[0]));
+            memcpy(s_analysis_ref_frame,
+                   s_ref_frame,
+                   (size_t)s_aec_frame_size * sizeof(s_analysis_ref_frame[0]));
             int64_t process_start_us = esp_timer_get_time();
             aec_process(s_aec, s_mic_frame, s_ref_frame, s_out_frame);
+            audio_aec_update_near_end_state(playback_reference_active,
+                                            s_analysis_mic_frame,
+                                            s_analysis_ref_frame,
+                                            s_out_frame,
+                                            (uint32_t)s_aec_frame_size);
             int64_t elapsed_us = esp_timer_get_time() - process_start_us;
             if (elapsed_us > 0) {
                 uint32_t elapsed_us_u32 =
@@ -928,6 +1163,7 @@ void audio_echo_cancel_process_capture_with_reference(
     if (metrics != NULL && processed) {
         metrics->active = true;
         metrics->reference_active = playback_reference_active;
+        metrics->near_end_detected = s_last_near_end_detected;
         metrics->reference = reference;
         metrics->ref_peak = ref_peak;
         metrics->mic_peak = mic_peak;
@@ -1006,6 +1242,8 @@ void audio_echo_cancel_deinit(void)
     int16_t *mic_frame = NULL;
     int16_t *ref_frame = NULL;
     int16_t *out_frame = NULL;
+    int16_t *analysis_mic_frame = NULL;
+    int16_t *analysis_ref_frame = NULL;
     int16_t *out_fifo = NULL;
 
     (void)audio_echo_cancel_set_active(false);
@@ -1051,6 +1289,8 @@ void audio_echo_cancel_deinit(void)
     mic_frame = s_mic_frame;
     ref_frame = s_ref_frame;
     out_frame = s_out_frame;
+    analysis_mic_frame = s_analysis_mic_frame;
+    analysis_ref_frame = s_analysis_ref_frame;
     out_fifo = s_out_fifo;
     s_aec = NULL;
     s_aec_frame_size = 0;
@@ -1058,6 +1298,8 @@ void audio_echo_cancel_deinit(void)
     s_mic_frame = NULL;
     s_ref_frame = NULL;
     s_out_frame = NULL;
+    s_analysis_mic_frame = NULL;
+    s_analysis_ref_frame = NULL;
     s_out_fifo = NULL;
     audio_aec_reset_state_locked();
     s_runtime_active = false;
@@ -1065,9 +1307,17 @@ void audio_echo_cancel_deinit(void)
     s_create_failed_logged = false;
     taskEXIT_CRITICAL(&s_aec_lock);
 
-    audio_aec_free_handle_and_buffers(handle, ref_ring, mic_frame, ref_frame, out_frame, out_fifo);
+    audio_aec_free_handle_and_buffers(handle,
+                                      ref_ring,
+                                      mic_frame,
+                                      ref_frame,
+                                      out_frame,
+                                      analysis_mic_frame,
+                                      analysis_ref_frame,
+                                      out_fifo);
     if (handle != NULL || ref_ring != NULL || mic_frame != NULL || ref_frame != NULL ||
-        out_frame != NULL || out_fifo != NULL) {
+        out_frame != NULL || analysis_mic_frame != NULL ||
+        analysis_ref_frame != NULL || out_fifo != NULL) {
         APP_LOG_DETAIL(TAG, "official ESP-SR AEC released");
 #if CONFIG_APP_VERBOSE_RUNTIME_LOGS
         audio_aec_log_heap("AEC released");
@@ -1086,6 +1336,11 @@ esp_err_t audio_echo_cancel_set_active(bool active)
 {
     (void)active;
     return ESP_OK;
+}
+
+void audio_echo_cancel_set_suppression(audio_echo_suppression_t suppression)
+{
+    (void)suppression;
 }
 
 void audio_echo_cancel_get_status(audio_echo_cancel_status_t *status)

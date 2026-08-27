@@ -766,6 +766,30 @@ esp_err_t esp_video_setup_buffer(struct esp_video *video, uint32_t type, uint32_
     /* buffer_size is configured when setting format */
 
     info = &stream->buf_info;
+    if (count == 0) {
+        if (stream->started) {
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        SLIST_INIT(&stream->queued_list);
+        SLIST_INIT(&stream->done_list);
+        stream->next_sequence = 0;
+
+        if (stream->ready_sem) {
+            vSemaphoreDelete(stream->ready_sem);
+            stream->ready_sem = NULL;
+        }
+
+        if (stream->buffer) {
+            esp_video_buffer_destroy(stream->buffer);
+            stream->buffer = NULL;
+        }
+
+        info->count = 0;
+        info->memory_type = memory_type;
+        return ESP_OK;
+    }
+
     if (!info->size || !info->align_size || !info->caps) {
         ESP_LOGE(TAG, "Failed to check buffer information: size=%" PRIu32 " align=%" PRIu32 " cap=%" PRIx32,
                  info->size, info->align_size, info->caps);

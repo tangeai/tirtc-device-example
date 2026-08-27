@@ -67,7 +67,12 @@ static void app_snapshot_fill_network(app_network_snapshot_t *network_snapshot)
 		network_snapshot->scan_results[index].channel = wifi_scan.results[index].channel;
 	}
 	network_snapshot->ping_running = ping.running;
-	strlcpy(network_snapshot->ping_summary, ping.summary, sizeof(network_snapshot->ping_summary));
+	network_snapshot->ping_valid = ping.valid;
+	network_snapshot->ping_transmitted = ping.transmitted;
+	network_snapshot->ping_received = ping.received;
+	network_snapshot->ping_latency_avg_ms = ping.avg_time_ms;
+	network_snapshot->ping_jitter_ms = ping.jitter_ms;
+	network_snapshot->ping_loss_percent = ping.loss_percent;
 }
 
 static void app_snapshot_fill_device(app_device_snapshot_t *device_snapshot)
@@ -352,6 +357,9 @@ static void app_snapshot_fill_wechat(app_wechat_snapshot_t *wechat_snapshot)
 	}
 
 	wechat_voip_service_get_contacts(&contacts);
+	wechat_snapshot->contacts_ready = contacts.ready;
+	wechat_snapshot->contacts_server_synced = contacts.server_synced;
+	wechat_snapshot->contacts_last_error = contacts.last_error;
 	wechat_snapshot->incoming_call_pending = wechat_voip_service_has_incoming_call();
 	wechat_snapshot->call_state =
 		app_snapshot_wechat_call_state_from_service(wechat_voip_service_get_call_state());
@@ -361,6 +369,9 @@ static void app_snapshot_fill_wechat(app_wechat_snapshot_t *wechat_snapshot)
 		strlcpy(wechat_snapshot->contacts[index].open_id,
 			contacts.contacts[index].open_id,
 			sizeof(wechat_snapshot->contacts[index].open_id));
+		strlcpy(wechat_snapshot->contacts[index].remark,
+			contacts.contacts[index].remark,
+			sizeof(wechat_snapshot->contacts[index].remark));
 	}
 }
 

@@ -87,10 +87,6 @@ static esp_err_t esp_video_ioctl_reqbufs(struct esp_video *video, struct v4l2_re
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (req_bufs->count == 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
     ret = esp_video_setup_buffer(video, req_bufs->type, req_bufs->memory, req_bufs->count);
 
     return ret;

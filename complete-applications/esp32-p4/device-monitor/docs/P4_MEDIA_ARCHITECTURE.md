@@ -3,12 +3,12 @@
 本文档说明摄像头、音频、TiRTC、显示和内存的所有权。目标是让每条媒体链路只有一个生命周期
 所有者，运行时不通过跨层补丁争抢硬件或连接句柄。
 
-本文对应应用版本 `1.3.2` 和 TiRTC SDK `2.3.0` 定制兼容快照。版本来源见
+本文对应应用版本 `1.5.0` 和 TiRTC SDK `2.3.0` 官方源码重建版。版本来源见
 [SOURCE_PROVENANCE.md](../SOURCE_PROVENANCE.md)，项目入口见 [README.md](../README.md)。
 环境、构建、烧录和首次启动见 [GETTING_STARTED_CN.md](GETTING_STARTED_CN.md)。
-下列参数描述当前源码设计和默认配置。`1.3.2` 的 SDK、媒体尺寸、码率、GOP 和缓冲池默认值
-均与 `1.3.1` 相同；本版主要收紧 NVS 与 RTC 连接生命周期。构建通过不单独构成烧录、联网、
-媒体运行或长稳证明。
+下列参数描述当前源码设计和默认配置。`1.5.0` 继续收口 P4 ICE/TGTRP、跨 APP 生命周期、
+摄像头/H264 持久池、音频/AEC、下行播放队列和 ESP-Hosted 恢复。构建通过不单独构成烧录、
+联网、媒体运行或长稳证明。
 
 本文中的上行和下行均以 P4 设备为参照：`P4 设备 -> 服务端` 为上行，
 `服务端 -> P4 设备` 为下行。微信客户端采集端的原始分辨率不由本工程配置。
@@ -36,19 +36,20 @@ P4 使用 capability-based allocation，不把所有 heap 当作可互换内存�
 | --- | --- | --- |
 | Internal RAM | DMA 描述符、实时控制队列、mutex、音频 I/O 控制、flash/NVS task stack | 显式 `MALLOC_CAP_INTERNAL`，媒体分配失败时不回退到这里 |
 | DMA-capable internal RAM | ESP-Hosted 描述符、摄像头/H264/JPEG 驱动和 DMA escrow | IDF 预留 `192KB`，运行时 escrow `96KB`，不存放长期大块 SDIO payload |
-| PSRAM | SDIO streaming RX、H264/JPEG payload、RTC TX pool、解码帧、RGB565 帧、HTTP/MQTT 工作区和后台 task stack | 显式 `MALLOC_CAP_SPIRAM`，固定池优先于实时动态扩容 |
+| PSRAM | SDIO streaming RX、摄像头 USERPTR、H264 reference/deblocking、H264/JPEG payload、RTC TX pool、解码帧、RGB565 帧、AEC、HTTP/MQTT 工作区和后台 task stack | 显式 `MALLOC_CAP_SPIRAM`，持久固定池优先于实时动态扩容 |
 
 启动早期按顺序预热：
 
 1. P4 JPEG decoder 的内部 DMA 描述符。
 2. DMA escrow。
-3. H264 encoder。
+3. 摄像头 USERPTR 与 H264 encoder reference/deblocking 持久池。
 4. RTC 视频发送池。
 5. 视频缩放/旋转工作区和下行显示池。
 6. AEC 工作集。
 
-这些资源在服务发现、绑定、MQTT、TiRTC 和 UI 分配长期内存前占位。视频大块留在 PSRAM，
-内部 RAM 只承担硬件必须的描述符和实时控制。
+这些资源在服务发现、绑定、MQTT、TiRTC 和 UI 分配长期内存前占位，并由跨 APP 媒体所有权
+统一复用。视频大块留在 PSRAM，内部 RAM 只承担硬件必须的描述符和实时控制。业务退出时
+清理会话代际、队列和引用，不通过反复释放、重建大块池制造碎片。
 
 RTC 视频发送池使用固定 PSRAM slot；音频发送和播放缓冲也使用独立固定池。队列只保存描述符
 和 slot index，不保存大 payload。后台网络、媒体和 UI task 使用 PSRAM stack；
@@ -97,13 +98,14 @@ value 复制到控制内存后，由 internal-RAM task 串行执行 `open -> set
 - PSRAM 中的 H264 输入和输出在 DMA 边界使用 `esp_cache_msync`。
 - 第一帧必须是完整关键帧，丢失依赖后重新请求 IDR。
 - camera driver 记录最后交付的 V4L2 `sequence`，排出旧完成帧并保证上层拿到更新的帧。
-- pipeline 只按 RTC 目标节拍取帧。15fps 使用向上取整的 `67ms` 间隔，20fps 使用 `50ms`；
+- pipeline 只按 RTC 目标节拍取帧。12fps 使用向上取整的 `84ms` 间隔，15fps 使用 `67ms`，
+  20fps 使用 `50ms`；
   超过一个周期时按错过的周期数推进原相位，不从当前时刻重新起算。
-- GOP 由 `APP_MEDIA_H264_GOP_DURATION_MS=2000` 和当前 fps 计算，IPC 为 `40` 帧，通话为
-  `30` 帧。这样两种档位都保持 2 秒 IDR 周期。
+- GOP 按媒体档位计算：IPC 为 `40` 帧 / `2s`；设备呼叫名义值为 `192` 帧 / `16s`；
+  微信上行为 `30` 帧 / `2s`。流开始、订阅恢复、传输恢复和对端请求仍会强制关键帧。
 
-设备间呼叫和微信 VoIP 从 P4 设备向服务端发送 `480x320@15fps` H264，起始码率
-`800kbps`；退出通话后恢复 IPC 正常档位。
+设备间呼叫从 P4 发送 `384x256@12fps`、`256kbps` H264；微信 VoIP 使用独立的
+`480x320@15fps`、`480kbps` H264 档位。退出通话后恢复 IPC 正常档位。
 
 ## 视频下行
 
@@ -115,14 +117,14 @@ value 复制到控制内存后，由 internal-RAM task 串行执行 `open -> set
 - 软件 H264 decoder 输出 YUV420。
 - PPA 优先完成缩放、裁剪和 RGB565 转换，软件路径作为回退。
 - H264 依赖帧丢失时进入 key-frame resync，不继续显示错误参考帧。
-- 压缩输入使用 16 个 `256KB` PSRAM slot；输入溢出后标记延迟恢复，在下一次 IDR 到达时
+- 压缩输入使用 24 个 `256KB` PSRAM slot；输入溢出后标记延迟恢复，在下一次 IDR 到达时
   清空旧依赖链并切换到新一代解码状态。
-- decoded pool 和 output pool 各使用 `4` 个 RGB565 slot；队列传递 slot index，不复制大帧。
-- 解码任务优先保持 H264 参考链连续；转换任务每处理一帧主动让出调度窗口，避免持续占满 CPU。
-- TinyH264 helper 固定在 CPU1、优先级 `17`；decoder caller 优先级 `16`。helper 高于同步等待它的
-  caller，同时低于实时音频采集，避免同步等待方把 helper 饿死。
-- 双任务同步保护识别 TinyH264 的两个阶段通知。前一通知仍未被 helper 消费时，保护层等待后
-  送达原阶段值，不使用覆盖通知，也不把通知失败当作正常推进。
+- decoded pool 使用 `4` 个 slot，output pool 使用 `20` 个 RGB565 slot；自适应播放队列深度
+  上限为 `16`，队列只传递 slot index。
+- 当前产品路径关闭 TinyH264 双任务 helper，由单一 decoder owner 在 SMP 上调度，避免第三方
+  slice/deblock helper 竞态；双任务参数仅保留给受控实验。
+- 解码目标上限为 `384x256`。转换任务通过 PPA 一次缩放到 `480x320`，每帧后主动让出调度窗口，
+  避免持续占满 CPU。
 - access unit decode 超过 `2s` 时标记 decoder fault 并隔离后续输入，同时记录 caller、helper、
   音频采集和播放 task 状态。只有原 decode 最终返回后才能安全销毁 decoder 并等待新 IDR 重建。
 
@@ -147,7 +149,7 @@ value 复制到控制内存后，由 internal-RAM task 串行执行 `open -> set
 - WHIP 连接接受后立即订阅远端视频；订阅调用成功但 `1s` 内仍无首个视频包时，仅补发
   一次幂等订阅，避免信令刚就绪时的单次请求丢失。
 
-统一输出由 `4` 个 RGB565 slot 组成。控制层可见时由 LVGL 合成；控制层自动隐藏后切换为
+微信显示复用固定 RGB565 pool。控制层可见时由 LVGL 合成；控制层 `5s` 后自动隐藏并切换为
 整帧 PSRAM direct-LCD DMA，点击画面恢复控制层。
 
 ## 微信会话 worker
@@ -180,7 +182,7 @@ value 复制到控制内存后，由 internal-RAM task 串行执行 `open -> set
 
 ### RTC/WHIP 连接生命周期
 
-连接状态由 `tirtc_session` 在 critical section 中统一持有。`1.3.2` 把“可以发起新连接”定义为：
+连接状态由 `tirtc_session` 在 critical section 中统一持有。当前实现把“可以发起新连接”定义为：
 网络在线、SDK 已初始化且已启动、没有 prepare/start/stop、没有 active connection、没有
 closing connection，也没有进行中的 WHIP attempt。
 
@@ -209,18 +211,19 @@ renderer 自身再区分 `input` 和 `decode` stall。周期统计分别记录 r
 converted、presented fps，输入/显示队列深度、access unit/转换阶段耗时、queue age、PTS 回退
 和画面间隔。这样能定位第一处停止推进的阶段，不用根据“最后看到黑屏”猜责任层。
 
-TiRTC `2.3.0` 的 TGMP 控制器通过 `on_video_bitrate_required()` 给出绝对目标码率。回调只投递
-事件，应用控制任务更新 media governor 和硬件编码器。双向通话档位为 `200-800kbps`；
-IPC 等其他档位按当前基准码率和画面规模计算范围。
+TiRTC `2.3.0` 的 TGMP SDK 回调 `on_update_bitrate()` 给出绝对目标码率；协议层内部 observer
+名为 `on_video_bitrate_required`。回调只投递事件，应用控制任务更新 media governor 和硬件
+编码器。设备呼叫 compact 档位按 `96-256kbps` 有界调整；连接先以正常 `256kbps` 档启动，
+TGMP 注册起点为 `224kbps`，收到传输反馈后才调整。IPC 和微信按各自基准码率与画面规模计算。
 
-该控制器保留为可选策略，默认关闭；启用后拥塞降码率立即生效，恢复升码率需经过稳定等待
-并分级上调。旧的本地队列压力自动降级也默认关闭，避免两个控制器竞争。
+SDK/TGMP 控制器默认开启；拥塞降码率立即生效，恢复升码率需经过稳定等待并分级上调。
+旧的本地队列压力自动降级默认关闭，避免两个控制器竞争。
 
 ## 媒体参数事实源
 
 运行时媒体策略集中在：
 
-- `main/media/media_tuning.h`：摄像头尺寸、fps、码率、QP、2 秒 GOP、payload 和 TGMP 参数。
+- `main/media/media_tuning.h`：摄像头尺寸、fps、码率、QP、分档 GOP、payload 和 TGMP 参数。
 - `main/services/call_video_renderer_config.h`：下行池、任务优先级、TinyH264 双任务、节拍和
   stall 阈值。
 - `main/protocols/tirtc/tirtc_session_options.h`：TiRTC 发送池、水位和 liveness 时间。
@@ -233,14 +236,15 @@ IPC 等其他档位按当前基准码率和画面规模计算范围。
 | 项目 | 默认值 |
 | --- | --- |
 | P4 设备 -> 服务端（IPC） | `1280x960@20fps`, `4Mbps`，GOP `40` 帧 / `2s` |
-| P4 设备 -> 服务端（双向通话/微信 VoIP） | `480x320@15fps`, `800kbps` 起始，TGMP `200-800kbps`，GOP `30` 帧 / `2s` |
+| P4 设备 -> 服务端（设备呼叫） | `384x256@12fps`, `256kbps`，TGMP `96-256kbps`，名义 GOP `192` 帧 / `16s` |
+| P4 设备 -> 服务端（微信 VoIP） | `480x320@15fps`, `480kbps`，GOP `30` 帧 / `2s` |
 | 服务端 -> P4 设备（微信 VoIP） | 请求 `640x480` MJPEG，显示到 `480x320` |
-| H264 downlink input | `16 x 256KB` PSRAM slot |
-| H264 decoded/output | 各 `4` 个 RGB565 slot |
+| H264 downlink input | `24 x 256KB` PSRAM slot |
+| H264 decoded/output | decoded `4` 个、output `20` 个 RGB565 slot；playout 深度上限 `16` |
 | H264 output buffer | `1MB` |
 | Max delta payload | `256KB` |
 | Startup max delta payload | 首 `2500ms` 为 `128KB` |
-| TiRTC SDK bitrate adaptation | 关闭 |
+| TiRTC SDK/TGMP bitrate adaptation | 开启 |
 | Legacy local auto adaptation | 关闭 |
 | Wait subscribe before capture | 关闭 |
 | Direct LCD with auto-hidden controls | 开启 |
@@ -257,10 +261,10 @@ IPC 等其他档位按当前基准码率和画面规模计算范围。
 
 ## 建议验证
 
-ESP-IDF `5.5.4` 正式构建对应 `project_version=1.3.2`，应用镜像为
-`6,927,360` bytes，SHA-256 为 `2df6d9d626a05f19a4fd1f15eb854c54119a32ccd475090f6713f2629afc90e2`。由同一构建生成的完整镜像
-为 `16,777,216` bytes，SHA-256 为 `87bfb67d1ba30d7f79663f63891e29f7f4f4367c80ff0d5cecb1b46f301d40e9`，只上传 GitHub
-Release，不进入 Git；它不改变以下目标板验证要求：
+公开候选已使用 ESP-IDF `5.5.4`、`--no-ccache` 完成唯一一次干净构建；构建后只补写
+Markdown 证据，编译输入保持一致。应用镜像、分区余量、实际烧录分段和 SHA-256 写入
+`release-manifest.json`；16 MiB 完整镜像只上传 GitHub Release，不进入 Git。它不改变以下
+目标板验证要求：
 
 1. 检查横屏显示和触摸坐标。
 2. 检查绑定、正式 MQTT 和 TiRTC 上线。
@@ -270,8 +274,8 @@ Release，不进入 Git；它不改变以下目标板验证要求：
 5. 分别检查 IPC、设备呼叫、微信 VoIP 和 AI Chat。
 6. 对微信 VoIP 分别确认 P4 设备发送的 `480x320` H264 和服务端下发的 MJPEG 均有首帧证据，
    并记录服务端实际下发分辨率。
-7. 保持每个主要场景至少 5 分钟，观察 fps、bitrate、queue、DMA largest block、PSRAM pool
-   和 AEC。
+7. 保持每个主要场景至少 5 分钟，观察 fps、bitrate、queue、DMA largest block、持久 PSRAM
+   pool 和 AEC；单独确认设备呼叫 `384x256@12fps` 弱网恢复。
 8. 每个场景连续进入和退出至少 10 次，确认无残留资源和连接句柄。
-9. 对 H264 下行做连续呼叫和故障注入，确认 sync guard 后链路继续推进，并记录 decode 超过
-   `2s` 时原调用是否返回、decoder 是否能从新 IDR 重建。
+9. 对 H264 下行做连续呼叫和故障注入，确认 persistent reference/deblocking pool 没有跨会话
+   残留，记录 decode 超过 `2s` 时原调用是否返回、decoder 是否能从新 IDR 重建。

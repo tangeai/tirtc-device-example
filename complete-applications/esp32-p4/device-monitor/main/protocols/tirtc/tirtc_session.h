@@ -60,6 +60,7 @@ typedef bool (*tirtc_session_message_cb_t)(tirtc_conn_t conn,
                                            uint32_t data_len,
                                            void *ctx);
 typedef void (*tirtc_session_call_active_cb_t)(bool active, void *ctx);
+typedef void (*tirtc_session_connection_accepted_cb_t)(tirtc_conn_t conn, void *ctx);
 typedef void (*tirtc_session_connection_error_cb_t)(tirtc_conn_t conn, int error, void *ctx);
 typedef void (*tirtc_session_disconnected_cb_t)(tirtc_conn_t conn, void *ctx);
 typedef void (*tirtc_session_start_error_cb_t)(int error,
@@ -75,6 +76,7 @@ typedef struct {
     tirtc_session_command_cb_t on_command;
     tirtc_session_message_cb_t on_message;
     tirtc_session_call_active_cb_t on_call_active;
+    tirtc_session_connection_accepted_cb_t on_connection_accepted;
     tirtc_session_connection_error_cb_t on_connection_error;
     tirtc_session_disconnected_cb_t on_disconnected;
     tirtc_session_start_error_cb_t on_start_error;

@@ -34,6 +34,7 @@ static const char *TAG = "media_sink";
 #define MEDIA_SINK_AUDIO_WARNING_INTERVAL_MS 10000
 #define MEDIA_SINK_AUDIO_UNDERFLOW_WARNING_COUNT 10
 #define MEDIA_SINK_AUDIO_TRIM_KEEP_MARGIN_MS 80
+#define MEDIA_SINK_AUDIO_CALL_TRIM_KEEP_MARGIN_MS 200
 
 typedef struct {
     uint32_t backlog_trim_threshold;
@@ -110,9 +111,13 @@ static const media_sink_audio_tuning_t s_audio_tunings[] = {
         .drain_burst_max = 4,
     },
     [MEDIA_SINK_AUDIO_PROFILE_ADAPTIVE_CALL] = {
-        .backlog_trim_threshold = 16,
-        .backlog_target_packets = 8,
-        .drain_burst_max = 8,
+        /* TGTRP recovery can deliver 16 or more 20 ms packets in one burst.
+         * Move that burst into the PSRAM PCM ring instead of deleting half of
+         * it from the bounded internal-RAM queue. Keep trimming only as the
+         * final guard before the 32-slot queue is exhausted. */
+        .backlog_trim_threshold = 30,
+        .backlog_target_packets = 24,
+        .drain_burst_max = 16,
     },
     [MEDIA_SINK_AUDIO_PROFILE_JITTER_SAFE] = {
         .backlog_trim_threshold = 24,
@@ -181,10 +186,19 @@ static uint32_t media_sink_audio_profile_base_delay_ms(media_sink_audio_profile_
     case MEDIA_SINK_AUDIO_PROFILE_JITTER_SAFE:
         return 160U;
     case MEDIA_SINK_AUDIO_PROFILE_ADAPTIVE_CALL:
+        return 140U;
     case MEDIA_SINK_AUDIO_PROFILE_LOW_LATENCY:
     default:
         return 40U;
     }
+}
+
+static uint32_t media_sink_audio_profile_trim_keep_margin_ms(
+    media_sink_audio_profile_t profile)
+{
+    return profile == MEDIA_SINK_AUDIO_PROFILE_ADAPTIVE_CALL ?
+           MEDIA_SINK_AUDIO_CALL_TRIM_KEEP_MARGIN_MS :
+           MEDIA_SINK_AUDIO_TRIM_KEEP_MARGIN_MS;
 }
 
 static void media_sink_audio_get_controller_snapshot(audio_playout_snapshot_t *snapshot)
@@ -425,7 +439,9 @@ static esp_err_t media_sink_append_audio_pcm(const uint8_t *data,
         media_sink_audio_bytes_for_duration_ms(emergency_limit_ms, playback_format);
     if (emergency_limit_bytes > 0U &&
         s_audio_pcm_used_bytes > emergency_limit_bytes) {
-        uint32_t keep_ms = snapshot.target_delay_ms + MEDIA_SINK_AUDIO_TRIM_KEEP_MARGIN_MS;
+        uint32_t keep_ms = snapshot.target_delay_ms +
+                           media_sink_audio_profile_trim_keep_margin_ms(
+                               media_sink_audio_get_profile());
         if (keep_ms < source_packet_ms) {
             keep_ms = source_packet_ms;
         }
@@ -1318,7 +1334,7 @@ esp_err_t media_sink_init(void)
 
     esp_err_t buffer_ret = media_sink_ensure_audio_playback_buffers();
     if (buffer_ret != ESP_OK) {
-        vQueueDelete(s_audio_queue);
+        vQueueDeleteWithCaps(s_audio_queue);
         s_audio_queue = NULL;
         return buffer_ret;
     }
@@ -1332,7 +1348,7 @@ esp_err_t media_sink_init(void)
                                                           MEDIA_SINK_AUDIO_TASK_CORE,
                                                           MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (audio_ok != pdPASS) {
-        vQueueDelete(s_audio_queue);
+        vQueueDeleteWithCaps(s_audio_queue);
         s_audio_queue = NULL;
         return ESP_ERR_NO_MEM;
     }

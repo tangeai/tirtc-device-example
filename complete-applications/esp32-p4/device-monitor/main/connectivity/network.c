@@ -21,6 +21,10 @@ static const char *TAG = "network";
 #define NETWORK_MONITOR_INTERVAL_MS 250U
 #define NETWORK_MONITOR_STOP_WAIT_MS 300U
 #define NETWORK_MONITOR_TASK_STACK_SIZE (5 * 1024)
+#define NETWORK_QUALITY_PROBE_COUNT 20U
+#define NETWORK_QUALITY_PROBE_INTERVAL_MS 200U
+#define NETWORK_QUALITY_PROBE_TIMEOUT_MS 500U
+#define NETWORK_QUALITY_PROBE_DATA_SIZE 32U
 
 static network_state_t s_network_state;
 static network_ping_status_t s_ping_status;
@@ -32,7 +36,20 @@ static bool s_ping_cancel_requested;
 static bool s_monitor_stop_requested;
 static uint64_t s_ping_time_sum_ms;
 static uint32_t s_ping_success_count;
+static uint32_t s_ping_previous_time_ms;
+static uint64_t s_ping_jitter_sum_ms;
+static uint32_t s_ping_jitter_sample_count;
 static portMUX_TYPE s_network_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static uint32_t network_ping_loss_percent(uint32_t transmitted, uint32_t received)
+{
+    if (transmitted == 0U) {
+        return 0U;
+    }
+
+    const uint32_t lost = transmitted > received ? transmitted - received : 0U;
+    return (lost * 100U + transmitted / 2U) / transmitted;
+}
 
 static void network_ping_set_summary_locked(const char *fmt, ...)
 {
@@ -110,21 +127,31 @@ static void network_ping_on_success(esp_ping_handle_t hdl, void *args)
     s_ping_status.received = received;
     s_ping_status.last_time_ms = time_gap_ms;
     s_ping_time_sum_ms += time_gap_ms;
-    s_ping_success_count++;
-    if (s_ping_status.min_time_ms == 0 || time_gap_ms < s_ping_status.min_time_ms) {
+    /* Jitter is the mean absolute RTT change between consecutive replies. */
+    if (s_ping_success_count > 0U) {
+        const uint32_t jitter_sample = time_gap_ms >= s_ping_previous_time_ms
+                                           ? time_gap_ms - s_ping_previous_time_ms
+                                           : s_ping_previous_time_ms - time_gap_ms;
+        s_ping_jitter_sum_ms += jitter_sample;
+        s_ping_jitter_sample_count++;
+        s_ping_status.jitter_ms =
+            (uint32_t)(s_ping_jitter_sum_ms / s_ping_jitter_sample_count);
+    }
+    s_ping_previous_time_ms = time_gap_ms;
+    if (s_ping_success_count == 0U || time_gap_ms < s_ping_status.min_time_ms) {
         s_ping_status.min_time_ms = time_gap_ms;
     }
+    s_ping_success_count++;
     if (time_gap_ms > s_ping_status.max_time_ms) {
         s_ping_status.max_time_ms = time_gap_ms;
     }
     s_ping_status.avg_time_ms = (uint32_t)(s_ping_time_sum_ms / s_ping_success_count);
-    loss_percent = (transmitted > 0)
-                       ? (uint32_t)((1.0f - ((float)received / (float)transmitted)) * 100.0f)
-                       : 0;
+    loss_percent = network_ping_loss_percent(transmitted, received);
     s_ping_status.loss_percent = loss_percent;
-    network_ping_set_summary_locked("Ping %lu ms\nSuccess %lu%%",
-                                             (unsigned long)time_gap_ms,
-                                             (unsigned long)(100 - loss_percent));
+    network_ping_set_summary_locked("RTT %lu ms Jitter %lu ms Loss %lu%%",
+                                    (unsigned long)s_ping_status.avg_time_ms,
+                                    (unsigned long)s_ping_status.jitter_ms,
+                                    (unsigned long)loss_percent);
     taskEXIT_CRITICAL(&s_network_lock);
 }
 
@@ -145,12 +172,12 @@ static void network_ping_on_timeout(esp_ping_handle_t hdl, void *args)
     }
     s_ping_status.transmitted = transmitted;
     s_ping_status.received = received;
-    loss_percent = (transmitted > 0)
-                       ? (uint32_t)((1.0f - ((float)received / (float)transmitted)) * 100.0f)
-                       : 100;
+    loss_percent = transmitted > 0U ? network_ping_loss_percent(transmitted, received) : 100U;
     s_ping_status.loss_percent = loss_percent;
-    network_ping_set_summary_locked("Ping timeout\nSuccess %lu%%",
-                                             (unsigned long)(100 - loss_percent));
+    network_ping_set_summary_locked("RTT %lu ms Jitter %lu ms Loss %lu%%",
+                                    (unsigned long)s_ping_status.avg_time_ms,
+                                    (unsigned long)s_ping_status.jitter_ms,
+                                    (unsigned long)loss_percent);
     taskEXIT_CRITICAL(&s_network_lock);
 }
 
@@ -170,22 +197,22 @@ static void network_ping_on_end(esp_ping_handle_t hdl, void *args)
         return;
     }
     s_ping_status.running = false;
-    s_ping_status.valid = !s_ping_cancel_requested;
+    s_ping_status.valid = !s_ping_cancel_requested && transmitted > 0U;
     s_ping_status.transmitted = transmitted;
     s_ping_status.received = received;
-    s_ping_status.loss_percent = (transmitted > 0)
-                                     ? (uint32_t)((1.0f - ((float)received / (float)transmitted)) * 100.0f)
-                                     : 0;
+    s_ping_status.loss_percent = network_ping_loss_percent(transmitted, received);
     if (s_ping_cancel_requested) {
         s_ping_status.last_error = ESP_ERR_INVALID_STATE;
         network_ping_set_summary_locked("Ping canceled");
     } else if (received > 0) {
-        network_ping_set_summary_locked("Ping %lu ms\nSuccess %lu%%",
-                                                 (unsigned long)s_ping_status.avg_time_ms,
-                                                 (unsigned long)(100 - s_ping_status.loss_percent));
+        network_ping_set_summary_locked("RTT %lu ms Jitter %lu ms Loss %lu%%",
+                                        (unsigned long)s_ping_status.avg_time_ms,
+                                        (unsigned long)s_ping_status.jitter_ms,
+                                        (unsigned long)s_ping_status.loss_percent);
     } else {
-        network_ping_set_summary_locked("Ping timeout\nSuccess %lu%%",
-                                                 (unsigned long)(100 - s_ping_status.loss_percent));
+        s_ping_status.last_error = ESP_ERR_TIMEOUT;
+        network_ping_set_summary_locked("RTT -- Jitter -- Loss %lu%%",
+                                        (unsigned long)s_ping_status.loss_percent);
     }
     s_ping_handle = NULL;
     s_ping_cancel_requested = false;
@@ -307,6 +334,7 @@ esp_err_t network_prepare(const network_config_t *config)
         .auto_connect = effective_config->auto_connect,
         .default_ssid = effective_config->default_ssid,
         .default_password = effective_config->default_password,
+        .fallback_dns_ipv4 = effective_config->fallback_dns_ipv4,
     };
     esp_err_t ret = wifi_prepare(&wifi_config);
 
@@ -370,6 +398,9 @@ void network_release(void)
     memset(&s_ping_status, 0, sizeof(s_ping_status));
     s_ping_time_sum_ms = 0;
     s_ping_success_count = 0;
+    s_ping_previous_time_ms = 0;
+    s_ping_jitter_sum_ms = 0;
+    s_ping_jitter_sample_count = 0;
     taskEXIT_CRITICAL(&s_network_lock);
 
     network_state_t current = {0};
@@ -433,6 +464,9 @@ esp_err_t network_start_ping(const char *target_host)
     s_ping_cancel_requested = false;
     s_ping_time_sum_ms = 0;
     s_ping_success_count = 0;
+    s_ping_previous_time_ms = 0;
+    s_ping_jitter_sum_ms = 0;
+    s_ping_jitter_sample_count = 0;
     taskEXIT_CRITICAL(&s_network_lock);
 
     ip_addr_t target_addr = {0};
@@ -452,10 +486,10 @@ esp_err_t network_start_ping(const char *target_host)
     taskEXIT_CRITICAL(&s_network_lock);
 
     esp_ping_config_t ping_cfg = ESP_PING_DEFAULT_CONFIG();
-    ping_cfg.count = 4;
-    ping_cfg.interval_ms = 500;
-    ping_cfg.timeout_ms = 1000;
-    ping_cfg.data_size = 32;
+    ping_cfg.count = NETWORK_QUALITY_PROBE_COUNT;
+    ping_cfg.interval_ms = NETWORK_QUALITY_PROBE_INTERVAL_MS;
+    ping_cfg.timeout_ms = NETWORK_QUALITY_PROBE_TIMEOUT_MS;
+    ping_cfg.data_size = NETWORK_QUALITY_PROBE_DATA_SIZE;
     ping_cfg.target_addr = target_addr;
 
     esp_ping_callbacks_t ping_cbs = {

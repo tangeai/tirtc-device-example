@@ -64,6 +64,18 @@ static app_call_start_runtime_t s_call_start;
 static portMUX_TYPE s_call_hangup_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_call_hangup_queued;
 
+static bool app_call_outgoing_state_ready(device_call_state_t *state_out)
+{
+	device_call_snapshot_t call = {0};
+
+	device_call_get_snapshot(&call);
+	if (state_out != NULL) {
+		*state_out = call.state;
+	}
+	return call.state == DEVICE_CALL_STATE_IDLE ||
+	       call.state == DEVICE_CALL_STATE_ERROR;
+}
+
 static void app_contact_scan_restore_task(void *arg)
 {
 	bool restore = (bool)(uintptr_t)arg;
@@ -117,15 +129,13 @@ static void app_defer_contact_scan_resources(bool restore)
 	}
 }
 
-static void app_contact_scan_preview_cb(const uint16_t *rgb565_pixels,
-					uint16_t width,
-					uint16_t height,
+static void app_contact_scan_preview_cb(const scan_preview_frame_t *frame,
 					void *ctx)
 {
 	(void)ctx;
 
 	if (s_contact_scan.preview_cb != NULL) {
-		s_contact_scan.preview_cb(rgb565_pixels, width, height, s_contact_scan.ctx);
+		s_contact_scan.preview_cb(frame, s_contact_scan.ctx);
 	}
 }
 
@@ -304,6 +314,12 @@ static void app_call_start_task(void *arg)
 		canceled = true;
 		goto done;
 	}
+	if (runtime.action == APP_CALL_START_OUTGOING &&
+	    !app_call_outgoing_state_ready(NULL)) {
+		ret = ESP_ERR_INVALID_STATE;
+		failure_message = "call already active";
+		goto done;
+	}
 
 	app_state_prepare_call_media(video, true);
 	ret = app_acquire_call_session_resources(video);
@@ -421,7 +437,10 @@ static esp_err_t app_call_start_async(app_call_start_action_t action,
 							      APP_CALL_START_TASK_PRIORITY,
 							      NULL,
 							      APP_TASK_CORE_BACKGROUND,
-							      APP_TASK_STACK_CAPS_BACKGROUND);
+							      /* Resource transitions load persisted audio settings and
+							       * may enter cache-off NVS/codec paths. This control stack
+							       * must remain accessible while PSRAM cache is disabled. */
+							      APP_TASK_STACK_CAPS_CONTROL);
 	if (task_ret != pdPASS) {
 		app_call_start_finish(generation,
 				      ESP_ERR_NO_MEM,
@@ -521,6 +540,7 @@ esp_err_t app_cancel_pending_call_start_for_lifecycle(void)
 esp_err_t app_call_contact(const char *device_id, app_call_type_t call_type)
 {
     bool video = call_type == APP_CALL_TYPE_VIDEO;
+    device_call_state_t call_state = DEVICE_CALL_STATE_IDLE;
 
     if (device_id == NULL ||
         strlen(device_id) != APP_CALL_CONTACT_DEVICE_ID_LENGTH ||
@@ -545,6 +565,13 @@ esp_err_t app_call_contact(const char *device_id, app_call_type_t call_type)
                  device_id);
         return ESP_ERR_INVALID_STATE;
     }
+	if (!app_call_outgoing_state_ready(&call_state)) {
+		ESP_LOGW(CALL_FLOW_TAG,
+			 "stage=app_call_rejected peer=%s state=%u reason=call_busy",
+			 device_id,
+			 (unsigned)call_state);
+		return ESP_ERR_INVALID_STATE;
+	}
 
     esp_err_t ret = app_call_start_async(APP_CALL_START_OUTGOING,
                                          device_id,
@@ -705,7 +732,7 @@ esp_err_t app_hangup_call_async(void)
                                                           APP_CALL_HANGUP_TASK_PRIORITY,
                                                           NULL,
                                                           APP_TASK_CORE_BACKGROUND,
-                                                          APP_TASK_STACK_CAPS_BACKGROUND);
+                                                          APP_TASK_STACK_CAPS_CONTROL);
     if (task_ret != pdPASS) {
         taskENTER_CRITICAL(&s_call_hangup_lock);
         s_call_hangup_queued = false;

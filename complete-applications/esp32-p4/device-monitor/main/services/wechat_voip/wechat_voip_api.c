@@ -316,9 +316,11 @@ esp_err_t wechat_voip_api_fetch_callers(const char *api_base,
                                   "wxa_user_openid"));
         copy_str(caller.model_id, sizeof(caller.model_id), json_string_any(item, "wx_model_id", "wxa_model_id"));
         copy_str(caller.app_id, sizeof(caller.app_id), json_string_any(item, "wx_app_id", "wxa_app_id"));
-        copy_str(caller.remark,
-                 sizeof(caller.remark),
-                 json_string_any4(item, "remark", "alias", "contact_name", "nickname"));
+        const char *remark =
+            json_string_any4(item, "remark", "alias", "contact_name", "nickname");
+        if (wechat_voip_remark_is_valid(remark != NULL ? remark : "")) {
+            copy_str(caller.remark, sizeof(caller.remark), remark != NULL ? remark : "");
+        }
         if (caller_cb != NULL) {
             caller_cb(&caller, ctx);
         }
@@ -470,4 +472,54 @@ esp_err_t wechat_voip_api_request_call(const char *api_base,
              call_id[0] != '\0' ? call_id : "-");
     cJSON_Delete(root);
     return ESP_OK;
+}
+
+esp_err_t wechat_voip_api_update_contact_remark(const char *api_base,
+                                                const char *mqtt_token,
+                                                const char *peer_id,
+                                                const char *remark)
+{
+    if (api_base == NULL || api_base[0] == '\0' ||
+        mqtt_token == NULL || mqtt_token[0] == '\0' ||
+        peer_id == NULL || peer_id[0] == '\0' ||
+        !wechat_voip_remark_is_valid(remark)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    cJSON *payload = cJSON_CreateObject();
+    if (payload == NULL ||
+        cJSON_AddStringToObject(payload, "peer_id", peer_id) == NULL ||
+        cJSON_AddStringToObject(payload, "remark", remark) == NULL) {
+        cJSON_Delete(payload);
+        return ESP_ERR_NO_MEM;
+    }
+
+    char body[VOIP_HTTP_BODY_MAX_LEN] = {0};
+    bool encoded = cJSON_PrintPreallocated(payload, body, sizeof(body), false);
+    cJSON_Delete(payload);
+    if (!encoded) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    char response[VOIP_HTTP_RESPONSE_MAX_LEN] = {0};
+    int status = 0;
+    esp_err_t ret = voip_http_request(api_base,
+                                      "/v1/call/device/contacts/remark",
+                                      "PUT",
+                                      body,
+                                      mqtt_token,
+                                      response,
+                                      sizeof(response),
+                                      &status);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    if (status < 200 || status >= 300) {
+        ESP_LOGW(TAG,
+                 "update contact remark HTTP status=%d body_len=%u",
+                 status,
+                 (unsigned)strlen(response));
+        return ESP_FAIL;
+    }
+    return parse_and_check_reply(response, "update contact remark");
 }

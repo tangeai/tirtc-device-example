@@ -236,15 +236,16 @@ static bool video_frame_resolve_ppa_fit(uint16_t crop_width,
     return true;
 }
 
-static esp_err_t video_frame_convert_i420_ppa(video_frame_converter_handle_t handle,
-                                              const uint8_t *i420,
-                                              uint16_t source_width,
-                                              uint16_t source_height,
-                                              uint16_t crop_x,
-                                              uint16_t crop_y,
-                                              uint16_t crop_width,
-                                              uint16_t crop_height,
-                                              uint16_t *output)
+static esp_err_t video_frame_convert_yuv420_ppa(video_frame_converter_handle_t handle,
+                                               const uint8_t *yuv420,
+                                               uint16_t source_width,
+                                               uint16_t source_height,
+                                               uint16_t crop_x,
+                                               uint16_t crop_y,
+                                               uint16_t crop_width,
+                                               uint16_t crop_height,
+                                               bool input_is_ouyy_evyy,
+                                               uint16_t *output)
 {
     size_t packed_size = (size_t)crop_width * crop_height * 3U / 2U;
     uint16_t output_width = handle->config.output_width;
@@ -252,7 +253,8 @@ static esp_err_t video_frame_convert_i420_ppa(video_frame_converter_handle_t han
     size_t output_size = (size_t)output_width * output_height * sizeof(*output);
     video_frame_ppa_fit_t fit = {0};
 
-    ESP_RETURN_ON_FALSE(handle->ppa_client != NULL && handle->packed_yuv420 != NULL &&
+    ESP_RETURN_ON_FALSE(handle->ppa_client != NULL &&
+                            (input_is_ouyy_evyy || handle->packed_yuv420 != NULL) &&
                             video_frame_resolve_ppa_fit(crop_width,
                                                         crop_height,
                                                         output_width,
@@ -260,7 +262,8 @@ static esp_err_t video_frame_convert_i420_ppa(video_frame_converter_handle_t han
                                                         VIDEO_FRAME_ROTATION_CLOCKWISE_0,
                                                         handle->config.prevent_upscale,
                                                         &fit) &&
-                            packed_size <= handle->packed_yuv420_size &&
+                            (input_is_ouyy_evyy ||
+                             packed_size <= handle->packed_yuv420_size) &&
                             ((uintptr_t)output & (VIDEO_FRAME_CACHE_LINE_SIZE - 1U)) == 0U &&
                             (output_size & (VIDEO_FRAME_CACHE_LINE_SIZE - 1U)) == 0U,
                         ESP_ERR_NOT_SUPPORTED,
@@ -273,14 +276,26 @@ static esp_err_t video_frame_convert_i420_ppa(video_frame_converter_handle_t han
                                      fit.offset_x,
                                      fit.offset_y);
     int64_t started_us = esp_timer_get_time();
-    video_frame_pack_i420_region_for_ppa(i420,
-                                         source_width,
-                                         source_height,
-                                         crop_x,
-                                         crop_y,
-                                         crop_width,
-                                         crop_height,
-                                         handle->packed_yuv420);
+    const uint8_t *ppa_input = yuv420;
+    uint16_t ppa_input_width = source_width;
+    uint16_t ppa_input_height = source_height;
+    uint16_t ppa_crop_x = crop_x;
+    uint16_t ppa_crop_y = crop_y;
+    if (!input_is_ouyy_evyy) {
+        video_frame_pack_i420_region_for_ppa(yuv420,
+                                             source_width,
+                                             source_height,
+                                             crop_x,
+                                             crop_y,
+                                             crop_width,
+                                             crop_height,
+                                             handle->packed_yuv420);
+        ppa_input = handle->packed_yuv420;
+        ppa_input_width = crop_width;
+        ppa_input_height = crop_height;
+        ppa_crop_x = 0U;
+        ppa_crop_y = 0U;
+    }
     if (fit.render_width != output_width || fit.render_height != output_height) {
         memset(output, 0, output_size);
         ESP_RETURN_ON_ERROR(esp_cache_msync(output,
@@ -292,13 +307,13 @@ static esp_err_t video_frame_convert_i420_ppa(video_frame_converter_handle_t han
     int64_t packed_us = esp_timer_get_time();
     const ppa_srm_oper_config_t operation = {
         .in = {
-            .buffer = handle->packed_yuv420,
-            .pic_w = crop_width,
-            .pic_h = crop_height,
+            .buffer = ppa_input,
+            .pic_w = ppa_input_width,
+            .pic_h = ppa_input_height,
             .block_w = crop_width,
             .block_h = crop_height,
-            .block_offset_x = 0,
-            .block_offset_y = 0,
+            .block_offset_x = ppa_crop_x,
+            .block_offset_y = ppa_crop_y,
             .srm_cm = PPA_SRM_COLOR_MODE_YUV420,
             .yuv_range = PPA_COLOR_RANGE_LIMIT,
             .yuv_std = PPA_COLOR_CONV_STD_RGB_YUV_BT601,
@@ -321,7 +336,7 @@ static esp_err_t video_frame_convert_i420_ppa(video_frame_converter_handle_t han
     };
     ESP_RETURN_ON_ERROR(ppa_do_scale_rotate_mirror(handle->ppa_client, &operation),
                         TAG,
-                        "PPA I420 conversion failed");
+                        "PPA YUV420 conversion failed");
     int64_t ppa_done_us = esp_timer_get_time();
     if (handle->config.output_rgb565_byte_swap) {
         video_frame_swap_rgb565_bytes(output, (size_t)output_width * output_height);
@@ -770,15 +785,16 @@ esp_err_t video_frame_converter_i420_to_rgb565(video_frame_converter_handle_t ha
                         TAG,
                         "resolve I420 fit failed");
     if (handle->ppa_client != NULL) {
-        esp_err_t ppa_ret = video_frame_convert_i420_ppa(handle,
-                                                         i420,
-                                                         source_width,
-                                                         source_height,
-                                                         crop_x,
-                                                         crop_y,
-                                                         crop_width,
-                                                         crop_height,
-                                                         output);
+        esp_err_t ppa_ret = video_frame_convert_yuv420_ppa(handle,
+                                                           i420,
+                                                           source_width,
+                                                           source_height,
+                                                           crop_x,
+                                                           crop_y,
+                                                           crop_width,
+                                                           crop_height,
+                                                           false,
+                                                           output);
         if (ppa_ret == ESP_OK) {
             handle->last_mode = VIDEO_FRAME_CONVERTER_MODE_PPA;
             if (mode_used != NULL) {
@@ -836,6 +852,75 @@ esp_err_t video_frame_converter_i420_to_rgb565(video_frame_converter_handle_t ha
     }
     taskEXIT_CRITICAL(&handle->stats_lock);
     return software_ret;
+}
+
+esp_err_t video_frame_converter_ouyy_evyy_to_rgb565(
+    video_frame_converter_handle_t handle,
+    const uint8_t *ouyy_evyy,
+    uint16_t source_width,
+    uint16_t source_height,
+    uint16_t *output,
+    video_frame_converter_mode_t *mode_used)
+{
+    uint16_t crop_x = 0U;
+    uint16_t crop_y = 0U;
+    uint16_t crop_width = 0U;
+    uint16_t crop_height = 0U;
+
+    ESP_RETURN_ON_FALSE(handle != NULL && ouyy_evyy != NULL && output != NULL &&
+                            source_width >= 16U && source_height >= 16U &&
+                            (source_width & 1U) == 0U &&
+                            (source_height & 1U) == 0U,
+                        ESP_ERR_INVALID_ARG,
+                        TAG,
+                        "invalid O_UYY_E_VYY conversion input");
+    ESP_RETURN_ON_ERROR(video_frame_resolve_crop(handle,
+                                                 source_width,
+                                                 source_height,
+                                                 &crop_x,
+                                                 &crop_y,
+                                                 &crop_width,
+                                                 &crop_height),
+                        TAG,
+                        "resolve O_UYY_E_VYY crop failed");
+    ESP_RETURN_ON_ERROR(video_frame_apply_fit_crop(handle,
+                                                   VIDEO_FRAME_ROTATION_CLOCKWISE_0,
+                                                   true,
+                                                   source_width,
+                                                   source_height,
+                                                   &crop_x,
+                                                   &crop_y,
+                                                   &crop_width,
+                                                   &crop_height),
+                        TAG,
+                        "resolve O_UYY_E_VYY fit failed");
+    ESP_RETURN_ON_FALSE(handle->ppa_client != NULL,
+                        ESP_ERR_NOT_SUPPORTED,
+                        TAG,
+                        "O_UYY_E_VYY conversion requires PPA");
+
+    esp_err_t ret = video_frame_convert_yuv420_ppa(handle,
+                                                   ouyy_evyy,
+                                                   source_width,
+                                                   source_height,
+                                                   crop_x,
+                                                   crop_y,
+                                                   crop_width,
+                                                   crop_height,
+                                                   true,
+                                                   output);
+    if (ret == ESP_OK) {
+        handle->last_mode = VIDEO_FRAME_CONVERTER_MODE_PPA;
+        if (mode_used != NULL) {
+            *mode_used = VIDEO_FRAME_CONVERTER_MODE_PPA;
+        }
+        return ESP_OK;
+    }
+
+    taskENTER_CRITICAL(&handle->stats_lock);
+    handle->stats.ppa_failures++;
+    taskEXIT_CRITICAL(&handle->stats_lock);
+    return ret;
 }
 
 static esp_err_t video_frame_convert_rgb565_ppa(video_frame_converter_handle_t handle,

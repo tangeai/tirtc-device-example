@@ -6,8 +6,6 @@
 
 #pragma once
 
-#include <stdbool.h>
-#include <stdint.h>
 #include <stdio.h>
 #include "esp_h264_dec.h"
 #include "esp_h264_dec_param.h"
@@ -27,19 +25,10 @@ typedef esp_h264_dec_param_handle_t esp_h264_dec_param_sw_handle_t;
 typedef esp_h264_dec_cfg_t esp_h264_dec_cfg_sw_t;
 
 /**
- * @brief Runtime scheduling for the optional TinyH264 helper task
- */
-typedef struct {
-    bool dual_task_enable;
-    uint32_t dual_task_core;
-    uint32_t dual_task_priority;
-} esp_h264_dec_sw_task_cfg_t;
-
-/**
  * @brief  This function is used to create a new instance of the `esp_h264_dec_t` data structure,
- *         which represents a single-streams H.264 decoder in software. The decoder is from tinyh264
+ *         which represents a single-stream H.264 decoder in software. The decoder is from tinyh264
  *
- * @note  The group of picture(GOP) will be updated in intra frame
+ * @note  The group of pictures (GOP) will be updated in intra frame
  *
  * @param[in]   cfg      It is a pointer to the `esp_h264_dec_cfg_sw_t` structure, which contains the configuration settings for the decoder
  * @param[out]  out_dec  It is a double pointer to the `esp_h264_dec_t` structure, which will store the created decoder instance
@@ -50,22 +39,6 @@ typedef struct {
  *       - ESP_H264_ERR_MEM  Insufficient memory
  */
 esp_h264_err_t esp_h264_dec_sw_new(const esp_h264_dec_cfg_sw_t *cfg, esp_h264_dec_handle_t *out_dec);
-
-/**
- * @brief Create a software decoder with explicit helper-task scheduling
- *
- * This variant keeps product scheduling policy out of sdkconfig. The original
- * esp_h264_dec_sw_new() API remains available and uses the component Kconfig
- * defaults for compatibility.
- *
- * @param[in]   cfg       Decoder format configuration
- * @param[in]   task_cfg  Runtime TinyH264 helper-task configuration
- * @param[out]  out_dec   Created decoder instance
- */
-esp_h264_err_t esp_h264_dec_sw_new_with_task_config(
-    const esp_h264_dec_cfg_sw_t *cfg,
-    const esp_h264_dec_sw_task_cfg_t *task_cfg,
-    esp_h264_dec_handle_t *out_dec);
 
 /**
  * @brief  This function returns a pointer to the software-decoded parameter structure associated with the given `esp_h264_dec_t` decoder

@@ -40,6 +40,7 @@ typedef struct {
     bool auto_connect;
     const char *default_ssid;
     const char *default_password;
+    const char *fallback_dns_ipv4;
 } wifi_driver_config_t;
 
 esp_err_t wifi_prepare(const wifi_driver_config_t *config);

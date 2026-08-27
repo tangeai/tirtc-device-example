@@ -7,9 +7,9 @@
 #include "esp_err.h"
 
 /*
- * P4 ISP output sizes used by the RTC pipeline. Keep these in the media-policy
- * layer so resource fallback can select a capture/encoder pair that stays on
- * the zero-copy YUV420 path instead of introducing an application PPA resize.
+ * The OV5647 CSI driver exposes 800x640 as its smallest native landscape
+ * sensor mode. RTC output sizes are scaler targets, so the P4 media layer must
+ * crop/scale this native frame before encoding a 480x320 call.
  */
 #define MEDIA_GOVERNOR_COMPACT_CAPTURE_WIDTH  800U
 #define MEDIA_GOVERNOR_COMPACT_CAPTURE_HEIGHT 640U
@@ -87,6 +87,7 @@ void media_governor_set_profile(media_governor_profile_t profile);
 media_governor_profile_t media_governor_get_profile(void);
 esp_err_t media_governor_set_rtc_video_config(const media_governor_video_config_t *config);
 void media_governor_build_device_call_video_config(media_governor_video_config_t *config);
+void media_governor_build_wechat_video_config(media_governor_video_config_t *config);
 void media_governor_build_camera_policy(const media_governor_video_config_t *config,
                                         media_governor_camera_policy_t *policy);
 esp_err_t media_governor_apply_weak_network_level(media_governor_weak_network_mode_t mode, uint8_t level);

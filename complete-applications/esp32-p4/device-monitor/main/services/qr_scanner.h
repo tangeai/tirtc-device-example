@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "scan_preview.h"
 
 #define QR_SCANNER_DEVICE_ID_MAX 64
 #define QR_SCANNER_OPEN_ID_MAX   96
@@ -16,10 +17,7 @@ typedef struct {
 	char raw_payload[QR_SCANNER_PAYLOAD_MAX];
 } qr_scanner_contact_t;
 
-typedef void (*qr_scanner_preview_cb_t)(const uint16_t *rgb565_pixels,
-					uint16_t width,
-					uint16_t height,
-					void *ctx);
+typedef scan_preview_cb_t qr_scanner_preview_cb_t;
 typedef void (*qr_scanner_result_cb_t)(esp_err_t result,
 				       const qr_scanner_contact_t *contact,
 				       void *ctx);

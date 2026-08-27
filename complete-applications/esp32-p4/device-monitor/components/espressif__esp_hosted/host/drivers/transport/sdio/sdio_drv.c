@@ -22,6 +22,7 @@
 #include "sdkconfig.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "esp_hosted_log.h"
 #include "hci_drv.h"
 #include "endian.h"
@@ -136,24 +137,50 @@ typedef struct {
 
 typedef struct {
 	buf_info_t buffer[2];
-	int read_index; // -1 means not in use
-	uint32_t read_data_len;
 	int write_index;
 } double_buf_t;
 
 static double_buf_t double_buf;
 
-// sem to trigger sdio_data_to_rx_buf_task()
-static semaphore_handle_t sem_double_buf_xfer_data;
+typedef struct {
+	int buffer_index;
+	uint32_t data_len;
+} sdio_rx_batch_t;
+
+/* A real two-slot ownership queue. The upstream implementation only tracked
+ * one pending read_index, so a second completed SDIO transfer was discarded
+ * whenever stream splitting had not finished yet. */
+static queue_handle_t sdio_rx_free_buf_queue;
+static queue_handle_t sdio_rx_ready_buf_queue;
+static uint32_t sdio_rx_backpressure_count;
+static uint32_t sdio_rx_backpressure_max_us;
+static int64_t sdio_rx_backpressure_last_log_us;
 
 static void * sdio_rx_buf_thread;
 static void sdio_data_to_rx_buf_task(void const* pvParameters);
+
+/* Streaming RX packets are copied to PSRAM before entering the host queue, so
+ * the shared internal-DMA pool only needs to cover the serial TX owner. */
+#define SDIO_TX_POOL_PREALLOC_BLOCKS 2U
 
 static esp_err_t sdio_generate_slave_intr(uint8_t intr_no);
 
 static void sdio_write_task(void const* pvParameters);
 static void sdio_read_task(void const* pvParameters);
 static void sdio_process_rx_task(void const* pvParameters);
+
+/*
+ * Keep the interrupt-facing SDIO reader at Espressif's realtime priority, but
+ * do not run the packet forwarding loops at that same priority. Under sustained
+ * full-duplex video, sdio_write and sdio_process_rx can remain continuously
+ * ready; at priority 23 they occupy both P4 cores and prevent the RTC socket
+ * thread from running for hundreds of milliseconds. Keep the blocking reader
+ * and buffer handoff high, but let RTC, audio, and media workers run ahead of
+ * the sustained packet-forwarding loops. The queues retain the short bursts.
+ */
+#define SDIO_READ_TASK_PRIORITY        DFLT_TASK_PRIO
+#define SDIO_RX_BUF_TASK_PRIORITY      (DFLT_TASK_PRIO - 1U)
+#define SDIO_DATA_PATH_TASK_PRIORITY   16U
 static void sdio_log_dma_no_mem(const char *stage, uint32_t len, uint32_t drops);
 
 static uint8_t *sdio_alloc_stream_rx_psram(uint32_t len)
@@ -163,6 +190,19 @@ static uint8_t *sdio_alloc_stream_rx_psram(uint32_t len)
 		SDIO_STREAM_RX_CACHE_ALIGNMENT,
 		len,
 		MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+#else
+	(void)len;
+	return NULL;
+#endif
+}
+
+static uint8_t *sdio_alloc_stream_packet_psram(uint32_t len)
+{
+#if CONFIG_SPIRAM
+	return (uint8_t *)heap_caps_aligned_alloc(
+		SDIO_STREAM_RX_CACHE_ALIGNMENT,
+		len,
+		MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 #else
 	(void)len;
 	return NULL;
@@ -222,6 +262,17 @@ static inline void sdio_mempool_create(void)
 	buf_mp_g = mempool_create(MAX_SDIO_BUFFER_SIZE);
 #ifdef H_USE_MEMPOOL
 	assert(buf_mp_g);
+	/* Keep the SDIO write owner deterministic. Streaming RX packets have a
+	 * separate PSRAM lifetime and no longer compete for this DMA pool. */
+	uint32_t reserved = mempool_reserve(buf_mp_g, SDIO_TX_POOL_PREALLOC_BLOCKS);
+	ESP_LOGI(TAG,
+		 "SDIO TX DMA pool reserved: blocks=%lu/%u queue=%u block_size=%u bytes=%lu",
+		 (unsigned long)reserved,
+		 (unsigned)SDIO_TX_POOL_PREALLOC_BLOCKS,
+		 (unsigned)TO_SLAVE_QUEUE_SIZE,
+		 (unsigned)MEMPOOL_ALIGNED(MEMPOOL_ALIGNED(MAX_SDIO_BUFFER_SIZE)),
+		 (unsigned long)(reserved *
+				 MEMPOOL_ALIGNED(MEMPOOL_ALIGNED(MAX_SDIO_BUFFER_SIZE))));
 #endif
 }
 
@@ -664,7 +715,11 @@ static int is_valid_sdio_rx_packet(uint8_t *rxbuff_a, uint16_t *len_a, uint16_t 
 }
 
 // pushes received packet data on to rx queue
-static esp_err_t sdio_push_pkt_to_queue(uint8_t * rxbuff, uint16_t len, uint16_t offset)
+static esp_err_t sdio_push_pkt_to_queue(uint8_t * rxbuff,
+					uint16_t len,
+					uint16_t offset,
+					void (*free_buf_handle)(void *),
+					bool direct_netstack_handoff)
 {
 	uint8_t pkt_prio = PRIO_Q_OTHERS;
 	struct esp_payload_header *h= NULL;
@@ -675,13 +730,15 @@ static esp_err_t sdio_push_pkt_to_queue(uint8_t * rxbuff, uint16_t len, uint16_t
 	memset(&buf_handle, 0, sizeof(interface_buffer_handle_t));
 
 	buf_handle.priv_buffer_handle = rxbuff;
-	buf_handle.free_buf_handle    = sdio_buffer_free;
+	buf_handle.free_buf_handle    = free_buf_handle;
 	buf_handle.payload_len        = len;
 	buf_handle.if_type            = h->if_type;
 	buf_handle.if_num             = h->if_num;
 	buf_handle.payload            = rxbuff + offset;
 	buf_handle.seq_num            = le16toh(h->seq_num);
 	buf_handle.flag               = h->flags;
+	buf_handle.payload_zcopy      = direct_netstack_handoff &&
+					       (h->if_type == ESP_STA_IF || h->if_type == ESP_AP_IF);
 
 	if (buf_handle.if_type == ESP_SERIAL_IF)
 		pkt_prio = PRIO_Q_SERIAL;
@@ -738,7 +795,7 @@ static esp_err_t sdio_push_data_to_queue(uint8_t * buf, uint32_t buf_len)
 		return ESP_FAIL;
 	}
 
-	if (sdio_push_pkt_to_queue(buf, len, offset)) {
+	if (sdio_push_pkt_to_queue(buf, len, offset, sdio_buffer_free, false)) {
 		ESP_LOGE(TAG, "Failed to push Rx packet to queue");
 		return ESP_FAIL;
 	}
@@ -802,25 +859,40 @@ static esp_err_t sdio_push_data_to_queue(uint8_t * buf, uint32_t buf_len)
 			ESP_LOGE(TAG, "Dropping packet(s) from stream");
 			return ESP_FAIL;
 		}
-		/* Allocate rx buffer */
-		pkt_rxbuff = sdio_buffer_alloc(MEMSET_REQUIRED);
+		packet_size = len + offset;
+		void (*packet_free)(void *) = sdio_buffer_free;
+		bool direct_netstack_handoff = false;
+
+		/* The stream itself already lives in cache-aligned PSRAM. Keep the
+		 * independent packet lifetime there as well; this buffer is consumed by
+		 * the CPU/netstack and is never an SDIO DMA target. */
+		pkt_rxbuff = sdio_alloc_stream_packet_psram(packet_size);
+		if (pkt_rxbuff != NULL) {
+			packet_free = g_h.funcs->_h_free;
+			direct_netstack_handoff = true;
+		} else {
+			pkt_rxbuff = sdio_buffer_alloc(MEMSET_REQUIRED);
+		}
 		if (!pkt_rxbuff) {
 			sdio_rx_alloc_drop_count++;
 			sdio_log_dma_no_mem("packet_buffer", len, sdio_rx_alloc_drop_count);
 			return ESP_ERR_NO_MEM;
 		}
 
-		packet_size = len + offset;
 		if (packet_size > buf_len) {
 			ESP_LOGE(TAG, "packet size too big for remaining stream data");
-			sdio_buffer_free(pkt_rxbuff);
+			packet_free(pkt_rxbuff);
 			return ESP_FAIL;
 		}
 		memcpy(pkt_rxbuff, buf, packet_size);
 
-		if (sdio_push_pkt_to_queue(pkt_rxbuff, len, offset)) {
+		if (sdio_push_pkt_to_queue(pkt_rxbuff,
+					       len,
+					       offset,
+					       packet_free,
+					       direct_netstack_handoff)) {
 			ESP_LOGI(TAG, "Failed to push a packet to queue from stream");
-			sdio_buffer_free(pkt_rxbuff);
+			packet_free(pkt_rxbuff);
 		}
 
 		// move to the next packet in the stream
@@ -835,25 +907,33 @@ static esp_err_t sdio_push_data_to_queue(uint8_t * buf, uint32_t buf_len)
 // double buffer task to transfer data from the current buffer to the queue
 static void sdio_data_to_rx_buf_task(void const* pvParameters)
 {
-	uint8_t * buf;
-	uint32_t len;
+	sdio_rx_batch_t batch;
 
 	while (1) {
-		g_h.funcs->_h_get_semaphore(sem_double_buf_xfer_data, HOSTED_BLOCK_MAX);
-
-		if (double_buf.read_index < 0) {
-			ESP_LOGE(TAG, "invalid double buf read_index");
+		if (g_h.funcs->_h_dequeue_item(sdio_rx_ready_buf_queue,
+						      &batch,
+						      HOSTED_BLOCK_MAX)) {
+			ESP_LOGE(TAG, "failed to receive SDIO RX batch");
 			continue;
 		}
 
-		buf = double_buf.buffer[double_buf.read_index].buf;
-		len = double_buf.read_data_len;
+		if (batch.buffer_index < 0 || batch.buffer_index >= 2) {
+			ESP_LOGE(TAG, "invalid SDIO RX buffer index: %d", batch.buffer_index);
+			continue;
+		}
 
-		if (sdio_push_data_to_queue(buf, len))
+		if (sdio_push_data_to_queue(
+				double_buf.buffer[batch.buffer_index].buf,
+				batch.data_len)) {
 			ESP_LOGE(TAG, "Failed to push data to rx queue");
+		}
 
-		// finished sending data: reset read_index
-		double_buf.read_index = -1;
+		if (g_h.funcs->_h_queue_item(sdio_rx_free_buf_queue,
+						  &batch.buffer_index,
+						  HOSTED_BLOCK_MAX)) {
+			ESP_LOGE(TAG, "failed to release SDIO RX buffer: %d",
+				 batch.buffer_index);
+		}
 	}
 }
 
@@ -862,6 +942,7 @@ static void sdio_read_task(void const* pvParameters)
 	esp_err_t res;
 	uint8_t *rxbuff = NULL;
 	int ret;
+	int rx_buffer_index;
 	uint32_t len_from_slave;
 
 	uint32_t data_left;
@@ -989,9 +1070,49 @@ static void sdio_read_task(void const* pvParameters)
 		}
 #endif
 
+		/* Reserve one of the two stream buffers before starting the DMA read.
+		 * If both batches are still being split, wait instead of consuming and
+		 * then discarding a complete C6-to-P4 transfer. Release the bus while
+		 * waiting so host-to-C6 traffic is not stalled by RX backpressure. */
+		bool backpressured =
+			g_h.funcs->_h_queue_msg_waiting(sdio_rx_free_buf_queue) == 0;
+		int64_t wait_start_us = esp_timer_get_time();
+		SDIO_DRV_UNLOCK();
+		ret = g_h.funcs->_h_dequeue_item(sdio_rx_free_buf_queue,
+							 &rx_buffer_index,
+							 HOSTED_BLOCK_MAX);
+		SDIO_DRV_LOCK();
+		if (ret) {
+			ESP_LOGE(TAG, "failed to reserve SDIO RX buffer");
+			SDIO_DRV_UNLOCK();
+			continue;
+		}
+		double_buf.write_index = rx_buffer_index;
+
+		if (backpressured) {
+			int64_t now_us = esp_timer_get_time();
+			uint32_t wait_us = (uint32_t)(now_us - wait_start_us);
+			sdio_rx_backpressure_count++;
+			if (wait_us > sdio_rx_backpressure_max_us) {
+				sdio_rx_backpressure_max_us = wait_us;
+			}
+			if (sdio_rx_backpressure_count == 1 ||
+			    now_us - sdio_rx_backpressure_last_log_us >= 10000000LL) {
+				ESP_LOGW(TAG,
+					 "SDIO RX backpressure: waits=%lu wait=%luus max=%luus; batch preserved",
+					 (unsigned long)sdio_rx_backpressure_count,
+					 (unsigned long)wait_us,
+					 (unsigned long)sdio_rx_backpressure_max_us);
+				sdio_rx_backpressure_last_log_us = now_us;
+			}
+		}
+
 		/* Allocate rx buffer */
 		rxbuff = sdio_rx_get_buffer(len_from_slave);
 		if (!rxbuff) {
+			g_h.funcs->_h_queue_item(sdio_rx_free_buf_queue,
+						   &rx_buffer_index,
+						   HOSTED_BLOCK_MAX);
 			SDIO_DRV_UNLOCK();
 			vTaskDelay(pdMS_TO_TICKS(1));
 			continue;
@@ -1035,18 +1156,24 @@ static void sdio_read_task(void const* pvParameters)
 		sdio_rx_byte_count = sdio_rx_byte_count % ESP_RX_BYTE_MAX;
 
 		if (unlikely(ret))
+		{
+			g_h.funcs->_h_queue_item(sdio_rx_free_buf_queue,
+						   &rx_buffer_index,
+						   HOSTED_BLOCK_MAX);
 			continue;
+		}
 
-		if (double_buf.read_index < 0) {
-			double_buf.read_index = double_buf.write_index;
-			double_buf.read_data_len = len_from_slave;
-			double_buf.write_index = (double_buf.write_index) ? 0 : 1;
-			// trigger task to copy data to queue
-			g_h.funcs->_h_post_semaphore(sem_double_buf_xfer_data);
-		} else {
-			// error: task to copy data to queue still running
-			ESP_LOGE(TAG, "task still writing Rx data to queue!");
-			// don't send data to task, or update write_index
+		sdio_rx_batch_t batch = {
+			.buffer_index = rx_buffer_index,
+			.data_len = len_from_slave,
+		};
+		if (g_h.funcs->_h_queue_item(sdio_rx_ready_buf_queue,
+						  &batch,
+						  HOSTED_BLOCK_MAX)) {
+			ESP_LOGE(TAG, "failed to queue completed SDIO RX batch");
+			g_h.funcs->_h_queue_item(sdio_rx_free_buf_queue,
+						   &rx_buffer_index,
+						   HOSTED_BLOCK_MAX);
 		}
 	}
 }
@@ -1101,6 +1228,19 @@ static void sdio_process_rx_task(void const* pvParameters)
 						buf_handle->priv_buffer_handle);
 					continue;
 				}
+				if (buf_handle->payload_zcopy) {
+					ret = chan_arr[buf_handle->if_type]->rx(
+						chan_arr[buf_handle->if_type]->api_chan,
+						buf_handle->payload,
+						buf_handle->priv_buffer_handle,
+						buf_handle->payload_len);
+					if (unlikely(ret)) {
+						H_FREE_PTR_WITH_FUNC(buf_handle->free_buf_handle,
+							buf_handle->priv_buffer_handle);
+					}
+					continue;
+				}
+
 				uint8_t * copy_payload = (uint8_t *)g_h.funcs->_h_malloc(buf_handle->payload_len);
 				if (!copy_payload) {
 					sdio_rx_copy_drop_count++;
@@ -1200,25 +1340,31 @@ void transport_init_internal(void)
 
 	// initialise double buffering structs
 	memset(&double_buf, 0, sizeof(double_buf_t));
-	double_buf.read_index = -1; // indicates we are not reading anything
 	double_buf.write_index = 0; // we will write into the first buffer
 	sdio_prealloc_stream_rx_buffers();
 
-	sem_double_buf_xfer_data = g_h.funcs->_h_create_semaphore(1);
-	assert(sem_double_buf_xfer_data);
-	g_h.funcs->_h_get_semaphore(sem_double_buf_xfer_data, HOSTED_BLOCK_MAX);
+	sdio_rx_free_buf_queue =
+		g_h.funcs->_h_create_queue(2, sizeof(int));
+	sdio_rx_ready_buf_queue =
+		g_h.funcs->_h_create_queue(2, sizeof(sdio_rx_batch_t));
+	assert(sdio_rx_free_buf_queue);
+	assert(sdio_rx_ready_buf_queue);
+	for (int index = 0; index < 2; ++index) {
+		assert(g_h.funcs->_h_queue_item(sdio_rx_free_buf_queue,
+						       &index, 0) == 0);
+	}
 
 	sdio_rx_buf_thread = g_h.funcs->_h_thread_create("sdio_rx_buf",
-		DFLT_TASK_PRIO, DFLT_TASK_STACK_SIZE, sdio_data_to_rx_buf_task, NULL);
+		SDIO_RX_BUF_TASK_PRIORITY, DFLT_TASK_STACK_SIZE, sdio_data_to_rx_buf_task, NULL);
 
 	sdio_read_thread = g_h.funcs->_h_thread_create("sdio_read",
-		DFLT_TASK_PRIO, DFLT_TASK_STACK_SIZE, sdio_read_task, NULL);
+		SDIO_READ_TASK_PRIORITY, DFLT_TASK_STACK_SIZE, sdio_read_task, NULL);
 
 	sdio_process_rx_thread = g_h.funcs->_h_thread_create("sdio_process_rx",
-		DFLT_TASK_PRIO, DFLT_TASK_STACK_SIZE, sdio_process_rx_task, NULL);
+		SDIO_DATA_PATH_TASK_PRIORITY, DFLT_TASK_STACK_SIZE, sdio_process_rx_task, NULL);
 
 	sdio_write_thread = g_h.funcs->_h_thread_create("sdio_write",
-		DFLT_TASK_PRIO, DFLT_TASK_STACK_SIZE, sdio_write_task, NULL);
+		SDIO_DATA_PATH_TASK_PRIORITY, DFLT_TASK_STACK_SIZE, sdio_write_task, NULL);
 
 #if defined(USE_DRIVER_LOCK)
 	// initialise mutex for bus locking

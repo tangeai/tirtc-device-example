@@ -26,6 +26,7 @@ static void tirtc_session_handle_network_changed(const tirtc_session_event_t *ev
 static void tirtc_session_handle_conn_accepted(const tirtc_session_event_t *event)
 {
     bool auto_media = true;
+    bool media_deferred = false;
 
     /* Producers accept or reject the handle before queuing this event. If
      * ownership changed while it waited, the handle is already closing or
@@ -40,10 +41,12 @@ static void tirtc_session_handle_conn_accepted(const tirtc_session_event_t *even
 
     auto_media = tirtc_session_connection_auto_media_enabled(event->payload.conn.conn) ||
                  tirtc_session_is_test_media_active();
+    media_deferred = tirtc_session_connection_media_deferred(event->payload.conn.conn);
     ESP_LOGI(TAG,
-             "rtc connection accepted: hconn=%p auto_media=%d",
+             "rtc connection accepted: hconn=%p auto_media=%d defer_media=%d",
              event->payload.conn.conn,
-             auto_media ? 1 : 0);
+             auto_media ? 1 : 0,
+             media_deferred ? 1 : 0);
     esp_err_t bitrate_ret =
         tirtc_session_apply_video_bitrate_params(event->payload.conn.conn);
     if (bitrate_ret == ESP_ERR_NOT_SUPPORTED) {
@@ -54,6 +57,18 @@ static void tirtc_session_handle_conn_accepted(const tirtc_session_event_t *even
                  "rtc video bitrate control registration failed; continue with normal profile: %s",
                  esp_err_to_name(bitrate_ret));
     }
+
+    /* Capture the connection policy before notifying application observers.
+     * A device-call observer may promote deferred media immediately when the
+     * cloud answer arrived first. That promotion clears the live defer flag;
+     * it must not make this generic path reinterpret the session as AV and
+     * force the camera on for an audio-only call. */
+    tirtc_session_notify_connection_accepted(event->payload.conn.conn);
+    if (!tirtc_session_is_connection_usable(event->payload.conn.conn)) {
+        tirtc_session_note_event("conn closed by owner");
+        return;
+    }
+
     if (!auto_media) {
         if (tirtc_session_get_session_mode() == TIRTC_SESSION_MODE_CONNECT) {
             esp_err_t call_ret = tirtc_session_request_call();
@@ -72,12 +87,19 @@ static void tirtc_session_handle_conn_accepted(const tirtc_session_event_t *even
         return;
     }
 
-    if (tirtc_session_connection_media_deferred(event->payload.conn.conn)) {
-        tirtc_session_complete_call_response_without_media(true);
-        tirtc_session_note_event("connected wait cmd");
-        ESP_LOGI(TAG,
-                 "rtc connection accepted: hconn=%p media deferred until device-call command",
-                 event->payload.conn.conn);
+    if (media_deferred) {
+        if (tirtc_session_connection_media_deferred(event->payload.conn.conn)) {
+            tirtc_session_complete_call_response_without_media(true);
+            tirtc_session_note_event("connected wait cmd");
+            ESP_LOGI(TAG,
+                     "rtc connection accepted: hconn=%p media deferred until device-call command",
+                     event->payload.conn.conn);
+        } else {
+            tirtc_session_note_event("connected owner media");
+            ESP_LOGI(TAG,
+                     "rtc connection accepted: hconn=%p deferred media already activated by owner",
+                     event->payload.conn.conn);
+        }
         return;
     }
 

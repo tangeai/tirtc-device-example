@@ -69,15 +69,13 @@ static void app_defer_tirtc_config_scan_resources(bool restore)
 	}
 }
 
-static void app_tirtc_config_scan_preview_cb(const uint16_t *rgb565_pixels,
-					     uint16_t width,
-					     uint16_t height,
+static void app_tirtc_config_scan_preview_cb(const scan_preview_frame_t *frame,
 					     void *ctx)
 {
 	(void)ctx;
 
 	if (s_tirtc_config_scan.preview_cb != NULL) {
-		s_tirtc_config_scan.preview_cb(rgb565_pixels, width, height, s_tirtc_config_scan.ctx);
+		s_tirtc_config_scan.preview_cb(frame, s_tirtc_config_scan.ctx);
 	}
 }
 

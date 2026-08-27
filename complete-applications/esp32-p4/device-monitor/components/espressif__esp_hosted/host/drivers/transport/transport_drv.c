@@ -48,6 +48,22 @@ volatile uint8_t wifi_tx_throttling;
 static volatile uint32_t s_sta_tx_alloc_drop_count;
 static volatile uint32_t s_ap_tx_alloc_drop_count;
 
+#if CONFIG_SPIRAM && CONFIG_SOC_PSRAM_DMA_CAPABLE
+/* One writer can own a block while the SDIO queue holds its configured depth.
+ * Keep a small producer cushion so a short KCP retransmission burst never has
+ * to recover a 1.6 KB block from the fragmented internal DMA heap. ESP32-P4's
+ * SDMMC host accepts cache-aligned DMA-capable PSRAM and performs cache sync. */
+#define TRANSPORT_STA_TX_POOL_PREALLOC_BLOCKS \
+	(CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE + 4U)
+
+static void *transport_sta_tx_dma_alloc(size_t size)
+{
+	return heap_caps_aligned_alloc(MEMPOOL_ALIGNMENT_BYTES,
+			size,
+			MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+}
+#endif
+
 
 static uint8_t transport_state = TRANSPORT_INACTIVE;
 
@@ -355,10 +371,34 @@ transport_channel_t *transport_drv_add_channel(void *api_chan,
 	channel->tx = *tx;
 	channel->rx = rx;
 
-	/* Need to change size wrt transport */
-	channel->memp = mempool_create(MAX_TRANSPORT_BUFFER_SIZE);
+	/* STA packets are queued by reference until the SDIO writer completes. On
+	 * P4, keep that bounded queue in DMA-capable PSRAM; internal DMA remains for
+	 * descriptors, audio, LCD and hardware-codec control allocations. */
+#if CONFIG_SPIRAM && CONFIG_SOC_PSRAM_DMA_CAPABLE
+	if (if_type == ESP_STA_IF) {
+		channel->memp = mempool_create_with_allocator(
+			MAX_TRANSPORT_BUFFER_SIZE,
+			transport_sta_tx_dma_alloc);
+	} else
+#endif
+	{
+		channel->memp = mempool_create(MAX_TRANSPORT_BUFFER_SIZE);
+	}
 #ifdef H_USE_MEMPOOL
 	assert(channel->memp);
+#if CONFIG_SPIRAM && CONFIG_SOC_PSRAM_DMA_CAPABLE
+	if (if_type == ESP_STA_IF) {
+		uint32_t reserved = mempool_reserve(
+			channel->memp,
+			TRANSPORT_STA_TX_POOL_PREALLOC_BLOCKS);
+		ESP_LOGI(TAG,
+			 "STA TX DMA pool reserved: memory=psram-dma blocks=%lu/%u block_size=%u bytes=%lu",
+			 (unsigned long)reserved,
+			 (unsigned)TRANSPORT_STA_TX_POOL_PREALLOC_BLOCKS,
+			 (unsigned)MEMPOOL_ALIGNED(MAX_TRANSPORT_BUFFER_SIZE),
+			 (unsigned long)(reserved * MEMPOOL_ALIGNED(MAX_TRANSPORT_BUFFER_SIZE)));
+	}
+#endif
 #endif
 
 	ESP_LOGI(TAG, "Add ESP-Hosted channel IF[%u]: S[%u] Tx[%p] Rx[%p]",

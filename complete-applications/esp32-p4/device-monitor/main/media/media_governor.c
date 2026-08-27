@@ -35,12 +35,13 @@ static const char *TAG = "media_governor";
 #define MEDIA_GOVERNOR_AUTO_SEVERE_QUEUE_DEPTH APP_MEDIA_AUTO_SEVERE_QUEUE_DEPTH
 #define MEDIA_GOVERNOR_VIDEO_MIN_BITRATE_BPS (200U * 1000U)
 #define MEDIA_GOVERNOR_TRANSPORT_COMPACT_MAX_PIXELS (640U * 480U)
-/* 480x320 calls can remain decodable at 200 kbps. Keeping this floor at one
- * quarter of the 800 kbps normal target gives TGMP room to preserve
- * continuity on cellular uplinks before any resolution/fps policy is enabled. */
+/* Compact calls can remain decodable at 200 kbps. The floor gives TGMP room
+ * to preserve continuity on cellular uplinks without rebuilding the active
+ * H264 resolution chain. */
 #define MEDIA_GOVERNOR_TRANSPORT_COMPACT_MIN_BITRATE_BPS APP_MEDIA_TGMP_COMPACT_MIN_BITRATE_BPS
 #define MEDIA_GOVERNOR_TRANSPORT_LARGE_MIN_BITRATE_BPS APP_MEDIA_TGMP_LARGE_MIN_BITRATE_BPS
 #define MEDIA_GOVERNOR_TRANSPORT_MIN_RATIO_DIVISOR APP_MEDIA_TGMP_MIN_RATIO_DIVISOR
+#define MEDIA_GOVERNOR_TRANSPORT_START_RANGE_PERCENT APP_MEDIA_TGMP_START_RANGE_PERCENT
 #define MEDIA_GOVERNOR_TRANSPORT_MIN_STEP_BPS APP_MEDIA_TGMP_MIN_STEP_BPS
 #define MEDIA_GOVERNOR_TRANSPORT_MIN_STEP_PERCENT APP_MEDIA_TGMP_MIN_STEP_PERCENT
 /*
@@ -108,11 +109,6 @@ static void media_governor_select_native_capture_size(const media_governor_video
     *width = MEDIA_GOVERNOR_CAPTURE_WIDTH;
     *height = MEDIA_GOVERNOR_CAPTURE_HEIGHT;
 
-    /*
-     * OV5647 exposes discrete sensor modes. RTC output sizes are scaler targets,
-     * not arbitrary sensor modes; use the smallest native mode that contains
-     * the requested frame and let the P4 media layer crop/scale it.
-     */
     if (config != NULL &&
         config->width <= MEDIA_GOVERNOR_COMPACT_CAPTURE_WIDTH &&
         config->height <= MEDIA_GOVERNOR_COMPACT_CAPTURE_HEIGHT) {
@@ -170,7 +166,11 @@ static media_governor_camera_policy_t media_governor_make_rtc_av_policy(const me
         .h264_output_buffer_bytes = APP_MEDIA_H264_OUTPUT_BUFFER_BYTES,
         .h264_max_delta_payload_bytes = APP_MEDIA_H264_MAX_DELTA_PAYLOAD_BYTES,
         .dma_free_min_bytes = 8U * 1024U,
-        .dma_largest_min_bytes = 4U * 1024U,
+        /* ESP-Hosted SDIO packets are 1536 bytes and the driver keeps an
+         * early reserved burst pool. Keep one aligned fallback packet
+         * available without treating normal late-stage fragmentation as
+         * network congestion. */
+        .dma_largest_min_bytes = 2U * 1024U,
     };
 }
 
@@ -408,12 +408,24 @@ bool media_governor_auto_adaptation_enabled(void)
     return CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE != 0;
 }
 
+static uint8_t media_governor_resolution_priority_fps(uint8_t base_fps,
+                                                      uint8_t level)
+{
+    static const uint8_t fps_pct[] = {100U, 100U, 80U, 67U};
+
+    if (level >= sizeof(fps_pct) / sizeof(fps_pct[0])) {
+        level = (uint8_t)(sizeof(fps_pct) / sizeof(fps_pct[0]) - 1U);
+    }
+    uint8_t fps =
+        (uint8_t)(((uint32_t)base_fps * fps_pct[level] + 50U) / 100U);
+    return fps < 5U ? 5U : fps;
+}
+
 esp_err_t media_governor_apply_weak_network_level(media_governor_weak_network_mode_t mode, uint8_t level)
 {
     media_governor_video_config_t config = {0};
     static const uint8_t bitrate_pct_framerate_priority[] = {100U, 88U, 77U, 67U};
     static const uint8_t bitrate_pct_resolution_priority[] = {100U, 90U, 78U, 67U};
-    static const uint8_t fps_pct_resolution_priority[] = {100U, 100U, 80U, 67U};
 
     if (mode > MEDIA_GOVERNOR_WEAK_NETWORK_RESOLUTION_PRIORITY) {
         return ESP_ERR_INVALID_ARG;
@@ -452,8 +464,7 @@ esp_err_t media_governor_apply_weak_network_level(media_governor_weak_network_mo
      * cadence at levels 2/3 so each retained frame keeps more bits.
      */
     if (mode == MEDIA_GOVERNOR_WEAK_NETWORK_RESOLUTION_PRIORITY) {
-        config.fps =
-            (uint8_t)(((uint32_t)config.fps * fps_pct_resolution_priority[level] + 50U) / 100U);
+        config.fps = media_governor_resolution_priority_fps(config.fps, level);
     }
 
     return media_governor_set_rtc_video_config(&config);
@@ -661,14 +672,48 @@ static void media_governor_build_transport_bitrate_range(
     if (min_bitrate_bps < profile_floor_bps) {
         min_bitrate_bps = profile_floor_bps;
     }
-    if (min_bitrate_bps > base->bitrate_bps) {
-        min_bitrate_bps = base->bitrate_bps;
+    if (min_bitrate_bps >= base->bitrate_bps) {
+        min_bitrate_bps = base->bitrate_bps > 1U ? base->bitrate_bps - 1U : 0U;
+    }
+
+    const uint32_t max_bitrate_bps = base->bitrate_bps;
+    uint32_t start_bitrate_bps =
+        min_bitrate_bps +
+        (uint32_t)(((uint64_t)(max_bitrate_bps - min_bitrate_bps) *
+                    MEDIA_GOVERNOR_TRANSPORT_START_RANGE_PERCENT) /
+                   100ULL);
+    if (start_bitrate_bps <= min_bitrate_bps) {
+        start_bitrate_bps = min_bitrate_bps + 1U;
+    }
+    if (start_bitrate_bps >= max_bitrate_bps) {
+        start_bitrate_bps = max_bitrate_bps - 1U;
     }
 
     *range = (media_governor_transport_bitrate_range_t) {
         .min_bitrate_bps = min_bitrate_bps,
-        .max_bitrate_bps = base->bitrate_bps,
-        .start_bitrate_bps = base->bitrate_bps,
+        .max_bitrate_bps = max_bitrate_bps,
+        /* Start near the quality target while preserving min < start < max. */
+        .start_bitrate_bps = start_bitrate_bps,
+    };
+}
+
+void media_governor_build_wechat_video_config(media_governor_video_config_t *config)
+{
+    if (config == NULL) {
+        return;
+    }
+
+    *config = (media_governor_video_config_t) {
+        .width = APP_MEDIA_WECHAT_VIDEO_WIDTH,
+        .height = APP_MEDIA_WECHAT_VIDEO_HEIGHT,
+        .fps = APP_MEDIA_WECHAT_VIDEO_FPS,
+        .bitrate_bps = APP_MEDIA_WECHAT_VIDEO_BITRATE_BPS,
+        .weak_network_mode = CONFIG_APP_RTC_VIDEO_AUTO_ADAPT_ENABLE ?
+                                 MEDIA_GOVERNOR_WEAK_NETWORK_RESOLUTION_PRIORITY :
+                                 MEDIA_GOVERNOR_WEAK_NETWORK_OFF,
+        .weak_network_level = 0U,
+        .h264_min_qp = APP_MEDIA_WECHAT_VIDEO_MIN_QP,
+        .h264_max_qp = APP_MEDIA_WECHAT_VIDEO_MAX_QP,
     };
 }
 
@@ -736,6 +781,12 @@ static void media_governor_build_transport_video_config(
             MEDIA_GOVERNOR_WEAK_NETWORK_FRAMERATE_PRIORITY;
     updated->weak_network_level =
         target_pct >= 85U ? 1U : (target_pct >= 70U ? 2U : 3U);
+    if (updated->weak_network_mode ==
+        MEDIA_GOVERNOR_WEAK_NETWORK_RESOLUTION_PRIORITY) {
+        updated->fps = media_governor_resolution_priority_fps(
+            base->fps,
+            updated->weak_network_level);
+    }
 }
 
 static bool media_governor_commit_transport_video_config(

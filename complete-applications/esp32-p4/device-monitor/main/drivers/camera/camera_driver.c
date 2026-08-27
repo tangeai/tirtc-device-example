@@ -6,7 +6,6 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <sys/mman.h>
 #include <unistd.h>
 
 #include "esp_check.h"
@@ -15,6 +14,7 @@
 #include "esp_video_device.h"
 #include "esp_video_init.h"
 #include "esp_video_ioctl.h"
+#include "esp_private/dw_gdma.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -28,14 +28,14 @@
 
 static const char *TAG = "camera";
 
-#ifndef MAP_FAILED
-#define MAP_FAILED ((void *)-1)
-#endif
-
 #define CAMERA_DRIVER_FRAME_TIMEOUT_MS 3000
 #define CAMERA_DRIVER_FRAME_BUSY_WAIT_MS 5
 #define CAMERA_DRIVER_FRAME_POLL_WAIT_MS 1
 #define CAMERA_DRIVER_TARGET_FORMAT    V4L2_PIX_FMT_YUV420
+#define CAMERA_DRIVER_MEMORY_TYPE      V4L2_MEMORY_USERPTR
+#define CAMERA_DRIVER_BUFFER_ALIGNMENT 64U
+#define CAMERA_DRIVER_MAX_FRAME_BYTES  \
+	((size_t)HARDWARE_BOARD_CAMERA_WIDTH * HARDWARE_BOARD_CAMERA_HEIGHT * 3U / 2U)
 
 typedef struct {
 	struct v4l2_buffer buffer;
@@ -44,12 +44,14 @@ typedef struct {
 static bool s_video_ready;
 static bool s_camera_initialized;
 static bool s_streaming;
+static bool s_buffers_requested;
 static bool s_first_frame_logged;
 static bool s_format_list_logged;
 static int s_fd = -1;
 static struct v4l2_format s_active_format;
 static void *s_buffers[HARDWARE_BOARD_CAMERA_BUFFER_COUNT];
-static size_t s_buffer_lengths[HARDWARE_BOARD_CAMERA_BUFFER_COUNT];
+static size_t s_buffer_capacities[HARDWARE_BOARD_CAMERA_BUFFER_COUNT];
+static bool s_persistent_pool_ready;
 static SemaphoreHandle_t s_lock;
 static camera_driver_frame_owner_t s_active_frame;
 static bool s_frame_outstanding;
@@ -60,6 +62,109 @@ static uint8_t s_target_fps = 30;
 static uint8_t s_sensor_fps;
 static uint32_t s_last_delivered_sequence;
 static bool s_last_delivered_sequence_valid;
+static dw_gdma_channel_handle_t s_csi_dma_clock_guard;
+
+static esp_err_t camera_driver_prepare_persistent_buffers(void)
+{
+	if (s_persistent_pool_ready) {
+		return ESP_OK;
+	}
+
+	size_t allocated = 0U;
+
+	for (uint32_t i = 0; i < HARDWARE_BOARD_CAMERA_BUFFER_COUNT; ++i) {
+		if (s_buffers[i] != NULL &&
+		    s_buffer_capacities[i] >= CAMERA_DRIVER_MAX_FRAME_BYTES) {
+			allocated += s_buffer_capacities[i];
+			continue;
+		}
+
+		void *buffer = app_memory_aligned_alloc_psram(
+			CAMERA_DRIVER_BUFFER_ALIGNMENT,
+			CAMERA_DRIVER_MAX_FRAME_BYTES,
+			MALLOC_CAP_CACHE_ALIGNED);
+		if (buffer == NULL) {
+			for (uint32_t cleanup = 0;
+			     cleanup < HARDWARE_BOARD_CAMERA_BUFFER_COUNT;
+			     ++cleanup) {
+				heap_caps_free(s_buffers[cleanup]);
+				s_buffers[cleanup] = NULL;
+				s_buffer_capacities[cleanup] = 0U;
+			}
+			ESP_LOGE(TAG,
+				 "reserve camera PSRAM buffer failed: index=%u size=%u psram_free=%u psram_largest=%u",
+				 (unsigned)i,
+				 (unsigned)CAMERA_DRIVER_MAX_FRAME_BYTES,
+				 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+				 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+			return ESP_ERR_NO_MEM;
+		}
+
+		s_buffers[i] = buffer;
+		s_buffer_capacities[i] = CAMERA_DRIVER_MAX_FRAME_BYTES;
+		allocated += CAMERA_DRIVER_MAX_FRAME_BYTES;
+	}
+
+	s_persistent_pool_ready = true;
+	APP_LOG_DETAIL(TAG,
+		       "camera PSRAM pool reserved: count=%u frame_capacity=%u total=%u psram_free=%u psram_largest=%u",
+		       (unsigned)HARDWARE_BOARD_CAMERA_BUFFER_COUNT,
+		       (unsigned)CAMERA_DRIVER_MAX_FRAME_BYTES,
+		       (unsigned)allocated,
+		       (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+		       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+	return ESP_OK;
+}
+
+static bool camera_driver_bind_user_buffer(struct v4l2_buffer *buf)
+{
+	if (buf == NULL || buf->index >= HARDWARE_BOARD_CAMERA_BUFFER_COUNT ||
+	    s_buffers[buf->index] == NULL ||
+	    s_buffer_capacities[buf->index] < s_active_format.fmt.pix.sizeimage) {
+		return false;
+	}
+
+	buf->memory = CAMERA_DRIVER_MEMORY_TYPE;
+	buf->m.userptr = (unsigned long)s_buffers[buf->index];
+	buf->length = s_buffer_capacities[buf->index];
+	return true;
+}
+
+static esp_err_t camera_driver_hold_csi_dma_clock(void)
+{
+	if (s_csi_dma_clock_guard != NULL) {
+		return ESP_OK;
+	}
+
+	/*
+	 * ESP-IDF 5.5.4 releases the last DW-GDMA group reference before it
+	 * frees that channel's shared interrupt. A pending CSI interrupt can
+	 * therefore enter shared_intr_isr after the register clock is gated.
+	 * Keep one unused channel for the application lifetime so camera stream
+	 * teardown can free its interrupt while the DW-GDMA registers stay live.
+	 */
+	const dw_gdma_channel_alloc_config_t config = {
+		.src = {
+			.block_transfer_type = DW_GDMA_BLOCK_TRANSFER_CONTIGUOUS,
+			.role = DW_GDMA_ROLE_MEM,
+			.handshake_type = DW_GDMA_HANDSHAKE_SW,
+			.num_outstanding_requests = 1,
+		},
+		.dst = {
+			.block_transfer_type = DW_GDMA_BLOCK_TRANSFER_CONTIGUOUS,
+			.role = DW_GDMA_ROLE_MEM,
+			.handshake_type = DW_GDMA_HANDSHAKE_SW,
+			.num_outstanding_requests = 1,
+		},
+		.flow_controller = DW_GDMA_FLOW_CTRL_SELF,
+		.chan_priority = 0,
+	};
+
+	ESP_RETURN_ON_ERROR(dw_gdma_new_channel(&config, &s_csi_dma_clock_guard),
+			    TAG, "reserve CSI DW-GDMA clock guard failed");
+	ESP_LOGI(TAG, "CSI DW-GDMA teardown guard ready");
+	return ESP_OK;
+}
 
 static void camera_driver_format_to_str(uint32_t format, char out[5])
 {
@@ -130,6 +235,9 @@ static esp_err_t camera_driver_video_init_once(void)
 	if (s_video_ready) {
 		return ESP_OK;
 	}
+
+	ESP_RETURN_ON_ERROR(camera_driver_hold_csi_dma_clock(), TAG,
+			    "CSI DMA guard init failed");
 
 	ESP_RETURN_ON_ERROR(hardware_board_init_i2c(), TAG, "camera i2c init failed");
 	i2c_master_bus_handle_t i2c_bus = hardware_board_get_i2c_bus_handle();
@@ -287,7 +395,8 @@ static bool camera_driver_buffer_is_usable(const struct v4l2_buffer *buf)
 {
 	return buf != NULL &&
 	       buf->index < HARDWARE_BOARD_CAMERA_BUFFER_COUNT &&
-	       s_buffers[buf->index] != NULL;
+	       s_buffers[buf->index] != NULL &&
+	       s_buffer_capacities[buf->index] >= s_active_format.fmt.pix.sizeimage;
 }
 
 static void camera_driver_requeue_buffer(const struct v4l2_buffer *buf, const char *reason)
@@ -295,7 +404,15 @@ static void camera_driver_requeue_buffer(const struct v4l2_buffer *buf, const ch
 	if (buf == NULL || s_fd < 0) {
 		return;
 	}
-	if (ioctl(s_fd, VIDIOC_QBUF, (void *)buf) != 0) {
+	struct v4l2_buffer queued = *buf;
+	if (!camera_driver_bind_user_buffer(&queued)) {
+		ESP_LOGE(TAG,
+			 "bind camera %s buffer failed index=%u",
+			 reason != NULL ? reason : "invalid",
+			 (unsigned)buf->index);
+		return;
+	}
+	if (ioctl(s_fd, VIDIOC_QBUF, &queued) != 0) {
 		ESP_LOGW(TAG, "requeue camera %s buffer failed index=%u errno=%d",
 			 reason != NULL ? reason : "invalid",
 			 (unsigned)buf->index,
@@ -346,27 +463,46 @@ static void camera_driver_config_frame_rate(void)
 
 static esp_err_t camera_driver_prepare_buffers(void)
 {
+	ESP_RETURN_ON_ERROR(camera_driver_prepare_persistent_buffers(),
+			    TAG, "camera PSRAM pool unavailable");
+
 	struct v4l2_requestbuffers req = {
 		.count = HARDWARE_BOARD_CAMERA_BUFFER_COUNT,
 		.type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
-		.memory = V4L2_MEMORY_MMAP,
+		.memory = CAMERA_DRIVER_MEMORY_TYPE,
 	};
 
 	if (ioctl(s_fd, VIDIOC_REQBUFS, &req) != 0) {
-		ESP_LOGE(TAG, "request camera buffers failed errno=%d", errno);
+		app_memory_snapshot_t memory = {0};
+		const size_t frame_bytes = s_active_format.fmt.pix.sizeimage;
+		const size_t requested_bytes =
+			frame_bytes * HARDWARE_BOARD_CAMERA_BUFFER_COUNT;
+
+		app_memory_get_snapshot(&memory);
+		ESP_LOGE(TAG,
+			 "request camera buffers failed errno=%d count=%u frame=%u total=%u "
+			 "psram_free=%u psram_largest=%u",
+			 errno,
+			 (unsigned)HARDWARE_BOARD_CAMERA_BUFFER_COUNT,
+			 (unsigned)frame_bytes,
+			 (unsigned)requested_bytes,
+			 (unsigned)memory.psram_free,
+			 (unsigned)memory.psram_largest);
 		return ESP_FAIL;
 	}
+	s_buffers_requested = true;
 	if (req.count < HARDWARE_BOARD_CAMERA_BUFFER_COUNT) {
-		ESP_LOGW(TAG, "camera returned fewer buffers: requested=%u actual=%u",
+		ESP_LOGE(TAG, "camera returned fewer buffers: requested=%u actual=%u",
 			 (unsigned)HARDWARE_BOARD_CAMERA_BUFFER_COUNT,
 			 (unsigned)req.count);
+		return ESP_ERR_NO_MEM;
 	}
 
 	for (uint32_t i = 0; i < HARDWARE_BOARD_CAMERA_BUFFER_COUNT; ++i) {
 		struct v4l2_buffer buf = {
 			.index = i,
 			.type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
-			.memory = V4L2_MEMORY_MMAP,
+			.memory = CAMERA_DRIVER_MEMORY_TYPE,
 		};
 
 		if (ioctl(s_fd, VIDIOC_QUERYBUF, &buf) != 0) {
@@ -374,13 +510,15 @@ static esp_err_t camera_driver_prepare_buffers(void)
 			return ESP_FAIL;
 		}
 
-		s_buffers[i] = mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, s_fd, buf.m.offset);
-		if (s_buffers[i] == MAP_FAILED || s_buffers[i] == NULL) {
-			s_buffers[i] = NULL;
-			ESP_LOGE(TAG, "map camera buffer %" PRIu32 " failed length=%u", i, (unsigned)buf.length);
-			return ESP_FAIL;
+		if (!camera_driver_bind_user_buffer(&buf)) {
+			ESP_LOGE(TAG,
+				 "camera PSRAM buffer too small: index=%" PRIu32
+				 " required=%u capacity=%u",
+				 i,
+				 (unsigned)buf.length,
+				 (unsigned)s_buffer_capacities[i]);
+			return ESP_ERR_INVALID_SIZE;
 		}
-		s_buffer_lengths[i] = buf.length;
 
 		if (ioctl(s_fd, VIDIOC_QBUF, &buf) != 0) {
 			ESP_LOGE(TAG, "queue camera buffer %" PRIu32 " failed errno=%d", i, errno);
@@ -389,9 +527,10 @@ static esp_err_t camera_driver_prepare_buffers(void)
 	}
 
 	APP_LOG_DETAIL(TAG,
-		       "camera buffers ready: count=%u len0=%u",
+		       "camera USERPTR buffers ready: count=%u frame=%u capacity=%u",
 		 (unsigned)HARDWARE_BOARD_CAMERA_BUFFER_COUNT,
-		 (unsigned)s_buffer_lengths[0]);
+		 (unsigned)s_active_format.fmt.pix.sizeimage,
+		 (unsigned)s_buffer_capacities[0]);
 	return ESP_OK;
 }
 
@@ -422,12 +561,23 @@ static void camera_driver_cleanup(void)
 	}
 	s_streaming = false;
 
-	for (uint32_t i = 0; i < HARDWARE_BOARD_CAMERA_BUFFER_COUNT; ++i) {
-		if (s_buffers[i] != NULL) {
-			(void)munmap(s_buffers[i], s_buffer_lengths[i]);
-			s_buffers[i] = NULL;
-			s_buffer_lengths[i] = 0;
+	/*
+	 * Only the V4L2 queue metadata is session-owned. The application-owned
+	 * USERPTR buffers stay reserved across app switches so later high-resolution
+	 * starts never depend on finding three new contiguous PSRAM blocks.
+	 */
+	if (s_fd >= 0 && s_buffers_requested) {
+		struct v4l2_requestbuffers release_req = {
+			.count = 0,
+			.type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+			.memory = CAMERA_DRIVER_MEMORY_TYPE,
+		};
+		if (ioctl(s_fd, VIDIOC_REQBUFS, &release_req) != 0) {
+			ESP_LOGW(TAG, "release camera buffers failed errno=%d", errno);
+		} else {
+			APP_LOG_DETAIL(TAG, "camera buffers released");
 		}
+		s_buffers_requested = false;
 	}
 
 	if (s_fd >= 0) {
@@ -457,7 +607,10 @@ esp_err_t camera_driver_prepare_video_subsystem(void)
 		return ESP_ERR_TIMEOUT;
 	}
 
-	esp_err_t ret = hardware_board_set_camera_power(true);
+	esp_err_t ret = camera_driver_prepare_persistent_buffers();
+	if (ret == ESP_OK) {
+		ret = hardware_board_set_camera_power(true);
+	}
 	if (ret == ESP_OK) {
 		ret = camera_driver_video_init_once();
 	}
@@ -554,7 +707,10 @@ esp_err_t camera_driver_init(void)
 		return ESP_OK;
 	}
 
-	ret = hardware_board_set_camera_power(true);
+	ret = camera_driver_prepare_persistent_buffers();
+	if (ret == ESP_OK) {
+		ret = hardware_board_set_camera_power(true);
+	}
 	if (ret == ESP_OK) {
 		ret = camera_driver_video_init_once();
 	}
@@ -633,7 +789,7 @@ esp_err_t camera_driver_capture(camera_driver_frame_t *frame)
 	uint32_t stale_frames_dropped = 0U;
 	struct v4l2_buffer buf = {
 		.type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
-		.memory = V4L2_MEMORY_MMAP,
+		.memory = CAMERA_DRIVER_MEMORY_TYPE,
 	};
 
 	while (true) {
@@ -688,6 +844,11 @@ esp_err_t camera_driver_capture(camera_driver_frame_t *frame)
 		xSemaphoreGive(s_lock);
 		return ret;
 	}
+	if (!camera_driver_bind_user_buffer(&buf)) {
+		ESP_LOGE(TAG, "bind dequeued camera buffer failed index=%u", (unsigned)buf.index);
+		xSemaphoreGive(s_lock);
+		return ESP_FAIL;
+	}
 	memset(frame, 0, sizeof(*frame));
 	s_active_frame.buffer = buf;
 	s_frame_outstanding = true;
@@ -703,7 +864,7 @@ esp_err_t camera_driver_capture(camera_driver_frame_t *frame)
 	frame->sensor_timestamp_us = camera_driver_buffer_timestamp_us(&buf);
 	switch (s_active_format.fmt.pix.pixelformat) {
 	case V4L2_PIX_FMT_YUV420:
-		frame->pixel_format = CAMERA_DRIVER_PIXEL_FORMAT_YUV420;
+		frame->pixel_format = CAMERA_DRIVER_PIXEL_FORMAT_YUV420_OUYY_EVYY;
 		break;
 	case V4L2_PIX_FMT_RGB565:
 		frame->pixel_format = CAMERA_DRIVER_PIXEL_FORMAT_RGB565;
@@ -742,9 +903,7 @@ void camera_driver_release(camera_driver_frame_t *frame)
 	}
 
 	if (frame->owner == &s_active_frame && s_fd >= 0 && s_frame_outstanding) {
-		if (ioctl(s_fd, VIDIOC_QBUF, &s_active_frame.buffer) != 0) {
-			ESP_LOGW(TAG, "requeue camera frame failed errno=%d", errno);
-		}
+		camera_driver_requeue_buffer(&s_active_frame.buffer, "frame");
 		s_frame_outstanding = false;
 	}
 

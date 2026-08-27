@@ -48,9 +48,9 @@ static esp_err_t app_audio_config_load_u8(nvs_handle_t nvs_handle, const char *k
 static esp_err_t app_audio_config_save_u8(const char *key, uint8_t value)
 {
     ESP_RETURN_ON_FALSE(key != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid audio config key");
-    return platform_nvs_async_set_u8_and_wait(APP_AUDIO_NVS_NAMESPACE,
-                                               key,
-                                               app_audio_clamp_percent(value));
+    return platform_nvs_async_set_u8(APP_AUDIO_NVS_NAMESPACE,
+                                     key,
+                                     app_audio_clamp_percent(value));
 }
 
 esp_err_t app_audio_config_load(app_audio_config_t *config)
