@@ -22,7 +22,7 @@
 | 核对开发来源、公开筛选和验证边界 | [源码来源](SOURCE_PROVENANCE.md) |
 
 直接体验时，从项目 [GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases)
-下载 `esp32p4-tirtc-device-monitor-full-v1.5.0.bin`、`SHA256SUMS.txt` 和
+下载 `esp32p4-tirtc-device-monitor-full-v1.5.1.bin`、`SHA256SUMS.txt` 和
 `release-manifest.json`。先核对 SHA-256，再用
 [Espressif ESP Tool](https://espressif.github.io/esptool-js/) 从 `0x0` 烧录完整镜像。
 
@@ -31,7 +31,7 @@
 ```powershell
 git clone https://github.com/tangeai/tirtc-device-example.git
 cd tirtc-device-example
-git checkout esp32-p4-device-monitor-v1.5.0
+git checkout esp32-p4-device-monitor-v1.5.1
 cd complete-applications/esp32-p4/device-monitor
 ```
 
@@ -39,10 +39,10 @@ cd complete-applications/esp32-p4/device-monitor
 
 | 项目 | 当前值 |
 | --- | --- |
-| 应用版本 | `1.5.0` |
+| 应用版本 | `1.5.1` |
 | 发布日期 | `2026-08-28` |
-| 开发来源 | `esp32-p4-device-app-v1.5.0` / `97331363a0d3c4e6f89b5b93d39561e74087ba2a` |
-| 公开 Tag | `esp32-p4-device-monitor-v1.5.0` |
+| 开发来源 | `esp32-p4-device-app-v1.5.1` / `8d26a2bc5267f6bf1db721730a210ce8bc2f7ccc` |
+| 公开 Tag | `esp32-p4-device-monitor-v1.5.1` |
 | 目标板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |
 | 网络 | ESP32-C6 + ESP-Hosted/SDIO |
 | ESP-IDF | `5.5.4` |
@@ -63,7 +63,16 @@ C6 slave 固件、SDIO 连线和 reset，不要先改 TiRTC 或摄像头代码�
 - `480x320` LVGL 页面覆盖 Wi-Fi、绑定、联系人、呼叫、设置和 OTA。
 - 应用生命周期统一管理摄像头、显示、音频、AEC、PSRAM 池和 TiRTC 连接。
 
-## 1.5.0 更新
+## 1.5.1 更新
+
+- 绑定弹窗中的网址和二维码改用独立的 ThingConnect 设备管理入口：
+  <https://demo-open.tange-ai.com/devices>。
+- 面向程序的 JSON 服务发现仍使用 `https://ep-open.tangeopen.com/services`，设备业务 API
+  仍使用 `https://srv-open.tangeopen.com`，设备 MQTT fallback 仍使用
+  `mqtts://mqtt-open.tangeopen.com:8883`；各入口分工明确，不再把 API 地址展示给用户。
+- TiRTC SDK、媒体参数、网络架构和业务逻辑保持 `1.5.0` 基线不变。
+
+## 1.5.0 媒体与稳定性基线
 
 - TiRTC `2.3.0` P4 重建版接入 TGMP 码率反馈。SDK 只给出绝对目标码率，应用控制任务再调整
   H264 编码器；旧的本地队列压力自动降级保持关闭，避免两套控制器争夺码率。
@@ -109,6 +118,11 @@ SDK 源码基线为 `tag.v1.5.12`，但当前静态库的嵌入 TGTRP BuildInfo 
 `main/Kconfig.projbuild`，稳定默认值在 `sdkconfig.defaults`，媒体参数在
 `main/media/media_tuning.h`。
 
+服务入口按用途分开：设备屏幕展示 `APP_CONFIG_DEVICE_BINDING_PORTAL_URL`；JSON 服务发现使用
+`APP_CONFIG_THING_SERVICE_DISCOVERY_URL`；设备业务 API 使用
+`APP_CONFIG_DEVICE_BINDING_API_BASE`；MQTT fallback 使用 `APP_CONFIG_DEVICE_BINDING_MQTT_URI`。
+修改部署环境时应分别核对，不能用一个地址覆盖多种职责。
+
 进入 ESP-IDF `5.5.4` 环境后执行：
 
 ```powershell
@@ -126,13 +140,14 @@ idf.py build
 复位后先确认身份：
 
 ```text
-firmware version: 1.5.0 project=tirtc_esp32p4_device_app ...
+firmware version: 1.5.1 project=tirtc_esp32p4_device_app ...
 system ready: ESP32-P4 TiRTC dashboard
 ```
 
 开发侧已有双设备呼叫、AI、IPC 重复切换和内存恢复记录。最新持久 PSRAM 池调整后，没有
 重新完成微信小程序外部实呼和弱网矩阵；当前连接在 COM7/COM11 上的启明板仍是旧版
-`1.3.2`，也不属于本版本证据。公开 Release 的正式构建与这些开发侧运行记录分开验收。
+`1.3.2`，也不属于本版本证据。`1.5.1` 只调整绑定入口和版本信息，公开 Release 的正式构建
+仍与这些开发侧运行记录分开验收。
 
 正式 Release 的源码 commit、构建命令、解析依赖、应用镜像、分区余量、完整镜像和 SHA-256
 统一记录在 `release-manifest.json`。构建成功仍需与烧录、C6/SDIO、联网、绑定、媒体和长稳

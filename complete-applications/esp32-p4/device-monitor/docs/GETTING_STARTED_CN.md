@@ -8,7 +8,7 @@ P4+C6 前置检查、构建、烧录、首次联网和基础功能确认。项�
 
 | 项目 | 本版本要求 |
 | --- | --- |
-| 应用 | TiRTC ESP32-P4 Device Monitor `1.5.0` |
+| 应用 | TiRTC ESP32-P4 Device Monitor `1.5.1` |
 | 目标板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |
 | 主芯片 | ESP32-P4 |
 | 网络芯片 | ESP32-C6，运行 ESP-Hosted slave |
@@ -45,7 +45,7 @@ P4 负责 UI、摄像头、音频、编解码和 TiRTC 应用；C6 只负责 Wi-
 ```powershell
 git clone https://github.com/tangeai/tirtc-device-example.git
 cd tirtc-device-example
-git checkout esp32-p4-device-monitor-v1.5.0
+git checkout esp32-p4-device-monitor-v1.5.1
 cd complete-applications/esp32-p4/device-monitor
 ```
 
@@ -57,7 +57,7 @@ Select-String -Path CMakeLists.txt -Pattern 'PROJECT_VER'
 Select-String -Path components/tirtc_sdk/include/tiRTC.h -Pattern 'TIRTC_VERSION_'
 ```
 
-预期应用版本为 `1.5.0`，TiRTC SDK API 版本为 `2.3.0`。SDK 使用 Nano `v2.3.0` 与
+预期应用版本为 `1.5.1`，TiRTC SDK API 版本为 `2.3.0`。SDK 使用 Nano `v2.3.0` 与
 TGWebRTC `tag.v1.5.12` 源码基线，并包含 P4 ICE/TGTRP 稳定性修复。库内 TGTRP BuildInfo
 仍显示 `tagv1.5.11`；不能只看一个版本字符串替换静态库。完整 commit 和哈希见
 [VERSION.md](../VERSION.md)。
@@ -126,9 +126,21 @@ idf.py build
 
 1. 在“设置 -> Wi-Fi 设置”扫描并连接网络。
 2. Wi-Fi SSID 和密码保存在 NVS，重启后自动重连。
-3. 设备联网后自动申请 6 位绑定码；按屏幕二维码或网址在平台完成绑定。
+3. 设备联网后自动申请 6 位绑定码；按屏幕二维码或网址进入 ThingConnect 设备管理门户完成绑定。
 4. 绑定下发的设备身份保存在 NVS；“设置 -> TiRTC 配置”可以查看状态或重置绑定。
 5. 微信联系人、设备联系人和 AI 角色由对应平台账号与授权关系提供。
+
+绑定时会接触到几个用途不同的入口：
+
+| 入口 | 地址 | 谁使用 |
+| --- | --- | --- |
+| 用户门户 | `https://demo-open.tange-ai.com/devices` | 开发者在浏览器中访问；绑定弹窗文字和二维码指向这里 |
+| JSON 服务发现 | `https://ep-open.tangeopen.com/services` | 设备内部查询服务地址，不作为浏览器绑定入口 |
+| 设备业务 API fallback | `https://srv-open.tangeopen.com` | 服务发现不可用时由设备内部使用，不展示给用户 |
+| 设备 MQTT fallback | `mqtts://mqtt-open.tangeopen.com:8883` | 设备内部消息通道，不作为网页地址 |
+
+这四个入口职责不同，不能互换。修改产品环境时要分别核对，不要把 API 或 MQTT 地址生成到
+面向用户的绑定二维码里。
 
 ### 6.2 源码配置：只改产品策略
 
@@ -155,10 +167,10 @@ idf.py menuconfig
 
 ### 7.1 快速体验：烧录 Release 完整镜像
 
-从 [`esp32-p4-device-monitor-v1.5.0` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.5.0) 下载以下三个文件：
+从 [`esp32-p4-device-monitor-v1.5.1` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.5.1) 下载以下三个文件：
 
 ```text
-esp32p4-tirtc-device-monitor-full-v1.5.0.bin
+esp32p4-tirtc-device-monitor-full-v1.5.1.bin
 release-manifest.json
 SHA256SUMS.txt
 ```
@@ -169,7 +181,7 @@ SHA256SUMS.txt
 PowerShell 可执行：
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\esp32p4-tirtc-device-monitor-full-v1.5.0.bin
+Get-FileHash -Algorithm SHA256 .\esp32p4-tirtc-device-monitor-full-v1.5.1.bin
 ```
 
 然后：
@@ -210,7 +222,7 @@ Windows 端口示例为 `COM7`，Linux 示例为 `/dev/ttyACM0`；请使用电�
 复位后先看固件身份：
 
 ```text
-firmware version: 1.5.0 project=tirtc_esp32p4_device_app ...
+firmware version: 1.5.1 project=tirtc_esp32p4_device_app ...
 system ready: ESP32-P4 TiRTC dashboard
 ```
 
@@ -240,7 +252,8 @@ AP 列表能出现，才说明 P4、C6、ESP-Hosted 和 SDIO 已经走通到 Wi-
 binding verification code ready: mqtt subscribed
 ```
 
-按屏幕显示的网址或二维码完成平台确认。绑定成功后设备保存身份并启动正式在线服务。
+使用浏览器打开屏幕显示的 `https://demo-open.tange-ai.com/devices`，或直接扫描二维码完成平台确认。
+绑定成功后设备保存身份并启动正式在线服务。
 如果刚重置过绑定，旧身份和旧联系人关系可能需要在平台侧重新确认。
 
 ### 8.5 先跑两个内置检查
@@ -276,9 +289,9 @@ binding verification code ready: mqtt subscribed
 一次看到首帧还不够。继续观察帧率、码率、音频连续性、队列压力，再连续进入/退出场景，
 确认摄像头、音频、显示和连接都能被下一次会话重新获取。
 
-## 10. 用 1.5.0 的状态和日志定位第一处异常
+## 10. 用 1.5.1 的状态和日志定位第一处异常
 
-1.5.0 保留 NVS 与 RTC 生命周期门禁，并补充 TGMP 码率、持久 PSRAM 池、SDIO/Wi-Fi 恢复、
+1.5.1 继承 1.5.0 的 NVS 与 RTC 生命周期门禁、TGMP 码率、持久 PSRAM 池、SDIO/Wi-Fi 恢复、
 AEC、解码/显示队列和结构化网络指标。遇到绑定失败、重复连接或媒体停滞时，先找最早停止
 推进的一层，不要直接擦除 NVS、反复重启、降分辨率或关闭功能。
 
@@ -422,14 +435,14 @@ Wi-Fi 密码、device secret、token 或 access key，但状态和呼叫命令�
 
 ## 13. 这份发布已经证明到哪里
 
-公开源码固定到来源 Tag 和 commit，应用/SDK 版本及静态库哈希已有记录。公开候选已使用
-ESP-IDF `5.5.4`、`--no-ccache` 完成唯一一次干净构建；构建后仅补写 Markdown 证据，
-编译输入保持一致。应用镜像、分区余量、实际烧录分段和 SHA-256 全部写入
-`release-manifest.json`。16 MiB 完整镜像只上传 GitHub Release，不进入 Git。
+公开源码固定到来源 Tag 和 commit，应用/SDK 版本及静态库哈希已有记录。正式候选还需使用
+ESP-IDF `5.5.4`、`--no-ccache` 完成唯一一次干净构建。构建完成后再把应用镜像、分区余量、
+实际烧录分段和 SHA-256 写入 `release-manifest.json`。16 MiB 完整镜像只作为 GitHub Release
+资产，不进入 Git 历史。
 
 干净构建证明候选能在记录的环境中完成编译和链接。烧录成功、C6/SDIO 可用、平台在线、
 音视频首帧和长稳结果仍要按上面的步骤在目标板上分别确认。这样记录问题时，大家能立刻知道
 证据停在哪一层，不必从头猜。开发侧已有双设备呼叫、AI、IPC 重复切换和内存恢复记录；
 最新持久池修改后，微信小程序外部实呼和弱网矩阵没有重新完成。COM7/COM11 上的启明板仍是
-旧版 `1.3.2`，不能当作 `1.5.0` 证据。精确 Release 固件仍应分别核对烧录、C6/SDIO、
+旧版 `1.3.2`，不能当作 `1.5.1` 证据。精确 Release 固件仍应分别核对烧录、C6/SDIO、
 联网、绑定、媒体和长稳。

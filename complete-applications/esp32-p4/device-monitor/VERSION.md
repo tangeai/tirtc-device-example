@@ -5,13 +5,13 @@
 | 项目 | 内容 |
 | --- | --- |
 | 应用工程 | TiRTC ESP32-P4 Device Monitor |
-| 应用版本 | `1.5.0` |
+| 应用版本 | `1.5.1` |
 | 发布日期 | `2026-08-28` |
-| 来源 Tag | `esp32-p4-device-app-v1.5.0` |
-| 来源 Tag object | `5cb49b6c82a2462c1c5c479040597e45a063591f` |
-| 来源 commit | `97331363a0d3c4e6f89b5b93d39561e74087ba2a` |
-| 比较基线 | `esp32-p4-device-app-v1.4.0` / `d7529030846277dd06fe7332ef61b913d4378d31` |
-| 公开项目 Tag | `esp32-p4-device-monitor-v1.5.0` |
+| 来源 Tag | `esp32-p4-device-app-v1.5.1` |
+| 来源 Tag object | `4a0fa821b53551432c8341763cf68a61c81285b5` |
+| 来源 commit | `8d26a2bc5267f6bf1db721730a210ce8bc2f7ccc` |
+| 比较基线 | `esp32-p4-device-app-v1.5.0` / `97331363a0d3c4e6f89b5b93d39561e74087ba2a` |
+| 公开项目 Tag | `esp32-p4-device-monitor-v1.5.1` |
 | 发布范围 | 源码、公开文档和 `0x0` 16 MiB 完整镜像 |
 | 目标板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |
 | 网络架构 | ESP32-P4 host + ESP32-C6 ESP-Hosted/SDIO slave |
@@ -56,7 +56,15 @@ TGTRP BuildInfo。两项来自不同元数据面，本文如实并列；集成�
 编码源文件补丁和本地 `idf_component.yml`，用于输出长度边界、参考帧池与码率控制。
 因此准确表述是“Espressif 1.3.8 基线 + P4 项目补丁”，不是整个组件逐字节等同上游。
 
-## 1.5.0 能力
+## 1.5.1 变更
+
+- 绑定弹窗中的文字网址和二维码使用独立的 ThingConnect 设备管理入口
+  `https://demo-open.tange-ai.com/devices`。
+- JSON 服务发现继续使用 `https://ep-open.tangeopen.com/services`，设备业务 API 继续使用
+  `https://srv-open.tangeopen.com`；本补丁没有改变服务发现或业务 API 契约。
+- TiRTC SDK、第三方组件、媒体档位、分区表和硬件配置保持 `1.5.0` 基线不变。
+
+## 1.5.0 能力基线
 
 - P4 ICE/TGTRP 继续使用有界接收和公平调度；音频抖动单轮最多处理 4 个有序工作项，ICE
   预算耗尽后让出 1 tick，避免媒体回调长期占用 RTC 线程。
@@ -86,13 +94,8 @@ TGTRP BuildInfo。两项来自不同元数据面，本文如实并列；集成�
 静态核对。开发侧已有双设备呼叫、AI、IPC 重复切换和内存恢复记录。
 
 最新持久池修改后尚未重新完成微信外部实呼和弱网矩阵；COM7/COM11 上的启明板是旧版
-`1.3.2`，不属于本版本证据。这些运行记录不是精确 `1.5.0` Tag 的构建或烧录证明。
-统一公开候选已完成唯一一次 ESP-IDF `5.5.4`、`--no-ccache` 干净构建，共完成
-`1837/1837` 个步骤，编译 warning、error 和 ICE 均为 0。应用镜像为 `6,955,728` bytes，
-SHA-256 为 `cf57693f03abb8d182a03823cff6764138365e4880e19e113f298292fe0bba26`；最小 APP 分区
-剩余 `580,912` bytes（`7.71%`）。`0x0` 16 MiB 完整镜像 SHA-256 为
-`6d83ba156aeb7026533e567e3834ed3eb600b102a75ce1b1ded52d0d4358a6ff`，分段与构建绑定见
-`release-manifest.json`。构建完成后仅补写公开 Markdown 证据，编译输入未改变。
+`1.3.2`，不属于本版本证据。`1.5.1` 开发侧交接只完成静态门禁，没有编译、烧录或真机
+验证；正式构建、镜像和 SHA-256 将由统一发布候选单独生成和记录。
 
 微信小程序 VoIP 和外部 IPC/H5 对端本轮没有重新完成人工端到端验证。
 

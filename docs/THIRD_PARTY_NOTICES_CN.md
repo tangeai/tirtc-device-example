@@ -18,7 +18,8 @@ active-connect `db7290f2404b15f2ab8567dd221853ca2ec054ab` 为功能基础，并�
 `components/tirtc_sdk/VERSION.md`、`VERSION.md`、`SOURCE_PROVENANCE.md` 和 Release
 manifest 为准；SDK 头文件和静态库保留供应方条款，不因本仓 MIT License 改为 MIT。
 
-ESP32-P4 Device Monitor `1.5.0` 使用 TiRTC `2.3.0` 官方源码重建版。Nano 源码为
+ESP32-P4 Device Monitor `1.5.1` 继续使用 TiRTC `2.3.0` 官方源码重建版，SDK 文件与 `1.5.0`
+保持一致。Nano 源码为
 `v2.3.0 / 1baf7c95f3ca715c9367b9c998417f647934dc35`，TGWebRTC 源码基线为
 `tag.v1.5.12 / 41c9a25768ffe265c07f17ef78a6439607b19364`；静态库内嵌 TGTRP
 BuildInfo 为 `tagv1.5.11`，两项元数据分开保留。P4 `libTiRTC.a` 大小为

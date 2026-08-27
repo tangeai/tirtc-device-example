@@ -47,7 +47,7 @@ Release，不再用日期批次同时代表整仓内容。当前版本和下载�
 | --- | --- | --- | --- |
 | [完整应用总览](../complete-applications/README.md) | - | - | 选择目标开发板 |
 | [ESP32-S3 Device Monitor](../complete-applications/esp32-s3/device-monitor/README.md) | `1.9.6` | `2.3.0 mini` | 绑定、H5 双向音频、冷启动呼叫、联系人键盘、小钛、微信、二维码扫描和 OTA |
-| [ESP32-P4 Device Monitor](../complete-applications/esp32-p4/device-monitor/README.md) | `1.5.0` | `2.3.0` 官方源码重建版 | Hosted 网络、TGMP 码率、持久 PSRAM 媒体池、双向设备视频和完整业务 |
+| [ESP32-P4 Device Monitor](../complete-applications/esp32-p4/device-monitor/README.md) | `1.5.1` | `2.3.0` 官方源码重建版 | 独立绑定门户、Hosted 网络、TGMP 码率、持久 PSRAM 媒体池和双向设备视频 |
 | [G32S10X Device Monitor](../complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | G32S10X 完整设备能力与君正平台适配 |
 | [固件下载与校验](RELEASES_CN.md) | - | - | Release 下载、烧录入口和一致性校验 |
 

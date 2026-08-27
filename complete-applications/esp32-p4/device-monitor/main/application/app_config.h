@@ -117,6 +117,10 @@
 #define APP_CONFIG_DEVICE_BINDING_API_BASE "https://srv-open.tangeopen.com"
 #endif
 
+#ifndef APP_CONFIG_DEVICE_BINDING_PORTAL_URL
+#define APP_CONFIG_DEVICE_BINDING_PORTAL_URL "https://demo-open.tange-ai.com/devices"
+#endif
+
 #ifndef APP_CONFIG_DEVICE_BINDING_MQTT_URI
 #define APP_CONFIG_DEVICE_BINDING_MQTT_URI "mqtts://mqtt-open.tangeopen.com:8883"
 #endif

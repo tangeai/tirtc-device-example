@@ -13,7 +13,7 @@
 | 最小系统例子 | ESP32-S3 最小系统例子 | `0.8.0` | `2.2.1` | 独立开发目录快照 | `esp32-s3-minimal-system-v0.8.0` |
 | 最小系统例子 | ESP32-P4 最小系统例子 | `0.2.0` | `2.3.0` | 独立开发目录快照 | `esp32-p4-minimal-system-v0.2.0` |
 | 完整应用 | ESP32-S3 Device Monitor | `1.9.6` | `2.3.0 mini` | `v1.9.6` / `cdb5d7b` / tree `2b032dc` | `esp32-s3-device-monitor-v1.9.6` |
-| 完整应用 | ESP32-P4 Device Monitor | `1.5.0` | `2.3.0` 官方源码重建版 | `esp32-p4-device-app-v1.5.0` / `97331363a0d3c4e6f89b5b93d39561e74087ba2a` | `esp32-p4-device-monitor-v1.5.0` |
+| 完整应用 | ESP32-P4 Device Monitor | `1.5.1` | `2.3.0` 官方源码重建版 | `esp32-p4-device-app-v1.5.1` / `8d26a2bc5267f6bf1db721730a210ce8bc2f7ccc` | `esp32-p4-device-monitor-v1.5.1` |
 | 完整应用 | G32S10X Device Monitor | `0.1.1` | `2.2.1` | `v0.1.1` / `5630152` | `g32s10x-device-monitor-v0.1.1` |
 
 ESP32-S3 最小系统例子的开发目录没有可公开引用的 Git 历史。当前版本保留其 `88` 文件核心源码
@@ -39,11 +39,12 @@ TiRTC SDK 以 `db7290f` 为功能基础，另含 `13e34c3` 的 HTTPS 服务端�
 `83556eeee0c6cae45961899a4c5d1255a5d0d33f8e636104a946ce41ff3e20d7`；BuildInfo 仍为
 `v2.3.0-db7290f`。归档只移除了 SDK 内部调试信息，成员、全局符号和运行代码契约保持一致。
 
-ESP32-P4 Device Monitor `1.5.0` 的开发来源为 annotated Tag
-`esp32-p4-device-app-v1.5.0`、Tag object
-`5cb49b6c82a2462c1c5c479040597e45a063591f`、commit
-`97331363a0d3c4e6f89b5b93d39561e74087ba2a`、tree
-`d0abdbe3139bdb1ae7486bb00747d1c58b593445`。TiRTC API 版本为 `2.3.0`，Nano 源码为
+ESP32-P4 Device Monitor `1.5.1` 的开发来源为 annotated Tag
+`esp32-p4-device-app-v1.5.1`、Tag object
+`4a0fa821b53551432c8341763cf68a61c81285b5`、commit
+`8d26a2bc5267f6bf1db721730a210ce8bc2f7ccc`、tree
+`03e8f4708f69a96df13b8115376351075e5adf78`。本补丁把绑定弹窗和二维码切换到独立用户门户
+`https://demo-open.tange-ai.com/devices`；设备内部服务发现和业务 API 保持独立。TiRTC API 版本为 `2.3.0`，Nano 源码为
 `v2.3.0 / 1baf7c95f3ca715c9367b9c998417f647934dc35`，TGWebRTC 源码基线为
 `tag.v1.5.12 / 41c9a25768ffe265c07f17ef78a6439607b19364`。当前静态库内嵌的
 TGTRP BuildInfo 仍为 `tagv1.5.11`，因此源码基线和运行时 BuildInfo 分开记录；P4
@@ -60,7 +61,7 @@ TGTRP BuildInfo 仍为 `tagv1.5.11`，因此源码基线和运行时 BuildInfo �
 | S3 最小系统例子 `0.8.0` | 目录快照、SDK、媒体来源、图片脱敏、凭据和公开路径已核对 | ESP-IDF `5.5.4` 的 4 MB 配置干净构建通过；app 大小见 Release manifest | 源码与 `0x0` 4 MB 完整镜像 |
 | P4 最小系统例子 `0.2.0` | 目录快照、SDK、C6/C61 Hosted 兼容配置、媒体和凭据已核对 | ESP-IDF `5.5.4` 的 4 MB 配置干净构建通过；app 大小见 Release manifest | 源码与 `0x0` 4 MB 完整镜像 |
 | S3 Device Monitor `1.9.6` | 来源 Tag/commit/tree、SDK HTTPS 认证、公开筛选和凭据范围已核对 | 已从与公开代码提交 tree 完全一致的隔离候选执行唯一 ESP-IDF `5.5.4`、GCC `14.2.0_20260121`、`--no-ccache` 正式干净构建，完成 `1767/1767` 且编译器 warning/error/ICE 均为 0；app `7,611,216` 字节、SHA-256 `fa87ae46ffa93bd01da6deffade8cf23b22022f19040815b3b305ce7a56f0eec`、分区剩余 `187,568` 字节（`2.41%`） | 源码、16 MB 完整镜像与 OTA app；容量余量较紧 |
-| P4 Device Monitor `1.5.0` | 来源 Tag/commit/tree、P4 公开包 SDK 6 项哈希、源码增量、媒体参数和凭据范围已核对 | 已完成唯一 ESP-IDF `5.5.4`、GCC `14.2.0_20260121`、`--no-ccache` 正式干净构建，完成 `1837/1837` 且编译 warning/error/ICE 均为 0；app `6,955,728` 字节、SHA-256 `cf57693f03abb8d182a03823cff6764138365e4880e19e113f298292fe0bba26`、分区剩余 `580,912` 字节（`7.71%`） | 源码与 `0x0` 16 MB 完整镜像 |
+| P4 Device Monitor `1.5.1` | 来源 Tag/commit/tree、P4 公开包 SDK 6 项哈希、绑定门户与设备端点职责、凭据范围已核对 | 正式干净构建待统一发布候选从精确代码和配置输入执行，不复用 `1.5.0` 产物 | 计划交付源码与 `0x0` 16 MB 完整镜像 |
 | G32S10X Device Monitor `0.1.1` | 来源 Tag、SDK、君正覆盖层、文件系统打包范围已核对 | 固件构建通过；文件系统在同一 SDK 树恢复打包，发布树与构建树为 `compile-input-equivalent` | 源码、主固件与两个 YAFFS 镜像 |
 
 本次最小系统项目改名没有改变功能代码、SDK、媒体或板级配置。S3 与 P4 仍分别从最终公开

@@ -65,7 +65,7 @@ git checkout esp32-s3-device-monitor-v1.9.6
 | 平台 | 应用 | 版本 | TiRTC SDK | 来源版本 | 公开 Release |
 | --- | --- | --- | --- | --- | --- |
 | ESP32-S3 | [Device Monitor](complete-applications/esp32-s3/device-monitor/README.md) | `1.9.6` | `2.3.0 mini` | Tag `v1.9.6` / commit `cdb5d7b` | [`esp32-s3-device-monitor-v1.9.6`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.9.6) |
-| ESP32-P4 | [Device Monitor](complete-applications/esp32-p4/device-monitor/README.md) | `1.5.0` | `2.3.0` 官方源码重建版 | Tag `esp32-p4-device-app-v1.5.0` / commit `9733136` | [`esp32-p4-device-monitor-v1.5.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.5.0) |
+| ESP32-P4 | [Device Monitor](complete-applications/esp32-p4/device-monitor/README.md) | `1.5.1` | `2.3.0` 官方源码重建版 | Tag `esp32-p4-device-app-v1.5.1` / commit `8d26a2b` | [`esp32-p4-device-monitor-v1.5.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.5.1) |
 | G32S10X | [Device Monitor](complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | Tag `v0.1.1` / commit `5630152` | [`g32s10x-device-monitor-v0.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-device-monitor-v0.1.1) |
 
 八个项目独立使用 SemVer Tag。某个项目更新时，只提升并发布该项目版本；共享 SDK 或公共代码
@@ -92,10 +92,11 @@ AI 对讲和设备互呼，并用预录媒体验证链路；它不依赖完整 U
 不进入 Git 历史。ESP32 固件使用
 [Espressif ESP Tool](https://espressif.github.io/esptool-js/) 按 Release 清单烧录。
 
-ESP32-P4 Device Monitor `1.5.0` 提供源码和
-`esp32p4-tirtc-device-monitor-full-v1.5.0.bin`。设备视频呼叫使用最高 `384x256` 双向 H264；
-本版补齐 TGMP 码率反馈、持久 PSRAM 摄像头/H264 池、跨 APP 媒体生命周期、AEC、联系人、
-二维码、Wi-Fi 恢复和串口回归接口。完整镜像只在 GitHub Release 中分发，
+ESP32-P4 Device Monitor `1.5.1` 提供源码和
+`esp32p4-tirtc-device-monitor-full-v1.5.1.bin`。绑定弹窗和二维码使用独立的 ThingConnect 设备
+管理门户，设备内部的 JSON 服务发现与业务 API 保持各自职责。媒体能力继承 `1.5.0`：设备视频
+呼叫使用最高 `384x256` 双向 H264，并包含 TGMP 码率反馈、持久 PSRAM 媒体池、跨 APP 生命周期、
+AEC、联系人、Wi-Fi 恢复和串口回归接口。完整镜像只在 GitHub Release 中分发，
 从 `0x0` 烧录；它会清除现有 NVS、Wi-Fi 和绑定信息，具体步骤见
 [固件下载与校验](docs/RELEASES_CN.md)。
 

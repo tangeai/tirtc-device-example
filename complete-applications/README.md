@@ -14,13 +14,14 @@
 | 平台 | 项目 | 版本 | 入口 |
 | --- | --- | --- | --- |
 | ESP32-S3 | Device Monitor | `1.9.6` | [README](esp32-s3/device-monitor/README.md) |
-| ESP32-P4 | Device Monitor | `1.5.0` | [README](esp32-p4/device-monitor/README.md) |
+| ESP32-P4 | Device Monitor | `1.5.1` | [README](esp32-p4/device-monitor/README.md) |
 | G32S10X | Device Monitor | `0.1.1` | [README](g32s10x/device-monitor/README.md) |
 
-ESP32-P4 Device Monitor `1.5.0` 面向 P4+C6 带屏设备，提供 IPC、AI 对讲、微信 VoIP、
+ESP32-P4 Device Monitor `1.5.1` 面向 P4+C6 带屏设备，提供 IPC、AI 对讲、微信 VoIP、
 设备互呼和真实摄像头/音频链路。设备互呼使用最高 `384x256` 双向 H264；微信下行请求
 `640x480` MJPEG，并在 P4 上硬解、裁切和缩放到 `480x320`。TGMP 码率控制、持久 PSRAM
-媒体池和跨 APP 生命周期按同一资源所有权运行。源码和 `0x0` 完整镜像按同一
+媒体池和跨 APP 生命周期按同一资源所有权运行。绑定弹窗和二维码使用独立的 ThingConnect
+设备管理门户，不复用设备 API 地址。源码和 `0x0` 完整镜像按同一
 项目版本发布；所有正式构建产物只通过
 [GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases) 分发，不进入 Git 历史。
 

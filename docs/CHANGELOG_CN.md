@@ -1,5 +1,20 @@
 # 版本变更记录
 
+## 2026.08.28：ESP32-P4 Device Monitor 1.5.1
+
+- 开发来源固定为 annotated Tag `esp32-p4-device-app-v1.5.1`、Tag object
+  `4a0fa821b53551432c8341763cf68a61c81285b5`、commit
+  `8d26a2bc5267f6bf1db721730a210ce8bc2f7ccc`、tree
+  `03e8f4708f69a96df13b8115376351075e5adf78`；比较基线为 `esp32-p4-device-app-v1.5.0`。
+- 绑定弹窗中的文字网址和二维码改用独立的 ThingConnect 设备管理门户
+  `https://demo-open.tange-ai.com/devices`，不再把设备业务 API 地址展示给用户。
+- 设备内部 JSON 服务发现继续使用 `https://ep-open.tangeopen.com/services`，业务 API fallback
+  继续使用 `https://srv-open.tangeopen.com`，设备 MQTT fallback 继续使用
+  `mqtts://mqtt-open.tangeopen.com:8883`。四类入口职责分开，不能互换。
+- TiRTC SDK、H264/ESP-Hosted 组件、媒体参数、分区表和硬件配置均保持 `1.5.0` 基线不变。
+- 开发来源交接完成静态门禁，没有为精确 Tag 构建或烧录；正式 APP、完整镜像、分区余量和
+  SHA-256 由统一发布候选的一次干净构建生成，不复用 `1.5.0` 固件。
+
 ## 2026.08.28：ESP32-P4 Device Monitor 1.5.0
 
 - 开发来源固定为 annotated Tag `esp32-p4-device-app-v1.5.0`、Tag object
