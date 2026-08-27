@@ -435,10 +435,11 @@ Wi-Fi 密码、device secret、token 或 access key，但状态和呼叫命令�
 
 ## 13. 这份发布已经证明到哪里
 
-公开源码固定到来源 Tag 和 commit，应用/SDK 版本及静态库哈希已有记录。正式候选还需使用
-ESP-IDF `5.5.4`、`--no-ccache` 完成唯一一次干净构建。构建完成后再把应用镜像、分区余量、
-实际烧录分段和 SHA-256 写入 `release-manifest.json`。16 MiB 完整镜像只作为 GitHub Release
-资产，不进入 Git 历史。
+公开源码固定到来源 Tag 和 commit，应用/SDK 版本及静态库哈希已有记录。正式候选已使用
+ESP-IDF `5.5.4`、`--no-ccache` 完成唯一一次干净构建，`1837/1837` 个步骤通过且编译 warning、
+error、ICE 均为 0。应用镜像为 `6,955,776` bytes，最小 APP 分区剩余 `580,864` bytes
+（`7.71%`）；实际烧录分段、完整镜像和 SHA-256 写入 `release-manifest.json`。16 MiB 完整
+镜像只作为 GitHub Release 资产，不进入 Git 历史。
 
 干净构建证明候选能在记录的环境中完成编译和链接。烧录成功、C6/SDIO 可用、平台在线、
 音视频首帧和长稳结果仍要按上面的步骤在目标板上分别确认。这样记录问题时，大家能立刻知道

@@ -12,8 +12,13 @@
   继续使用 `https://srv-open.tangeopen.com`，设备 MQTT fallback 继续使用
   `mqtts://mqtt-open.tangeopen.com:8883`。四类入口职责分开，不能互换。
 - TiRTC SDK、H264/ESP-Hosted 组件、媒体参数、分区表和硬件配置均保持 `1.5.0` 基线不变。
-- 开发来源交接完成静态门禁，没有为精确 Tag 构建或烧录；正式 APP、完整镜像、分区余量和
-  SHA-256 由统一发布候选的一次干净构建生成，不复用 `1.5.0` 固件。
+- 唯一正式构建使用 ESP-IDF `5.5.4`、GCC `14.2.0_20260121` 和 `--no-ccache`，完成
+  `1837/1837`，编译 warning、error、ICE 均为 0；app `6,955,776` bytes、SHA-256
+  `1542c19052ae9bdb8804e38916c54f928e405ac06e6ae796faa5d46cd7c7e515`，分区剩余
+  `580,864` bytes（`7.71%`）。
+- `0x0` 16 MiB 完整镜像 SHA-256 为
+  `019eed4e047f9d1a1809c5fa0e441b94d2a509fe83c885e5eafc21adb89c0a7a`；固件只作为
+  GitHub Release 资产分发，不进入 Git 历史。本轮没有执行烧录或目标板绑定回归。
 
 ## 2026.08.28：ESP32-P4 Device Monitor 1.5.0
 

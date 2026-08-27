@@ -89,10 +89,17 @@ persistent reference pool 和码率控制。公开仓保留这些代码，不把
 
 ## 构建与运行证据
 
-开发来源交接只完成源码、版本、端点职责、敏感信息和制品范围的静态门禁，没有为精确
-`1.5.1` Tag 生成固件。统一公开候选将以最终代码和配置输入执行一次 ESP-IDF `5.5.4`、
-`--no-ccache` 干净构建；应用镜像、分区余量、`0x0` 16 MiB 完整镜像及 SHA-256 均以该次
-构建的真实输出为准，不复用 `1.5.0` 资产。
+唯一正式构建以 repository tree `997d02622474578e10d94c1c56ffdf44aefad75b` 为输入；该 tree
+由公开可达的 build-input checkpoint `7cf7cc441dfc1a16d5c075a623713d4cbbb74002` 固定。构建使用
+ESP-IDF `5.5.4`、GCC `14.2.0_20260121` 和 `--no-ccache`，完成
+`1837/1837` 个步骤，编译 warning、error 和 ICE 均为 0。应用镜像为 `6,955,776` bytes，
+SHA-256 为 `1542c19052ae9bdb8804e38916c54f928e405ac06e6ae796faa5d46cd7c7e515`；最小 APP 分区
+剩余 `580,864` bytes（`7.71%`）。`0x0` 16 MiB 完整镜像 SHA-256 为
+`019eed4e047f9d1a1809c5fa0e441b94d2a509fe83c885e5eafc21adb89c0a7a`，没有复用 `1.5.0` 资产。
+
+构建完成后只更新公开 Markdown 中的正式构建、固件和 Release 证据；代码、配置、SDK、分区表
+和依赖输入均未改变。`release-manifest.json` 记录 build-input commit、最终公开 commit/Tag、
+编译输入等价性、解析依赖、生成配置、完整镜像分段和所有 SHA-256。
 
 开发侧已有双设备呼叫、AI、IPC 重复切换和内存恢复记录，但 `1.5.1` 只调整绑定门户和版本，
 没有重新完成精确 Tag 的目标板回归。这些记录不能替代：

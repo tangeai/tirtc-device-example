@@ -261,9 +261,10 @@ SDK/TGMP 控制器默认开启；拥塞降码率立即生效，恢复升码率�
 
 ## 建议验证
 
-公开候选还需使用 ESP-IDF `5.5.4`、`--no-ccache` 完成唯一一次干净构建。构建后再把应用
-镜像、分区余量、实际烧录分段和 SHA-256 写入 `release-manifest.json`；16 MiB 完整镜像只作为
-GitHub Release 资产，不进入 Git 历史。完成构建仍不改变以下目标板验证要求：
+公开候选已使用 ESP-IDF `5.5.4`、`--no-ccache` 完成唯一一次干净构建，`1837/1837` 个步骤
+通过且编译 warning、error、ICE 均为 0。应用镜像为 `6,955,776` bytes，最小 APP 分区剩余
+`580,864` bytes（`7.71%`）；实际烧录分段和完整镜像 SHA-256 写入 `release-manifest.json`。
+16 MiB 完整镜像只作为 GitHub Release 资产，不进入 Git 历史。完成构建仍不改变以下目标板验证要求：
 
 1. 检查横屏显示和触摸坐标。
 2. 检查绑定、正式 MQTT 和 TiRTC 上线。

@@ -15,7 +15,7 @@
 | ESP32-S3 最小系统例子 | `0.8.0` | [`esp32-s3-minimal-system-v0.8.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-minimal-system-v0.8.0) |
 | ESP32-P4 最小系统例子 | `0.2.0` | [`esp32-p4-minimal-system-v0.2.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-minimal-system-v0.2.0) |
 | ESP32-S3 Device Monitor | `1.9.6` | [`esp32-s3-device-monitor-v1.9.6`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.9.6) |
-| ESP32-P4 Device Monitor | `1.5.0` | [`esp32-p4-device-monitor-v1.5.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.5.0) |
+| ESP32-P4 Device Monitor | `1.5.1` | [`esp32-p4-device-monitor-v1.5.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.5.1) |
 | G32S10X Device Monitor | `0.1.1` | [`g32s10x-device-monitor-v0.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-device-monitor-v0.1.1) |
 
 每个 Release 只包含该项目的固件，以及两份核验资料：
@@ -37,7 +37,7 @@
 | P4 最小系统例子 | `esp32p4-tirtc-minimal-system-full-v0.2.0.bin` | `4,194,304` | 见本 Release 的 `SHA256SUMS.txt` | ESP Tool，地址 `0x0` |
 | S3 Device Monitor | `esp32s3-tirtc-device-monitor-full-v1.9.6.bin` | `16777216` | `0fa03360dc65281903af0854a3624f4de208ac0f83956047416916442eea0bdc` | ESP Tool，地址 `0x0` |
 | S3 Device Monitor | `esp32s3-tirtc-device-monitor-ota-v1.9.6.bin` | `7,611,216` | `fa87ae46ffa93bd01da6deffade8cf23b22022f19040815b3b305ce7a56f0eec` | OTA app，不写入 `0x0`；分区剩余 `187,568` bytes（`2.41%`） |
-| P4 Device Monitor | `esp32p4-tirtc-device-monitor-full-v1.5.0.bin` | `16,777,216` | `6d83ba156aeb7026533e567e3834ed3eb600b102a75ce1b1ded52d0d4358a6ff` | ESP Tool，地址 `0x0` |
+| P4 Device Monitor | `esp32p4-tirtc-device-monitor-full-v1.5.1.bin` | `16,777,216` | `019eed4e047f9d1a1809c5fa0e441b94d2a509fe83c885e5eafc21adb89c0a7a` | ESP Tool，地址 `0x0` |
 | G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-rtos-with-spl-v0.1.1.bin` | `6,965,860` | `34f926d4fd6173a9433d3652503d66a6cb0df2e961dbd3e79dc846cfe3bbe29a` | 君正 Cloner 主固件区，按项目 policy 烧录 |
 | G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-fs-v0.1.1.yaffs2` | `12,808,192` | `5a8f1fbcbd6f70291e63ae00480ea545f388c6b2eaebd72c93ccb828a6ea60f2` | 君正 Cloner 文件系统区，按项目 policy 烧录 |
 | G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-data-v0.1.1.yaffs2` | `4,096` | `8f6039987ea3d8a96a686f9b3f5f26e22028c918492b6890b336bde2dac90876` | 君正 Cloner 数据区，按项目 policy 烧录 |
@@ -45,11 +45,12 @@
 S3 Device Monitor `1.9.6` 的大小和 SHA-256 来自唯一正式干净构建。下载后仍应以同一
 Release 的 `SHA256SUMS.txt` 复核文件，不要混用 `1.9.5` 资产。
 
-P4 Device Monitor `1.5.0` 的完整镜像来自与最终公开 Tag 编译输入一致的唯一正式干净构建；
+P4 Device Monitor `1.5.1` 的完整镜像来自与最终公开 Tag 编译输入一致的唯一正式干净构建；
 manifest 和校验清单在构建后生成，用于绑定构建起点、最终公开 Tag 和附件哈希。设备呼叫
 上行为 `384x256@12fps` H264，微信设备上行为 `480x320@15fps` H264，
-下行请求 `640x480` MJPEG。应用镜像为 `6,955,728` bytes，最小 APP 分区剩余
-`580,912` bytes（`7.71%`）。下载时不要混用旧版本源码或固件。
+下行请求 `640x480` MJPEG。应用镜像为 `6,955,776` bytes，最小 APP 分区剩余
+`580,864` bytes（`7.71%`）。本补丁把绑定二维码切换到独立用户门户；下载时不要混用
+`1.5.0` 源码或固件。
 
 ## ESP32-S3/P4 完整镜像烧录
 
