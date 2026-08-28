@@ -14,7 +14,7 @@
 | G32S10X 最小 TiRTC 集成示例 | `0.8.3` | [`g32s10x-minimal-integration-v0.8.3`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-minimal-integration-v0.8.3) |
 | ESP32-S3 最小系统例子 | `0.8.0` | [`esp32-s3-minimal-system-v0.8.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-minimal-system-v0.8.0) |
 | ESP32-P4 最小系统例子 | `0.2.0` | [`esp32-p4-minimal-system-v0.2.0`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-minimal-system-v0.2.0) |
-| ESP32-S3 Device Monitor | `1.9.6` | [`esp32-s3-device-monitor-v1.9.6`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.9.6) |
+| ESP32-S3 Device Monitor | `1.9.7` | [`esp32-s3-device-monitor-v1.9.7`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.9.7) |
 | ESP32-P4 Device Monitor | `1.5.1` | [`esp32-p4-device-monitor-v1.5.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.5.1) |
 | G32S10X Device Monitor | `0.1.1` | [`g32s10x-device-monitor-v0.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-device-monitor-v0.1.1) |
 
@@ -35,15 +35,15 @@
 | G32S10X 最小示例 | `g32s10x-tirtc-minimal-rtos-with-spl-v0.8.3.bin` | `6,695,236` | `ef79659daf2f176eb6642c01af8fdb901e5a5499c861da9f9e5f322f0dde180f` | 君正 Cloner 主固件区，按项目 policy 烧录 |
 | S3 最小系统例子 | `esp32s3-tirtc-minimal-system-full-v0.8.0.bin` | `4,194,304` | 见本 Release 的 `SHA256SUMS.txt` | ESP Tool，地址 `0x0` |
 | P4 最小系统例子 | `esp32p4-tirtc-minimal-system-full-v0.2.0.bin` | `4,194,304` | 见本 Release 的 `SHA256SUMS.txt` | ESP Tool，地址 `0x0` |
-| S3 Device Monitor | `esp32s3-tirtc-device-monitor-full-v1.9.6.bin` | `16777216` | `0fa03360dc65281903af0854a3624f4de208ac0f83956047416916442eea0bdc` | ESP Tool，地址 `0x0` |
-| S3 Device Monitor | `esp32s3-tirtc-device-monitor-ota-v1.9.6.bin` | `7,611,216` | `fa87ae46ffa93bd01da6deffade8cf23b22022f19040815b3b305ce7a56f0eec` | OTA app，不写入 `0x0`；分区剩余 `187,568` bytes（`2.41%`） |
+| S3 Device Monitor | `esp32s3-tirtc-device-monitor-full-v1.9.7.bin` | `16777216` | `48a92849ef0149a4b099e981c4e109fcfa81afcbf99d379da1f7de61ad996bd1` | ESP Tool，地址 `0x0` |
+| S3 Device Monitor | `esp32s3-tirtc-device-monitor-ota-v1.9.7.bin` | `7,613,216` | `49349c1e1755ae5265e3ddea6f57166ccf60b90cdca7d1a1a004539f4faf43ff` | OTA app，不写入 `0x0`；分区剩余 `185,568` bytes（`2.38%`） |
 | P4 Device Monitor | `esp32p4-tirtc-device-monitor-full-v1.5.1.bin` | `16,777,216` | `019eed4e047f9d1a1809c5fa0e441b94d2a509fe83c885e5eafc21adb89c0a7a` | ESP Tool，地址 `0x0` |
 | G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-rtos-with-spl-v0.1.1.bin` | `6,965,860` | `34f926d4fd6173a9433d3652503d66a6cb0df2e961dbd3e79dc846cfe3bbe29a` | 君正 Cloner 主固件区，按项目 policy 烧录 |
 | G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-fs-v0.1.1.yaffs2` | `12,808,192` | `5a8f1fbcbd6f70291e63ae00480ea545f388c6b2eaebd72c93ccb828a6ea60f2` | 君正 Cloner 文件系统区，按项目 policy 烧录 |
 | G32S10X Device Monitor | `g32s10x-tirtc-device-monitor-data-v0.1.1.yaffs2` | `4,096` | `8f6039987ea3d8a96a686f9b3f5f26e22028c918492b6890b336bde2dac90876` | 君正 Cloner 数据区，按项目 policy 烧录 |
 
-S3 Device Monitor `1.9.6` 的大小和 SHA-256 来自唯一正式干净构建。下载后仍应以同一
-Release 的 `SHA256SUMS.txt` 复核文件，不要混用 `1.9.5` 资产。
+S3 Device Monitor `1.9.7` 的大小和 SHA-256 来自唯一正式干净构建。下载后仍应以同一
+Release 的 `SHA256SUMS.txt` 复核文件，不要混用 `1.9.6` 资产。
 
 P4 Device Monitor `1.5.1` 的完整镜像来自与最终公开 Tag 编译输入一致的唯一正式干净构建；
 manifest 和校验清单在构建后生成，用于绑定构建起点、最终公开 Tag 和附件哈希。设备呼叫
@@ -69,7 +69,7 @@ manifest 和校验清单在构建后生成，用于绑定构建起点、最终�
 最小系统例子使用 4 MB 完整镜像，Device Monitor 使用 16 MB 完整镜像。
 名称含 `ota` 的文件只是应用 OTA 镜像，不能作为完整镜像写入 `0x0`。
 
-S3 Device Monitor `1.9.6` 的 RTC 业务是双向音频，摄像头只用于二维码扫描。该版本不生成
+S3 Device Monitor `1.9.7` 的 RTC 业务是双向音频，摄像头只用于二维码扫描。该版本不生成
 `storage.bin`；完整镜像中的未使用分区保持擦除态。不同版本的 full、OTA app 或分段文件不能
 混用。Web IPC 和设备互呼仍可能听到轻微“沙沙电流声”，底噪根因尚未证实；下载校验和烧录
 成功不等同于音频主观验收。

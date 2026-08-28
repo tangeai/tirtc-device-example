@@ -37,13 +37,18 @@
 
 ## 3. 主叫流程
 
+UI 不直接调用 HTTP、TiRTC 或音频接口。发起、接听、拒绝和挂断都先进入应用生命周期队列，
+由应用任务交给 Device Call 服务执行。按钮按下表示“请求已投递”，真正结果以应用快照、
+云端响应和 P2P 状态为准。
+
 1. 应用层先准备音频资源；RTC 就绪由后续呼叫服务单独等待。
 2. 呼叫服务先等待设备正式在线，最长 `30` 秒；随后等待本机 TiRTC 监听状态 ready，最长
    `50` 秒。RTC 尚未 ready 时，每 `500 ms` 推进一次 SDK 准备，不在 UI 线程忙等。
 3. ready 后设置“下一条入站连接先接收、暂缓媒体”，再携带目标设备和 `call_type`
    调用 `POST /v1/call/request`。
 4. 云端返回 `room_id`，本地进入 `OUTGOING`，启动 `45` 秒响铃计时。
-5. 对端接听后，本机收到 MQTT `callee_answered`，进入 `CONNECTING` 并停止响铃超时判定。
+5. 对端接听后，本机收到 MQTT `callee_answered`，进入 `CONNECTING`；响铃计时到此结束，并
+   单独启动 `40` 秒 P2P 建连计时。
 6. 被叫使用业务接口取得 token，并主动 `TiRtcConnect` 到主叫。
 7. 主叫接收到入站 TiRTC 连接，但在收到业务确认前不启动音频。
 8. 被叫发送命令 `0x2000`，负载为 `{"room_id":"..."}`。
@@ -51,6 +56,10 @@
    则断开连接。
 
 关键约束：如果 TiRTC 监听没有 ready，不能先创建云端房间。这样可以避免“云端已接听、本机却因 SDK 启动失败进入 ERROR”的半完成状态。首次完整烧录后，用户仍可直接发起呼叫；准备过程在后台有界等待，超时后向 UI 返回明确失败状态。
+
+两个超时阶段不能混用：`OUTGOING` 阶段超过 `45` 秒按未接听取消房间；`CONNECTING` 阶段
+超过 `40` 秒按 P2P 建连失败挂断房间，并记录 `p2p_error`。这样可以区分“对方没接”和“已接听
+但 P2P 没连上”。
 
 发起呼叫前，如果房间恢复、联系人刷新或联系人变更任务已经在运行，呼叫请求最多等待 `12`
 秒让这些任务结束；超时仍忙则以明确的后台忙/超时结果拒绝本次呼叫，不抢占任务。呼叫进入
@@ -60,7 +69,8 @@
 ## 4. 被叫流程
 
 1. MQTT 收到 `call_incoming`，保存 `room_id`、`caller_id` 和 `call_type`，显示接听弹窗并
-   启动本地来电铃声。铃声实时合成，任务栈和 PCM 缓冲使用 PSRAM。
+   启动本地来电铃声。铃声实时合成两组 `659 / 784 / 1047 Hz` 上行三音短句，周期为
+   `3.2` 秒，并使用 `8 ms` 起音与 `48 ms` 收音包络；任务栈和 PCM 缓冲使用 PSRAM。
 2. 用户点击接听后，先停止铃声，再确认本机 TiRTC 监听 ready。铃声停止失败会保留真实
    错误并终止本次接听，不把失败写成成功。
 3. ready 后调用 `POST /v1/call/device/info`，请求体包含 `device_id`、`room_id`、`purpose=call`。
@@ -69,6 +79,10 @@
 6. P2P 连接成功后发送 `0x2000` 房间确认，进入 `IN_CALL` 并启动双向音频。
 
 `POST /v1/call/device/info` 有接听副作用，因此不能在本机 RTC 未 ready 时提前调用。当前实现只使用该正式接口，不再回退到旧的 `/v1/device/info`。
+
+接听 worker 创建时保存当前 generation，并在调用 `TiRtcConnect` 前、提交过程中和等待连接时
+重复核对。用户已经拒绝、挂断、取消或收到房间结束事件时，generation 会变化；旧 worker
+随即放弃，不能把已结束的房间重新写回 `CONNECTING` 或 `IN_CALL`。
 
 ## 5. 结束与异常补偿
 
@@ -84,6 +98,8 @@
   设备呼叫状态机消费。
 - `callee_answered` 只表示对端开始 P2P 连接，不等于媒体已经可用；真正进入通话以匹配的 `0x2000` 为准。
 - 进程异常重启后可使用 `GET /v1/call/room` 查询云端残留房间。新呼叫收到 `40202` 时，固件会按返回的旧 `room_id` 先清理再重试。
+- 接听、拒绝和挂断按钮使用按下事件投递动作，不等待手指抬起；同一动作仍由应用队列串行化，
+  不在 UI 回调中同步等待网络。
 
 ## 6. 日志验收顺序
 
@@ -96,8 +112,9 @@ UI 使用应用快照显示主叫/被叫角色、对端设备、`last_error` 和
 ```text
 stage=rtc_ready_wait_done ... ret=ESP_OK
 stage=call_request_done ... call_type=audio ret=ESP_OK
-stage=ringing ...
+stage=ringing ... timeout_ms=45000
 stage=callee_answered_rx ... matched=1
+stage=p2p_wait_begin ... timeout_ms=40000
 stage=in_call role=caller ... cmd=0x2000
 ```
 
@@ -113,7 +130,7 @@ stage=connected_notice_tx ... cmd=0x2000 ret=ESP_OK
 stage=in_call ... role=callee
 ```
 
-用户点击接听、拒接，或主叫取消后，应看到 `call_ringtone: ringtone stopped`。如果铃声停止
+用户按下接听、拒接，或主叫取消后，应看到 `call_ringtone: ringtone stopped`。如果铃声停止
 失败，先保留 `stage=ringtone_stop_failed` 的 reason、room 和返回值，不用重启设备掩盖状态。
 
 收到视频来电时，应看到 `reason=unsupported_call_type` 并由设备拒绝，不能继续创建本地视频
@@ -124,10 +141,10 @@ stage=in_call ... role=callee
 
 ## 7. 已知音频边界
 
-相同功能代码在版本号收口前完成过双板媒体包核对：约 14 秒、每端约 690 包，线上为
+旧版本的相同音频链路完成过双板媒体包核对：约 14 秒、每端约 690 包，线上为
 `media=2`、`flags=0`、`160 bytes / 20 ms`，发送失败、丢弃和下溢计数为 0；A-law 也完成
-20,000 次编解码自检。这些结果支持格式与 Codec 路径核对，不代表 `1.9.6` 最终 Release
-固件已经完成真机回归。
+20,000 次编解码自检。这些结果支持格式与 Codec 路径核对。`1.9.7` 已完成正式干净构建，
+但没有真机回归；UI 动作队列、generation 防护、两阶段超时和新铃声目前没有目标板证据。
 
 当前 Web IPC 和设备互呼的人耳试听仍可感知轻微“沙沙电流声”。现有证据已经排除明显的
 线上格式不一致和 A-law 自检不稳定，但底噪根因尚未证实。本版本不宣称问题已经解决；后续

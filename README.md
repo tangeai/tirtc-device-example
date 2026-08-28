@@ -38,7 +38,7 @@ ESP32 完整镜像会覆盖整片 Flash，并重置 NVS 中原有的 Wi-Fi、绑
 ```bash
 git clone https://github.com/tangeai/tirtc-device-example.git
 cd tirtc-device-example
-git checkout esp32-s3-device-monitor-v1.9.6
+git checkout esp32-s3-device-monitor-v1.9.7
 ```
 
 然后进入下表中的项目目录。每个项目 README 都给出依赖、配置、构建、烧录、成功现象和排障入口。
@@ -64,7 +64,7 @@ git checkout esp32-s3-device-monitor-v1.9.6
 
 | 平台 | 应用 | 版本 | TiRTC SDK | 来源版本 | 公开 Release |
 | --- | --- | --- | --- | --- | --- |
-| ESP32-S3 | [Device Monitor](complete-applications/esp32-s3/device-monitor/README.md) | `1.9.6` | `2.3.0 mini` | Tag `v1.9.6` / commit `cdb5d7b` | [`esp32-s3-device-monitor-v1.9.6`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.9.6) |
+| ESP32-S3 | [Device Monitor](complete-applications/esp32-s3/device-monitor/README.md) | `1.9.7` | `2.3.0 mini` | Tag `v1.9.7` / commit `58c2d15` | [`esp32-s3-device-monitor-v1.9.7`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.9.7) |
 | ESP32-P4 | [Device Monitor](complete-applications/esp32-p4/device-monitor/README.md) | `1.5.1` | `2.3.0` 官方源码重建版 | Tag `esp32-p4-device-app-v1.5.1` / commit `8d26a2b` | [`esp32-p4-device-monitor-v1.5.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.5.1) |
 | G32S10X | [Device Monitor](complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | Tag `v0.1.1` / commit `5630152` | [`g32s10x-device-monitor-v0.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-device-monitor-v0.1.1) |
 
@@ -100,16 +100,20 @@ AEC、联系人、Wi-Fi 恢复和串口回归接口。完整镜像只在 GitHub 
 从 `0x0` 烧录；它会清除现有 NVS、Wi-Fi 和绑定信息，具体步骤见
 [固件下载与校验](docs/RELEASES_CN.md)。
 
-ESP32-S3 Device Monitor `1.9.6` 提供 RTC 双向音频、二维码联系人扫描、小钛、微信 VoIP、
-设备互呼和 OTA。本次重点改善首次完整烧录后的呼叫准备、通话状态提示、联系人名称输入和
-音量触摸反馈，并移除设置页中的手动 RTC 测试入口。固件使用 TiRTC SDK `2.3.0 mini`，
-完整镜像 `esp32s3-tirtc-device-monitor-full-v1.9.6.bin` 只通过对应 Release 分发。
+ESP32-S3 Device Monitor `1.9.7` 提供 RTC 双向音频、二维码联系人扫描、小钛、微信 VoIP、
+设备互呼和 OTA。本次把接听、拒绝、挂断和音量调节从 UI 回调移入应用任务处理；连续音量或
+采集增益操作只应用最新值。设备呼叫按 `45` 秒响铃与 `40` 秒 P2P 建连分阶段计时，并用
+generation 阻止已结束呼叫的旧 worker 重新拉起房间。TiRTC SDK 同步加入 ICE UDP 与 TGTRP
+音频抖动队列的有界公平调度。固件使用 TiRTC SDK `2.3.0 mini`，
+完整镜像 `esp32s3-tirtc-device-monitor-full-v1.9.7.bin` 只通过对应 Release 分发。
 
 本版本的服务发现、业务 HTTP、设备 MQTT 和 TiRTC HTTPS 都使用认证传输：只接受
 HTTPS/MQTTS，并校验证书链与主机名；不安全地址会被拒绝并报错，不降级到明文协议。
 
 Web IPC 和设备互呼的当前人耳试听仍可感知轻微“沙沙电流声”。线上格式核对和 A-law
-编解码自检缩小了排查范围，但底噪根因尚未证实；`1.9.6` 不宣称这一问题已经解决。
+编解码自检缩小了排查范围，但底噪根因尚未证实；`1.9.7` 不宣称这一问题已经解决。
+本版本已从公开源码完成 ESP-IDF `5.5.4` 正式干净构建；构建与附件哈希由对应 Release 的
+manifest 记录。目前没有 `1.9.7` 的目标板回归，烧录、联网、呼叫和听感仍需分别验证。
 
 ## 构建入口
 

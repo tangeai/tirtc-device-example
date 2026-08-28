@@ -1,7 +1,7 @@
 # 源码构建与配置
 
 本文面向要修改 ESP32-S3 Device Monitor 源码的开发者。只想体验设备时，直接下载
-`esp32s3-tirtc-device-monitor-full-v1.9.6.bin`，按[烧录与 OTA](FLASH_AND_OTA_CN.md)
+`esp32s3-tirtc-device-monitor-full-v1.9.7.bin`，按[烧录与 OTA](FLASH_AND_OTA_CN.md)
 从 `0x0` 烧录即可。
 
 ## 1. 环境与硬件
@@ -27,20 +27,20 @@
 ```powershell
 git clone https://github.com/tangeai/tirtc-device-example.git
 Set-Location .\tirtc-device-example
-git checkout esp32-s3-device-monitor-v1.9.6
+git checkout esp32-s3-device-monitor-v1.9.7
 Set-Location .\complete-applications\esp32-s3\device-monitor
 ```
 
-当前版本应为 `1.9.6`，开发来源为：
+当前版本应为 `1.9.7`，开发来源为：
 
 ```text
-Tag:    v1.9.6
-Tag object: c251806b8904672bac07ea16cca2f3099e2426e4
-commit: cdb5d7bec9c955227a1259281686e30377332fb3
-tree:   2b032dc07ada0a2e15cfb82e320ac69b53272374
-public code commit:     ccae5fd495109244a679c5ffe1e17f98d6589f52
-public repository tree: a0fde688fb4dbd2b7803fde487046f4de6cccd0d
-public project tree:    d5d5a8fb3f818106b77eeccc2599482943260be9
+Tag:    v1.9.7
+Tag object: 73f6a3b18ac4ad5e95f813c6eba4f31907961be6
+commit: 58c2d152a179fa382511f4217fb84858072ffbb0
+tree:   206b2373a389fab39ece1893f23f1ddbf0e66dfe
+public code commit:     a3c6d4c5bdecb215f8c8ebec554424de77ed193b
+public repository tree: 7508d3f00fb436a0d9bfd716fc1fc152f2d0cf8a
+public project tree:    ac13d559aae8f74e92afbf585fe79c5da02aa324
 ```
 
 TiRTC 静态库核对：
@@ -52,10 +52,10 @@ Get-FileHash .\components\tirtc_sdk\lib\esp32s3\libTiRTC.a -Algorithm SHA256
 预期结果：
 
 ```text
-83556eeee0c6cae45961899a4c5d1255a5d0d33f8e636104a946ce41ff3e20d7
+f5eca6c3212a34d00ce5706e864f8112adc8e6b20b92bc175435299caf4b082b
 ```
 
-库大小应为 `2,125,366` bytes。BuildInfo 仍为 `v2.3.0-db7290f`，HTTPS 服务端认证修复来自
+库大小应为 `2,127,226` bytes。BuildInfo 仍为 `v2.3.0-db7290f`，HTTPS 服务端认证修复来自
 `13e34c3e3e3dc6776be4713b5c1e3c17bd282766`。公开库已执行 `--strip-debug`，只移除 SDK
 内部源码路径和行号级调试信息。哈希或大小不一致时，应恢复项目记录的完整 SDK 快照；不要
 只换库、只换头文件，或用修改文档的方式掩盖混用。
@@ -131,9 +131,9 @@ idf.py -B build --no-ccache reconfigure build
 ```
 
 本次正式 Release 资产使用隔离候选，在全新目录构建一次。该候选与公开代码提交
-`ccae5fd495109244a679c5ffe1e17f98d6589f52` 的 repository tree
-`a0fde688fb4dbd2b7803fde487046f4de6cccd0d`、项目 tree
-`d5d5a8fb3f818106b77eeccc2599482943260be9` 完全一致，构建输入因此可静态绑定到公开源码。
+`a3c6d4c5bdecb215f8c8ebec554424de77ed193b` 的 repository tree
+`7508d3f00fb436a0d9bfd716fc1fc152f2d0cf8a`、项目 tree
+`ac13d559aae8f74e92afbf585fe79c5da02aa324` 完全一致，构建输入因此可静态绑定到公开源码。
 后续复现应检出该公开代码提交，并把生成的 `sdkconfig` 放在全新构建目录中：
 
 ```powershell
@@ -158,7 +158,7 @@ build/partition_table/partition-table.bin
 build/ota_data_initial.bin
 ```
 
-`1.9.6` 不生成 `storage.bin`。分区表仍保留 `0xf00000` 的 1 MB storage 分区，但正式完整
+`1.9.7` 不生成 `storage.bin`。分区表仍保留 `0xf00000` 的 1 MB storage 分区，但正式完整
 镜像将未使用区域保持为 `0xFF`。不要从旧版本构建目录复制 `storage.bin` 混入本版本。
 
 正式公开构建记录：
@@ -167,13 +167,13 @@ build/ota_data_initial.bin
 | --- | --- |
 | 构建步骤 | `1767/1767` |
 | 编译 warning / error / ICE | `0 / 0 / 0` |
-| app 大小 | `7,611,216` bytes |
-| app SHA-256 | `fa87ae46ffa93bd01da6deffade8cf23b22022f19040815b3b305ce7a56f0eec` |
+| app 大小 | `7,613,216` bytes（`0x742b20`） |
+| app SHA-256 | `49349c1e1755ae5265e3ddea6f57166ccf60b90cdca7d1a1a004539f4faf43ff` |
 | app 分区 | `7798784` bytes |
-| 分区剩余 | `187,568` bytes（`2.41%`） |
+| 分区剩余 | `185,568` bytes（`2.38%`） |
 
 本次正式构建使用 ESP-IDF `5.5.4`、GCC `14.2.0_20260121` 并禁用 ccache，完成
-`1767/1767`；容量余量为 `187,568` bytes（`2.41%`），没有沿用 `1.9.5` 的大小和哈希。
+`1767/1767`；容量余量为 `185,568` bytes（`2.38%`），没有沿用 `1.9.6` 的大小和哈希。
 如果增加图片、字体、日志、SDK 或调试功能，应把容量复核当作必做
 步骤，而不是等 OTA 失败后再处理。
 
@@ -198,19 +198,19 @@ build/ota_data_initial.bin
 正式构建完成后，只从这一个构建目录生成一套资产：
 
 1. 将 `sample_project.bin` 原样命名为
-   `esp32s3-tirtc-device-monitor-ota-v1.9.6.bin`，不做二次编译或字节修改。
+   `esp32s3-tirtc-device-monitor-ota-v1.9.7.bin`，不做二次编译或字节修改。
 2. 读取本次 `flasher_args.json`，把 bootloader、partition table、OTA data 和 app 写入一份
    预填 `0xFF` 的 16 MB 镜像，生成
-   `esp32s3-tirtc-device-monitor-full-v1.9.6.bin`。不要手写沿用旧版本地址。
+   `esp32s3-tirtc-device-monitor-full-v1.9.7.bin`。不要手写沿用旧版本地址。
 3. 逐段比对完整镜像与四个构建分段；检查其余地址仍为 `0xFF`，并核对 app descriptor 中
-   的版本为 `1.9.6`。
+   的版本为 `1.9.7`。
 4. 生成 `release-manifest.json`，记录公开 commit、来源 Tag/commit/tree、逐文件源码清单与
    SHA-256、SDK 身份、构建环境、完整命令、分区和两个固件文件的大小与 SHA-256。
 5. 生成 `SHA256SUMS.txt`，至少包含 full、OTA app 和 manifest。最终上传这四个文件，
    二进制不进入 Git 历史。
 
-正式结果为：full `16777216` bytes / `0fa03360dc65281903af0854a3624f4de208ac0f83956047416916442eea0bdc`，OTA app
-`7,611,216` bytes / `fa87ae46ffa93bd01da6deffade8cf23b22022f19040815b3b305ce7a56f0eec`。上传前仍要以
+正式结果为：full `16777216` bytes / `48a92849ef0149a4b099e981c4e109fcfa81afcbf99d379da1f7de61ad996bd1`，OTA app
+`7,613,216` bytes / `49349c1e1755ae5265e3ddea6f57166ccf60b90cdca7d1a1a004539f4faf43ff`。上传前仍要以
 `SHA256SUMS.txt` 和 `release-manifest.json` 复核本地文件，不能只按文件名判断版本。
 
 ## 7. 串口诊断 CLI
@@ -243,7 +243,7 @@ command set`，保存后从全新目录重新构建。关闭 CLI 会改变最终
 
 ## 8. 启动检查顺序
 
-1. 串口镜像描述信息和设置页都显示 `1.9.6`。
+1. 串口镜像描述信息和设置页都显示 `1.9.7`。
 2. 屏幕、触摸和主页切换正常。
 3. 连接 2.4 GHz Wi-Fi，看到 IP、时间同步和服务发现结果。
 4. 完成 6 位码绑定并看到正式设备 ID。
@@ -265,7 +265,7 @@ command set`，保存后从全新目录重新构建。关闭 CLI 会改变最终
 | app 超过分区 | 检查新增 SDK、图片、字体和调试功能；不要随意移动 OTA 分区 |
 | Windows 路径过长 | 把仓库放到较短路径，从新目录构建 |
 | 网页烧录后不启动 | 核对四个文件、地址、16 MB Flash 和 RESET 后的启动日志 |
-| H5 没有画面 | `1.9.6` 的 RTC 产品能力是双向音频，这是预期行为 |
+| H5 没有画面 | `1.9.7` 的 RTC 产品能力是双向音频，这是预期行为 |
 | Web IPC 或设备互呼有轻微沙沙声 | 先记录业务、方向和音量，再看 `AT+AUDIOPATH?`、`AT+AUDIOCHECK?` 与 `AT+AECDUMP?`；当前根因尚未闭环，不要仅凭线格式正常就宣称音质问题已修复 |
 | 能联网但业务发现失败 | 先看 `AT+NET?` 和 `AT+NETPROBE`，再核对服务发现入口和设备时间 |
 | HTTPS/MQTTS 证书校验失败 | 先核对设备时间、域名和证书链；不要改成 HTTP/MQTT 或关闭证书验证 |
