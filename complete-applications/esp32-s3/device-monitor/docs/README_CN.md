@@ -21,6 +21,7 @@ P2P 建连分阶段计时，来电使用 `659 / 784 / 1047 Hz` 的移动铃声�
 
 | 文档 | 解决的问题 |
 | --- | --- |
+| [TiRTC 开发者指南（四章）](../../../../docs/README_CN.md#tirtc-开发者指南) | 从 WebRTC 原理、TiRTC 体验一路读到 SDK 代码和音视频调试 |
 | [架构分层](architecture/layering.md) | UI、应用、服务、协议、连接、驱动如何分层；网络指标和来电铃声由谁持有 |
 | [源码构建与配置](BUILD_AND_CONFIG_CN.md) | 环境版本、默认配置、干净构建、多地址网页烧录和构建排障 |
 | [OTA 版本规则](release/OTA_VERSIONING_CN.md) | 应用版本、公开 Tag、完整镜像与 OTA app 如何保持一致 |

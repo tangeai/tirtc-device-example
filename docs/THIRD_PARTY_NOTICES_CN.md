@@ -1,11 +1,13 @@
 # 第三方组件与 SDK
 
-仓库根目录的 MIT License 适用于探鸽智能在本仓库中提供的原创代码与文档。下列内容保留其
+仓库根目录的 MIT License 适用于探鸽智能在本仓库中提供的原创代码、文档和自有文档配图。四章
+TiRTC 开发者指南使用的 `docs/assets/webrtc-overview/` 与 `docs/assets/developer-guide/` 配图属于该
+范围；图中为说明用途出现的第三方名称、Logo 和商标仍归各自权利人。下列内容保留其
 各自的版权、许可和分发条款，不因进入本仓库而改为 MIT：
 
 - Espressif、LVGL、Waveshare、Ingenic 及其他第三方组件和供应商源码。
 - `components/tirtc_sdk/` 或 `sdk/` 中的 TiRTC SDK 头文件与目标平台静态库。
-- 第三方字体、图像、音视频测试素材和生成资源。
+- 第三方字体、图像、音视频测试素材，以及来自供应商或第三方工具链的生成资源。
 
 ESP32-S3 Device Monitor `1.9.7` 继续使用 TiRTC SDK `2.3.0 mini` 官方基础包及项目修复快照。SDK BuildInfo 为
 `v2.3.0-db7290f`，静态库大小为 `2,127,226` bytes，SHA-256 为

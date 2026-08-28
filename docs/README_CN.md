@@ -10,6 +10,23 @@
 Release，不再用日期批次同时代表整仓内容。当前版本和下载入口见[版本与证据清单](VERSIONS_CN.md)
 与[固件下载与校验](RELEASES_CN.md)。
 
+## TiRTC 开发者指南
+
+这四章是一条连续阅读路径：先理解实时通信要解决什么，再亲手体验 TiRTC，随后进入 SDK 代码，
+最后沿着采集、传输、缓冲和播放链路排查音视频问题。
+
+![从体验到代码和音视频调试的阅读路线](assets/webrtc-overview/developer-guide-roadmap-v2.png)
+
+| 章节 | 读完能解决什么 |
+| --- | --- |
+| [第一章：WebRTC 是什么](01_WEBRTC_OVERVIEW_CN.md) | 理解跨网连接、实时传输、播放时限和跨平台适配 |
+| [第二章：TiRTC 的设计与快速体验](02_TIRTC_OVERVIEW_AND_EXPERIENCE_CN.md) | 理解设备身份、业务授权和完整体验流程 |
+| [第三章：具体代码实现](03_TIRTC_DEVELOPMENT_CN.md) | 掌握 SDK 生命周期、异步回调、连接句柄和业务接入 |
+| [第四章：音视频调试](04_AUDIO_VIDEO_PIPELINE_CN.md) | 沿证据链检查采集、AEC、抖动缓冲、编解码和硬件输出 |
+
+文中的代码和媒体参数以本仓当前公开的 ESP32-S3/P4 完整应用为例。每个项目实际使用的 SDK、
+构建结果和真机验证范围，以项目 README 和[版本与证据清单](VERSIONS_CN.md)为准。
+
 ## 按手头任务找文档
 
 | 你现在要做什么 | 从这里开始 |

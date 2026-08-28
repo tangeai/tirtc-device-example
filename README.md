@@ -143,6 +143,7 @@ tirtc-device-example/
 
 ## 文档
 
+- [TiRTC 开发者指南（四章）](docs/README_CN.md#tirtc-开发者指南)
 - [文档入口](docs/README_CN.md)
 - [版本与验证边界](docs/VERSIONS_CN.md)
 - [版本变更记录](docs/CHANGELOG_CN.md)
@@ -151,5 +152,5 @@ tirtc-device-example/
 
 ## License
 
-原创代码与文档使用 [MIT License](LICENSE)。第三方组件、TiRTC SDK、供应商源码和素材保留
+原创代码、文档和本仓自有文档配图使用 [MIT License](LICENSE)。第三方组件、TiRTC SDK、供应商源码和素材保留
 各自条款，详见[第三方组件与 SDK](docs/THIRD_PARTY_NOTICES_CN.md)。

@@ -20,6 +20,11 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-Third-party components, SDK headers, static libraries, generated assets, and
-vendor source files retain their respective copyright and license terms. They
-are not relicensed by this MIT License.
+Third-party components, SDK headers, static libraries, assets originating from
+third parties or vendors, and vendor source files retain their respective
+copyright and license terms. They are not relicensed by this MIT License.
+
+Original documentation assets published under docs/assets/webrtc-overview and
+docs/assets/developer-guide are covered by this MIT License. Third-party names,
+logos, and trademarks shown for identification remain the property of their
+respective owners.
