@@ -19,16 +19,9 @@ static const char *TAG = "call_ringtone";
 #define DEVICE_CALL_RINGTONE_TASK_PRIORITY    4
 #define DEVICE_CALL_RINGTONE_TASK_CORE        1
 #define DEVICE_CALL_RINGTONE_CHUNK_MS         20U
-#define DEVICE_CALL_RINGTONE_TONE_A_HZ        440U
-#define DEVICE_CALL_RINGTONE_TONE_B_HZ        480U
-#define DEVICE_CALL_RINGTONE_BURST_MS         400U
-#define DEVICE_CALL_RINGTONE_BURST_GAP_MS     200U
-#define DEVICE_CALL_RINGTONE_REPEAT_GAP_MS    2000U
-#define DEVICE_CALL_RINGTONE_PERIOD_MS        \
-    ((2U * DEVICE_CALL_RINGTONE_BURST_MS) + \
-     DEVICE_CALL_RINGTONE_BURST_GAP_MS + \
-     DEVICE_CALL_RINGTONE_REPEAT_GAP_MS)
-#define DEVICE_CALL_RINGTONE_FADE_MS          12U
+#define DEVICE_CALL_RINGTONE_PERIOD_MS        3200U
+#define DEVICE_CALL_RINGTONE_ATTACK_MS        8U
+#define DEVICE_CALL_RINGTONE_RELEASE_MS       48U
 #define DEVICE_CALL_RINGTONE_STOP_TIMEOUT_MS  500U
 #define DEVICE_CALL_RINGTONE_MAX_SAMPLES      (16000U * 2U * DEVICE_CALL_RINGTONE_CHUNK_MS / 1000U)
 
@@ -36,6 +29,32 @@ static portMUX_TYPE s_ringtone_lock = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t s_ringtone_task;
 static bool s_ringtone_stop_requested;
 static EXT_RAM_BSS_ATTR int16_t s_ringtone_pcm[DEVICE_CALL_RINGTONE_MAX_SAMPLES];
+
+typedef struct {
+    uint16_t start_ms;
+    uint16_t duration_ms;
+    uint16_t frequency_hz;
+} device_call_ringtone_note_t;
+
+typedef struct {
+    uint32_t start_frame;
+    uint32_t duration_frames;
+    uint32_t phase_step;
+} device_call_ringtone_runtime_note_t;
+
+/* Two ascending three-note phrases sound like a compact mobile-phone chime.
+ * The long idle tail keeps repeated ringing noticeable without being harsh. */
+static const device_call_ringtone_note_t s_ringtone_notes[] = {
+    {   0U, 160U,  659U },
+    { 190U, 160U,  784U },
+    { 380U, 300U, 1047U },
+    { 820U, 160U,  659U },
+    {1010U, 160U,  784U },
+    {1200U, 420U, 1047U },
+};
+
+#define DEVICE_CALL_RINGTONE_NOTE_COUNT \
+    (sizeof(s_ringtone_notes) / sizeof(s_ringtone_notes[0]))
 
 /* A compact sine table keeps the ringtone deterministic without a large WAV
  * asset or floating-point work in the playback loop. */
@@ -56,13 +75,12 @@ static bool device_call_ringtone_stop_requested(void)
     return stop;
 }
 
-static int16_t device_call_ringtone_sample(uint32_t phase_a,
-                                           uint32_t phase_b,
+static int16_t device_call_ringtone_sample(uint32_t phase,
                                            uint32_t envelope_q15)
 {
-    int32_t tone_a = s_sine_lut[phase_a >> 27];
-    int32_t tone_b = s_sine_lut[phase_b >> 27];
-    int32_t mixed = (tone_a * 9200 + tone_b * 7600) / 32767;
+    int32_t fundamental = s_sine_lut[phase >> 27];
+    int32_t harmonic = s_sine_lut[(phase * 2U) >> 27];
+    int32_t mixed = (fundamental * 12000 + harmonic * 3600) / 32767;
 
     mixed = (mixed * (int32_t)envelope_q15) / 32767;
     if (mixed > INT16_MAX) {
@@ -73,22 +91,20 @@ static int16_t device_call_ringtone_sample(uint32_t phase_a,
     return (int16_t)mixed;
 }
 
-static uint32_t device_call_ringtone_burst_envelope(uint32_t pattern_frame,
-                                                     uint32_t burst_start_frame,
-                                                     uint32_t burst_frames,
-                                                     uint32_t fade_frames)
+static uint32_t device_call_ringtone_note_envelope(uint32_t note_frame,
+                                                   uint32_t note_frames,
+                                                   uint32_t attack_frames,
+                                                   uint32_t release_frames)
 {
-    if (pattern_frame < burst_start_frame ||
-        pattern_frame >= burst_start_frame + burst_frames) {
+    if (note_frame >= note_frames) {
         return 0U;
     }
 
-    uint32_t burst_frame = pattern_frame - burst_start_frame;
-    if (fade_frames > 0U && burst_frame < fade_frames) {
-        return (burst_frame * 32767U) / fade_frames;
+    if (attack_frames > 0U && note_frame < attack_frames) {
+        return (note_frame * 32767U) / attack_frames;
     }
-    if (fade_frames > 0U && burst_frame + fade_frames > burst_frames) {
-        return ((burst_frames - burst_frame) * 32767U) / fade_frames;
+    if (release_frames > 0U && note_frame + release_frames >= note_frames) {
+        return ((note_frames - note_frame) * 32767U) / release_frames;
     }
     return 32767U;
 }
@@ -96,8 +112,7 @@ static uint32_t device_call_ringtone_burst_envelope(uint32_t pattern_frame,
 static void device_call_ringtone_task(void *ctx)
 {
     const audio_format_t *format = speaker_get_playback_format();
-    uint32_t phase_a = 0U;
-    uint32_t phase_b = 0U;
+    device_call_ringtone_runtime_note_t runtime_notes[DEVICE_CALL_RINGTONE_NOTE_COUNT];
     uint64_t rendered_frames = 0U;
     esp_err_t result = ESP_OK;
 
@@ -122,58 +137,55 @@ static void device_call_ringtone_task(void *ctx)
         goto done;
     }
 
-    const uint32_t phase_step_a =
-        (uint32_t)(((uint64_t)DEVICE_CALL_RINGTONE_TONE_A_HZ << 32) /
-                   format->sample_rate_hz);
-    const uint32_t phase_step_b =
-        (uint32_t)(((uint64_t)DEVICE_CALL_RINGTONE_TONE_B_HZ << 32) /
-                   format->sample_rate_hz);
-    const uint32_t fade_frames =
-        (format->sample_rate_hz * DEVICE_CALL_RINGTONE_FADE_MS) / 1000U;
-    const uint32_t burst_frames =
-        (format->sample_rate_hz * DEVICE_CALL_RINGTONE_BURST_MS) / 1000U;
-    const uint32_t second_burst_start_frame =
-        (format->sample_rate_hz *
-         (DEVICE_CALL_RINGTONE_BURST_MS + DEVICE_CALL_RINGTONE_BURST_GAP_MS)) /
-        1000U;
+    const uint32_t attack_frames =
+        (format->sample_rate_hz * DEVICE_CALL_RINGTONE_ATTACK_MS) / 1000U;
+    const uint32_t release_frames =
+        (format->sample_rate_hz * DEVICE_CALL_RINGTONE_RELEASE_MS) / 1000U;
     const uint32_t period_frames =
         (format->sample_rate_hz * DEVICE_CALL_RINGTONE_PERIOD_MS) / 1000U;
+    for (size_t note = 0U; note < DEVICE_CALL_RINGTONE_NOTE_COUNT; ++note) {
+        runtime_notes[note].start_frame =
+            (format->sample_rate_hz * s_ringtone_notes[note].start_ms) / 1000U;
+        runtime_notes[note].duration_frames =
+            (format->sample_rate_hz * s_ringtone_notes[note].duration_ms) / 1000U;
+        runtime_notes[note].phase_step =
+            (uint32_t)(((uint64_t)s_ringtone_notes[note].frequency_hz << 32) /
+                       format->sample_rate_hz);
+    }
 
     ESP_LOGI(TAG,
-             "ringtone started: rate=%luHz channels=%u tones=%u+%uHz pattern=%u/%u/%u/%ums stack=PSRAM",
+             "ringtone started: rate=%luHz channels=%u style=mobile-chime notes=%u period=%ums stack=PSRAM",
              (unsigned long)format->sample_rate_hz,
              (unsigned)format->channels,
-             (unsigned)DEVICE_CALL_RINGTONE_TONE_A_HZ,
-             (unsigned)DEVICE_CALL_RINGTONE_TONE_B_HZ,
-             (unsigned)DEVICE_CALL_RINGTONE_BURST_MS,
-             (unsigned)DEVICE_CALL_RINGTONE_BURST_GAP_MS,
-             (unsigned)DEVICE_CALL_RINGTONE_BURST_MS,
-             (unsigned)DEVICE_CALL_RINGTONE_REPEAT_GAP_MS);
+             (unsigned)DEVICE_CALL_RINGTONE_NOTE_COUNT,
+             (unsigned)DEVICE_CALL_RINGTONE_PERIOD_MS);
 
     while (!device_call_ringtone_stop_requested()) {
         for (size_t frame = 0; frame < chunk_frames; ++frame) {
             uint32_t pattern_frame = (uint32_t)((rendered_frames + frame) % period_frames);
-            uint32_t envelope_q15 =
-                device_call_ringtone_burst_envelope(pattern_frame,
-                                                    0U,
-                                                    burst_frames,
-                                                    fade_frames);
-            if (envelope_q15 == 0U) {
-                envelope_q15 =
-                    device_call_ringtone_burst_envelope(pattern_frame,
-                                                        second_burst_start_frame,
-                                                        burst_frames,
-                                                        fade_frames);
+            int16_t sample = 0;
+
+            for (size_t note = 0U; note < DEVICE_CALL_RINGTONE_NOTE_COUNT; ++note) {
+                const device_call_ringtone_runtime_note_t *runtime_note = &runtime_notes[note];
+                if (pattern_frame < runtime_note->start_frame ||
+                    pattern_frame >= runtime_note->start_frame + runtime_note->duration_frames) {
+                    continue;
+                }
+
+                uint32_t note_frame = pattern_frame - runtime_note->start_frame;
+                uint32_t envelope_q15 =
+                    device_call_ringtone_note_envelope(note_frame,
+                                                       runtime_note->duration_frames,
+                                                       attack_frames,
+                                                       release_frames);
+                sample = device_call_ringtone_sample(note_frame * runtime_note->phase_step,
+                                                      envelope_q15);
+                break;
             }
-            int16_t sample = envelope_q15 > 0U ?
-                             device_call_ringtone_sample(phase_a, phase_b, envelope_q15) :
-                             0;
 
             for (uint8_t channel = 0U; channel < format->channels; ++channel) {
                 s_ringtone_pcm[frame * format->channels + channel] = sample;
             }
-            phase_a += phase_step_a;
-            phase_b += phase_step_b;
         }
 
         result = speaker_play_pcm_frame((const uint8_t *)s_ringtone_pcm,

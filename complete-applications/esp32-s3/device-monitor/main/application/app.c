@@ -120,6 +120,7 @@ typedef enum {
 	APP_CONTROL_EVENT_DEVICE_REBIND_REQUIRED,
 	APP_CONTROL_EVENT_DEVICE_ONLINE_READY,
 	APP_CONTROL_EVENT_CALL_SESSION_ENDED,
+	APP_CONTROL_EVENT_LOCAL_AUDIO_SETTINGS,
 } app_control_event_type_t;
 
 typedef enum {
@@ -154,6 +155,7 @@ typedef struct {
 } app_thing_bootstrap_context_t;
 
 static portMUX_TYPE s_app_lifecycle_lock = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE s_audio_control_lock = portMUX_INITIALIZER_UNLOCKED;
 static StaticSemaphore_t s_app_transition_mutex_buffer;
 static SemaphoreHandle_t s_app_transition_mutex;
 static QueueHandle_t s_app_control_queue;
@@ -179,6 +181,11 @@ static int64_t s_ai_chat_token_last_prefetch_us;
 static bool s_thing_bootstrap_running;
 static bool s_device_binding_control_pending;
 static bool s_rtc_identity_reconfigure_pending;
+static bool s_audio_control_event_queued;
+static bool s_speaker_volume_pending;
+static bool s_capture_gain_pending;
+static uint8_t s_pending_speaker_volume;
+static uint8_t s_pending_capture_gain;
 #if APP_CONFIG_DEBUG_SCREEN_SERVER_ENABLE
 static bool s_screen_debug_suspended_for_ai;
 #endif
@@ -205,6 +212,7 @@ static esp_err_t app_configure_thing_service_registry(void)
 }
 
 static esp_err_t app_set_speaker_volume_internal(uint8_t percent, bool persist);
+static void app_apply_pending_audio_settings(bool marker_consumed);
 static esp_err_t app_enter_app_locked(app_id_t app_id);
 static esp_err_t app_return_home_locked(void);
 #if APP_CONFIG_DEBUG_SCREEN_SERVER_ENABLE
@@ -1300,6 +1308,45 @@ static void app_device_call_session_ended(void *ctx)
 	}
 }
 
+static void app_apply_pending_audio_settings(bool marker_consumed)
+{
+	bool speaker_pending = false;
+	bool capture_pending = false;
+	uint8_t speaker_volume = 0U;
+	uint8_t capture_gain = 0U;
+
+	taskENTER_CRITICAL(&s_audio_control_lock);
+	if (marker_consumed) {
+		s_audio_control_event_queued = false;
+	}
+	speaker_pending = s_speaker_volume_pending;
+	capture_pending = s_capture_gain_pending;
+	speaker_volume = s_pending_speaker_volume;
+	capture_gain = s_pending_capture_gain;
+	s_speaker_volume_pending = false;
+	s_capture_gain_pending = false;
+	taskEXIT_CRITICAL(&s_audio_control_lock);
+
+	if (speaker_pending) {
+		esp_err_t ret = app_set_speaker_volume_internal(speaker_volume, true);
+		if (ret != ESP_OK) {
+			ESP_LOGW(TAG,
+				 "local speaker volume apply failed: volume=%u ret=%s",
+				 (unsigned)speaker_volume,
+				 esp_err_to_name(ret));
+		}
+	}
+	if (capture_pending) {
+		esp_err_t ret = app_set_capture_gain(capture_gain);
+		if (ret != ESP_OK) {
+			ESP_LOGW(TAG,
+				 "local capture gain apply failed: gain=%u ret=%s",
+				 (unsigned)capture_gain,
+				 esp_err_to_name(ret));
+		}
+	}
+}
+
 static void app_control_task(void *arg)
 {
 	(void)arg;
@@ -1454,10 +1501,14 @@ static void app_control_task(void *arg)
 			app_release_call_session_resources_if_idle();
 			ESP_LOGI(CALL_FLOW_TAG, "stage=app_session_ended_handled");
 			break;
+		case APP_CONTROL_EVENT_LOCAL_AUDIO_SETTINGS:
+			app_apply_pending_audio_settings(true);
+			break;
 		default:
 			ESP_LOGW(TAG, "unknown app control event: type=%u", (unsigned)event.type);
 			break;
 		}
+		app_apply_pending_audio_settings(false);
 	}
 }
 
@@ -1515,7 +1566,11 @@ static void app_lifecycle_task(void *arg)
 			}
 			break;
 		case APP_LIFECYCLE_EVENT_CALL_ACCEPT:
-			ret = app_accept_call();
+			/* Keep call resource acquisition and signaling off the LVGL task. */
+			ret = app_enter_app_sync(event.app_id);
+			if (ret == ESP_OK) {
+				ret = app_accept_call();
+			}
 			if (ret != ESP_OK) {
 				ESP_LOGW(CALL_FLOW_TAG,
 					 "stage=queued_call_accept_failed ret=%s",
@@ -1708,6 +1763,59 @@ static esp_err_t app_enqueue_speaker_volume(uint8_t percent)
 
 	ESP_LOGW(TAG, "speaker volume command dropped: control queue full volume=%u", (unsigned)percent);
 	return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t app_enqueue_local_audio_setting(bool speaker, uint8_t percent)
+{
+	if (s_app_control_queue == NULL) {
+		return ESP_ERR_INVALID_STATE;
+	}
+
+	if (percent > 100U) {
+		percent = 100U;
+	}
+
+	bool post_marker = false;
+	taskENTER_CRITICAL(&s_audio_control_lock);
+	if (speaker) {
+		s_pending_speaker_volume = percent;
+		s_speaker_volume_pending = true;
+	} else {
+		s_pending_capture_gain = percent;
+		s_capture_gain_pending = true;
+	}
+	if (!s_audio_control_event_queued) {
+		s_audio_control_event_queued = true;
+		post_marker = true;
+	}
+	taskEXIT_CRITICAL(&s_audio_control_lock);
+
+	if (!post_marker) {
+		return ESP_OK;
+	}
+
+	const app_control_event_t event = {
+		.type = APP_CONTROL_EVENT_LOCAL_AUDIO_SETTINGS,
+	};
+	if (xQueueSendToBack(s_app_control_queue, &event, 0) == pdTRUE) {
+		return ESP_OK;
+	}
+
+	taskENTER_CRITICAL(&s_audio_control_lock);
+	s_audio_control_event_queued = false;
+	taskEXIT_CRITICAL(&s_audio_control_lock);
+	ESP_LOGW(TAG, "local audio setting deferred: control queue full");
+	return ESP_ERR_TIMEOUT;
+}
+
+esp_err_t app_request_speaker_volume(uint8_t percent)
+{
+	return app_enqueue_local_audio_setting(true, percent);
+}
+
+esp_err_t app_request_capture_gain(uint8_t percent)
+{
+	return app_enqueue_local_audio_setting(false, percent);
 }
 
 static esp_err_t app_rtc_set_speaker_volume(uint8_t percent, void *ctx)

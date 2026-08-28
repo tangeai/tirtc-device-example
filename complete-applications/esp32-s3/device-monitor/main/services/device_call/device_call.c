@@ -39,6 +39,7 @@ static const char *CALL_FLOW_TAG = "CALL_FLOW";
 #define DEVICE_CALL_RTC_READY_TIMEOUT_MS   50000U
 #define DEVICE_CALL_CONNECT_TIMEOUT_MS     40000U
 #define DEVICE_CALL_POLL_INTERVAL_MS       100U
+#define DEVICE_CALL_TIMER_POLL_INTERVAL_MS 100U
 #define DEVICE_CALL_ONLINE_READY_TIMEOUT_MS 30000U
 #define DEVICE_CALL_BACKGROUND_IDLE_TIMEOUT_MS 12000U
 
@@ -1066,6 +1067,20 @@ static void device_call_accept_task(void *arg)
         return;
     }
 
+    /* Hangup may complete while the side-effecting token request is in
+     * flight. Do not let the stale accept worker resurrect that room by
+     * starting a new TiRTC connection after the lifecycle has moved on. */
+    if (!device_call_generation_matches(ctx->generation)) {
+        ESP_LOGI(CALL_FLOW_TAG,
+                 "stage=accept_abandoned gen=%lu room=%s reason=generation_changed_before_connect",
+                 (unsigned long)ctx->generation,
+                 ctx->room_id);
+        memset(connect_token, 0, sizeof(connect_token));
+        free(ctx);
+        platform_task_reaper_delete_current_with_caps(TAG);
+        return;
+    }
+
     if (ret == ESP_OK) {
         ESP_LOGI(CALL_FLOW_TAG,
                  "stage=p2p_connect_begin gen=%lu room=%s peer=%s",
@@ -1081,6 +1096,16 @@ static void device_call_accept_task(void *arg)
                  esp_err_to_name(ret));
     }
     memset(connect_token, 0, sizeof(connect_token));
+    if (ret == ESP_OK && !device_call_generation_matches(ctx->generation)) {
+        ESP_LOGI(CALL_FLOW_TAG,
+                 "stage=accept_abandoned gen=%lu room=%s reason=generation_changed_during_connect_submit",
+                 (unsigned long)ctx->generation,
+                 ctx->room_id);
+        (void)rtc_transport_disconnect();
+        free(ctx);
+        platform_task_reaper_delete_current_with_caps(TAG);
+        return;
+    }
     if (ret == ESP_OK) {
         ret = device_call_wait_for_connection(ctx->generation);
     }
@@ -1103,6 +1128,16 @@ static void device_call_accept_task(void *arg)
          * authenticated by the room-scoped token, so an ordered command stream
          * must not become a second call-establishment gate under packet loss. */
         (void)device_call_send_connected_notice(ctx->room_id);
+    }
+    if (ret != ESP_OK && !device_call_generation_matches(ctx->generation)) {
+        ESP_LOGI(CALL_FLOW_TAG,
+                 "stage=accept_abandoned gen=%lu room=%s reason=generation_changed_while_connecting",
+                 (unsigned long)ctx->generation,
+                 ctx->room_id);
+        (void)rtc_transport_disconnect();
+        free(ctx);
+        platform_task_reaper_delete_current_with_caps(TAG);
+        return;
     }
     if (ret != ESP_OK) {
         device_call_accept_failed(ctx, ret, "peer connection failed", true);
@@ -1480,34 +1515,101 @@ static void device_call_ring_timer_task(void *arg)
 {
     device_call_request_ctx_t *ctx = (device_call_request_ctx_t *)arg;
     char room_id[96] = {0};
+    device_call_action_t timeout_action = DEVICE_CALL_ACTION_CANCEL;
+    const char *timeout_reason = "timeout";
+    device_call_state_t phase = DEVICE_CALL_STATE_OUTGOING;
+    uint32_t phase_elapsed_ms = 0U;
     bool expired = false;
 
     if (ctx == NULL) {
         platform_task_reaper_delete_current_with_caps(TAG);
         return;
     }
-    vTaskDelay(pdMS_TO_TICKS(DEVICE_CALL_RING_TIMEOUT_MS));
 
-    device_call_lock();
-    if (s_call.generation == ctx->generation &&
-        s_call.role == DEVICE_CALL_ROLE_CALLER &&
-        (s_call.state == DEVICE_CALL_STATE_OUTGOING ||
-         s_call.state == DEVICE_CALL_STATE_CONNECTING)) {
-        strlcpy(room_id, s_call.room_id, sizeof(room_id));
-        device_call_show_pending_or_idle_locked("call timed out");
-        device_call_end_session_generation_locked();
-        expired = true;
+    while (true) {
+        bool phase_changed = false;
+        bool finished = false;
+        uint32_t timeout_ms = phase == DEVICE_CALL_STATE_CONNECTING ?
+                                  DEVICE_CALL_CONNECT_TIMEOUT_MS :
+                                  DEVICE_CALL_RING_TIMEOUT_MS;
+
+        device_call_lock();
+        if (s_call.generation != ctx->generation ||
+            s_call.role != DEVICE_CALL_ROLE_CALLER ||
+            (s_call.state != DEVICE_CALL_STATE_OUTGOING &&
+             s_call.state != DEVICE_CALL_STATE_CONNECTING)) {
+            finished = true;
+        } else {
+            if (s_call.state == DEVICE_CALL_STATE_CONNECTING &&
+                phase != DEVICE_CALL_STATE_CONNECTING) {
+                phase = DEVICE_CALL_STATE_CONNECTING;
+                phase_elapsed_ms = 0U;
+                timeout_ms = DEVICE_CALL_CONNECT_TIMEOUT_MS;
+                strlcpy(room_id, s_call.room_id, sizeof(room_id));
+                phase_changed = true;
+            }
+            if (phase_elapsed_ms >= timeout_ms) {
+                strlcpy(room_id, s_call.room_id, sizeof(room_id));
+                if (phase == DEVICE_CALL_STATE_CONNECTING) {
+                    timeout_action = DEVICE_CALL_ACTION_HANGUP;
+                    timeout_reason = "p2p_error";
+                    device_call_show_pending_or_idle_locked("peer connection timed out");
+                } else {
+                    device_call_show_pending_or_idle_locked("call timed out");
+                }
+                device_call_end_session_generation_locked();
+                expired = true;
+                finished = true;
+            }
+        }
+        device_call_unlock();
+
+        if (phase_changed) {
+            ESP_LOGI(CALL_FLOW_TAG,
+                     "stage=p2p_wait_begin gen=%lu role=caller room=%s timeout_ms=%u",
+                     (unsigned long)ctx->generation,
+                     room_id[0] != '\0' ? room_id : "-",
+                     (unsigned)DEVICE_CALL_CONNECT_TIMEOUT_MS);
+        }
+        if (finished) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(DEVICE_CALL_TIMER_POLL_INTERVAL_MS));
+        phase_elapsed_ms += DEVICE_CALL_TIMER_POLL_INTERVAL_MS;
     }
-    device_call_unlock();
 
     if (expired) {
-        ESP_LOGW(CALL_FLOW_TAG,
-                 "stage=ring_timeout gen=%lu room=%s timeout_ms=%u",
-                 (unsigned long)ctx->generation,
-                 room_id,
-                 (unsigned)DEVICE_CALL_RING_TIMEOUT_MS);
-        ESP_LOGI(TAG, "outgoing call timed out: room=%s", room_id);
-        (void)device_call_post_room_action(DEVICE_CALL_ACTION_CANCEL, room_id, "timeout");
+        UBaseType_t stack_hwm = uxTaskGetStackHighWaterMark(NULL);
+        if (phase == DEVICE_CALL_STATE_CONNECTING) {
+            ESP_LOGW(CALL_FLOW_TAG,
+                     "stage=p2p_wait_timeout gen=%lu role=caller room=%s timeout_ms=%u stack_hwm=%u",
+                     (unsigned long)ctx->generation,
+                     room_id,
+                     (unsigned)DEVICE_CALL_CONNECT_TIMEOUT_MS,
+                     (unsigned)stack_hwm);
+        } else {
+            ESP_LOGW(CALL_FLOW_TAG,
+                     "stage=ring_timeout gen=%lu room=%s timeout_ms=%u stack_hwm=%u",
+                     (unsigned long)ctx->generation,
+                     room_id,
+                     (unsigned)DEVICE_CALL_RING_TIMEOUT_MS,
+                     (unsigned)stack_hwm);
+        }
+        ESP_LOGI(TAG,
+                 "%s timed out: room=%s",
+                 phase == DEVICE_CALL_STATE_CONNECTING ? "caller P2P connection" :
+                                                         "outgoing call",
+                 room_id);
+        esp_err_t action_ret = device_call_post_room_action_async(timeout_action,
+                                                                  room_id,
+                                                                  timeout_reason);
+        if (action_ret != ESP_OK) {
+            ESP_LOGE(CALL_FLOW_TAG,
+                     "stage=timeout_room_action_queue_failed action=%s room=%s ret=%s",
+                     device_call_action_name(timeout_action),
+                     room_id,
+                     esp_err_to_name(action_ret));
+        }
         device_call_reset_caller_media_gate();
         (void)rtc_transport_disconnect();
         device_call_notify_session_ended();

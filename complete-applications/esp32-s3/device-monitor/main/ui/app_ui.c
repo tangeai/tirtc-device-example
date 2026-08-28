@@ -313,7 +313,7 @@ static esp_err_t app_ui_on_disconnect_rtc(void *ctx)
 static esp_err_t app_ui_on_hangup_call(void *ctx)
 {
     (void)ctx;
-    return app_hangup_call();
+    return app_request_hangup_call();
 }
 
 static esp_err_t app_ui_on_set_local_audio_enabled(bool enabled, void *ctx)
@@ -325,13 +325,13 @@ static esp_err_t app_ui_on_set_local_audio_enabled(bool enabled, void *ctx)
 static esp_err_t app_ui_on_set_speaker_volume(uint8_t percent, void *ctx)
 {
     (void)ctx;
-    return app_set_speaker_volume(percent);
+    return app_request_speaker_volume(percent);
 }
 
 static esp_err_t app_ui_on_set_capture_gain(uint8_t percent, void *ctx)
 {
     (void)ctx;
-    return app_set_capture_gain(percent);
+    return app_request_capture_gain(percent);
 }
 
 static esp_err_t app_ui_on_call_contact(const char *device_id, void *ctx)
@@ -564,13 +564,7 @@ static esp_err_t app_ui_on_wechat_reject_call(void *ctx)
 static esp_err_t app_ui_on_accept_call(void *ctx)
 {
     (void)ctx;
-    esp_err_t ret = app_enter_app(APP_ID_CALL);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "enter call before accept failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    return app_accept_call();
+    return app_request_accept_call();
 }
 
 static esp_err_t app_ui_on_reject_call(void *ctx)

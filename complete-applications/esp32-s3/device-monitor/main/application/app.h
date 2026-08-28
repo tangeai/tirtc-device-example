@@ -365,6 +365,8 @@ esp_err_t app_set_ai_chat_avatar(uint8_t avatar);
 
 esp_err_t app_set_speaker_volume(uint8_t percent);
 esp_err_t app_set_capture_gain(uint8_t percent);
+esp_err_t app_request_speaker_volume(uint8_t percent);
+esp_err_t app_request_capture_gain(uint8_t percent);
 esp_err_t app_set_local_audio_enabled(bool enabled);
 
 void app_on_boot_button_changed(bool pressed, void *ctx);

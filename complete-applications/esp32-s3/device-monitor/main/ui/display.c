@@ -1920,7 +1920,7 @@ static void display_call_alert_accept_btn_cb(lv_event_t *event)
 
 static void display_call_alert_reject_btn_cb(lv_event_t *event)
 {
-    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+    if (lv_event_get_code(event) != LV_EVENT_PRESSED) {
         return;
     }
 
@@ -2016,7 +2016,11 @@ static void display_show_call_alert(bool wechat)
                                              "挂断",
                                              lv_color_hex(0xE44747),
                                              12,
-                                             display_call_alert_reject_btn_cb);
+                                             NULL);
+    lv_obj_add_event_cb(reject_btn,
+                        display_call_alert_reject_btn_cb,
+                        LV_EVENT_PRESSED,
+                        NULL);
     accept_btn = display_create_figma_button(card,
                                              102,
                                              52,
@@ -8357,7 +8361,7 @@ static void display_wechat_delete_confirm_btn_cb(lv_event_t *event)
 
 static void display_wechat_hangup_btn_cb(lv_event_t *event)
 {
-    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+    if (lv_event_get_code(event) != LV_EVENT_PRESSED) {
         return;
     }
 
@@ -10801,8 +10805,12 @@ static void display_build_call_active_page(lv_obj_t *screen)
                                                     "挂断",
                                                     lv_color_hex(0xE44747),
                                                     16,
-                                                    display_call_hangup_btn_cb);
+                                                    NULL);
     lv_obj_set_style_radius(s_call_hangup_btn, 8, 0);
+    lv_obj_add_event_cb(s_call_hangup_btn,
+                        display_call_hangup_btn_cb,
+                        LV_EVENT_PRESSED,
+                        NULL);
     display_update_call_active_page(&s_last_status);
 }
 
@@ -11128,8 +11136,12 @@ static void display_build_wechat_active_page(lv_obj_t *screen)
                                                        "挂断",
                                                        lv_color_hex(0xE44747),
                                                        16,
-                                                       display_wechat_hangup_btn_cb);
+                                                       NULL);
     lv_obj_set_style_radius(hangup_btn, 8, 0);
+    lv_obj_add_event_cb(hangup_btn,
+                        display_wechat_hangup_btn_cb,
+                        LV_EVENT_PRESSED,
+                        NULL);
     display_update_wechat_active_page(&s_last_status);
 }
 
