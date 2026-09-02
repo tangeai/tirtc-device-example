@@ -79,5 +79,10 @@ H264 组件保持 Espressif `1.3.8` / `8e86030d` 基线及已有 P4 输出边界
 主机侧已通过 24 项实际 RTC C 函数与 IDF URL parser 测试，覆盖地址原样保留、非法输入拒绝
 及拒绝时无配置/重置副作用。归档等价性与 SDK 校验是独立的静态证据。
 
-正式构建及固件结果由本次 Release 的 `release-manifest.json` 记录；烧录、P4 TLS 正反向握手、
+已从公开输入 commit `6aff5fe9bf807bdb71a6d4dbc4bd6f8d24f563b6` 完成唯一正式干净构建，
+主工程 `1837/1837`、bootloader `133/133`，compiler warning/error/ICE 均为 0。应用大小
+`6,973,376` bytes，SHA-256 为 `65051e036250537f0cfee274944b6cc6d036c1aaee673c723b8420cf18f88664`，
+APP 分区剩余 `563,264` bytes（`7.47%`）。后续仅补文档证据，编译输入不变。
+
+完整构建及固件记录见本次 Release 的 `release-manifest.json`；烧录、P4 TLS 正反向握手、
 峰值内存与跨应用运行需在目标板分别验证。主机 URL 测试不模拟 TLS，也不替代真机握手。

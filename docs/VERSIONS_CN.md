@@ -72,7 +72,7 @@ RTC 配置入口要求带主机名的显式 `https://` 地址，拒绝 userinfo�
 | S3 最小系统例子 `0.8.0` | 目录快照、SDK、媒体来源、图片脱敏、凭据和公开路径已核对 | ESP-IDF `5.5.4` 的 4 MB 配置干净构建通过；app 大小见 Release manifest | 源码与 `0x0` 4 MB 完整镜像 |
 | P4 最小系统例子 `0.2.0` | 目录快照、SDK、C6/C61 Hosted 兼容配置、媒体和凭据已核对 | ESP-IDF `5.5.4` 的 4 MB 配置干净构建通过；app 大小见 Release manifest | 源码与 `0x0` 4 MB 完整镜像 |
 | S3 Device Monitor `1.9.7` | 来源 Tag/commit/tree、SDK HTTPS 认证与有界公平调度、公开筛选和凭据范围已核对 | 已从公开代码导入提交执行唯一 ESP-IDF `5.5.4`、GCC `14.2.0_20260121`、`--no-ccache` 正式干净构建，完成 `1767/1767` 且 compiler warning/error/ICE 均为 0；app `7,613,216` 字节、SHA-256 `49349c1e1755ae5265e3ddea6f57166ccf60b90cdca7d1a1a004539f4faf43ff`、分区剩余 `185,568` 字节（`2.38%`） | 源码、16 MB 完整镜像与 OTA app；容量余量较紧 |
-| P4 Device Monitor `1.5.3` | 开发来源与 HTTPS/媒体/Hosted 编译边界已按源码核对；公开筛选、SDK 哈希和静态检查以本次发布记录为准 | 待本次 ESP-IDF `5.5.4` 正式干净构建；app 大小、分区余量和构建诊断待补，不沿用 `1.5.1` 结果 | 计划交付源码、`0x0` 16 MiB 完整镜像、SHA256SUMS 和 manifest |
+| P4 Device Monitor `1.5.3` | 来源 Tag/commit/tree、SDK 六项哈希、归档等价性与 24 项主机地址策略测试通过 | ESP-IDF `5.5.4`、GCC `14.2.0_20260121`、`--no-ccache` 正式干净构建通过，主工程 `1837/1837`、bootloader `133/133`；compiler warning/error/ICE 均为 0；app `6,973,376` bytes，APP 分区剩余 `563,264` bytes（`7.47%`） | 源码、`0x0` 16 MiB 完整镜像、SHA256SUMS 和 manifest |
 | G32S10X Device Monitor `0.1.1` | 来源 Tag、SDK、君正覆盖层、文件系统打包范围已核对 | 固件构建通过；文件系统在同一 SDK 树恢复打包，发布树与构建树为 `compile-input-equivalent` | 源码、主固件与两个 YAFFS 镜像 |
 
 本次最小系统项目改名没有改变功能代码、SDK、媒体或板级配置。S3 与 P4 仍分别从最终公开
@@ -93,7 +93,9 @@ SDK 的证书链、hostname 和 verify flags 处理已核对到源码、对象�
 目标板上的有效证书成功、错误证书或错误主机名失败测试，也没有本版本绑定、MQTT 和 RTC 业务
 回归；这些运行证据不能由静态检查或构建结果替代。
 
-P4 `1.5.3` 尚未完成正式公开构建或目标板回归。需要分别验证有效 HTTPS 成功、无效证书与
+P4 `1.5.3` 已从公开构建输入 commit `6aff5fe9bf807bdb71a6d4dbc4bd6f8d24f563b6` 完成正式
+干净构建；app SHA-256 为 `65051e036250537f0cfee274944b6cc6d036c1aaee673c723b8420cf18f88664`。
+后续提交仅补充文档证据，编译输入保持一致。目标板回归仍需分别验证有效 HTTPS 成功、无效证书与
 错误主机名失败、微信正式版实呼、IPC/设备呼叫/AI 切换、动态画面双向弱网和长时间运行。
 Hosted 当前依赖没有 `esp_hosted_event.h`，事件与心跳恢复分支不参与编译；可用路径为 Wi-Fi
 RPC 错误触发 Hosted 重建与 SDIO 异常读数防护。此处不声明物理链路故障根因已经修复。

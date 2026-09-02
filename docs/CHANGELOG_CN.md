@@ -24,8 +24,9 @@
 - Wi-Fi 连接、断开或配置 RPC 错误可触发 Hosted 重建；SDIO 在确认中断前检查寄存器快照和
   包长，并记录 TX throttle。当前依赖没有 `esp_hosted_event.h`，事件与心跳恢复分支被
   编译关闭；这些防护不证明物理故障根因已经消除。
-- 计划交付 `0x0` 16 MiB 完整镜像、`SHA256SUMS.txt` 和 `release-manifest.json`。本次正式
-  构建结果、app 大小、分区余量和附件哈希待补；`1.5.1` 的通过结果不作为本版本证据。
+- 已完成 ESP-IDF `5.5.4`、`--no-ccache` 正式干净构建：主工程 `1837/1837`、bootloader
+  `133/133`，compiler warning/error/ICE 均为 0；app `6,973,376` bytes，APP 分区剩余
+  `563,264` bytes（`7.47%`）。交付 `0x0` 16 MiB 完整镜像、`SHA256SUMS.txt` 和 manifest。
   尚未执行本版本烧录、HTTPS 真机正反例、微信实呼、双向弱网或长稳回归。
 
 ## 2026.08.28：ESP32-S3 Device Monitor 1.9.7

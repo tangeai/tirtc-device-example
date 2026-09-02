@@ -461,9 +461,10 @@ SDIO 驱动会拒绝全 `0xff` 寄存器快照，在确认中断前检查读数�
 
 ## 13. 这份发布已经证明到哪里
 
-`1.5.3` 开发来源、应用/SDK 身份与媒体默认参数已列明。本次公开版本的正式构建结果、
-应用大小、APP 分区余量和附件哈希待补，不能复用 `1.5.1` 的通过结果。构建完成后，实际
-烧录分段、16 MiB 完整镜像和 SHA-256 将记录在同一 Release 的 `release-manifest.json`。
+`1.5.3` 已核对开发来源、应用/SDK 身份与媒体默认参数，并完成 ESP-IDF `5.5.4` 正式干净
+构建：主工程 `1837/1837`、bootloader `133/133`，compiler warning/error/ICE 均为 0。
+应用为 `6,973,376` bytes，APP 分区剩余 `563,264` bytes（`7.47%`）。实际烧录分段、
+16 MiB 完整镜像及 SHA-256 记录在同一 Release 的 `release-manifest.json` 和 `SHA256SUMS.txt`。
 完整镜像只作为 GitHub Release 资产，不进入 Git 历史。
 
 本版本尚未执行目标板烧录、C6/SDIO、联网绑定、微信正式版实呼、媒体和长稳回归。HTTPS
