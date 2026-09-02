@@ -21,8 +21,8 @@
 | 核对应用、SDK、工具链和静态库哈希 | [版本契约](VERSION.md) |
 | 核对开发来源、公开筛选和验证边界 | [源码来源](SOURCE_PROVENANCE.md) |
 
-直接体验时，从项目 [GitHub Releases](https://github.com/tangeai/tirtc-device-example/releases)
-下载 `esp32p4-tirtc-device-monitor-full-v1.5.1.bin`、`SHA256SUMS.txt` 和
+直接体验时，从项目 [1.5.3 Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.5.3)
+下载 `esp32p4-tirtc-device-monitor-full-v1.5.3.bin`、`SHA256SUMS.txt` 和
 `release-manifest.json`。先核对 SHA-256，再用
 [Espressif ESP Tool](https://espressif.github.io/esptool-js/) 从 `0x0` 烧录完整镜像。
 
@@ -31,7 +31,7 @@
 ```powershell
 git clone https://github.com/tangeai/tirtc-device-example.git
 cd tirtc-device-example
-git checkout esp32-p4-device-monitor-v1.5.1
+git checkout esp32-p4-device-monitor-v1.5.3
 cd complete-applications/esp32-p4/device-monitor
 ```
 
@@ -39,14 +39,14 @@ cd complete-applications/esp32-p4/device-monitor
 
 | 项目 | 当前值 |
 | --- | --- |
-| 应用版本 | `1.5.1` |
-| 发布日期 | `2026-08-28` |
-| 开发来源 | `esp32-p4-device-app-v1.5.1` / `8d26a2bc5267f6bf1db721730a210ce8bc2f7ccc` |
-| 公开 Tag | `esp32-p4-device-monitor-v1.5.1` |
+| 应用版本 | `1.5.3` |
+| 发布日期 | `2026-09-02` |
+| 开发来源 | `esp32-p4-device-app-v1.5.3` / `06583eaf18d9326b9602684a7c509a3badf7dadc` |
+| 公开 Tag | `esp32-p4-device-monitor-v1.5.3` |
 | 目标板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |
 | 网络 | ESP32-C6 + ESP-Hosted/SDIO |
 | ESP-IDF | `5.5.4` |
-| TiRTC SDK | `2.3.0` 官方源码重建版，含 P4 传输稳定性修复 |
+| TiRTC SDK | `2.3.0` P4 验证重建与补丁版，公开库已移除行号调试信息 |
 | 屏幕 | `480x320` 横屏触摸屏 |
 | Flash | `16MB`，双 OTA 分区 |
 
@@ -58,21 +58,33 @@ C6 slave 固件、SDIO 连线和 reset，不要先改 TiRTC 或摄像头代码�
 - 屏幕配网，自动获取绑定码，绑定后维持 ThingConnect、MQTT 和 TiRTC 在线。
 - IPC 使用 OV5647 `1280x960` YUV420 与 P4 H264 硬件编码上行。
 - 设备视频呼叫使用最高 `384x256` 的双向 H264，PCMA 双向音频。
-- 微信 VoIP 使用 `480x320@15fps` H264 上行、`640x480` MJPEG 下行和 PCMA 双向音频。
+- 微信 VoIP 使用 `640x480@15fps`、目标 `800kbps` H264 上行，请求 `640x480` MJPEG 下行，
+  同时提供 PCMA 双向音频。主动呼叫使用微信正式版 `wx_version_type=0`。
 - AI Chat 支持音频、可选 H264 视频、字幕、打断、联系人查询和呼叫动作。
 - `480x320` LVGL 页面覆盖 Wi-Fi、绑定、联系人、呼叫、设置和 OTA。
 - 应用生命周期统一管理摄像头、显示、音频、AEC、PSRAM 池和 TiRTC 连接。
 
-## 1.5.1 更新
+## 1.5.3 更新
 
-- 绑定弹窗中的网址和二维码改用独立的 ThingConnect 设备管理入口：
-  <https://demo-open.tange-ai.com/devices>。
-- 面向程序的 JSON 服务发现仍使用 `https://ep-open.tangeopen.com/services`，设备业务 API
-  仍使用 `https://srv-open.tangeopen.com`，设备 MQTT fallback 仍使用
-  `mqtts://mqtt-open.tangeopen.com:8883`；各入口分工明确，不再把 API 地址展示给用户。
-- TiRTC SDK、媒体参数、网络架构和业务逻辑保持 `1.5.0` 基线不变。
+本次公开更新从 `1.5.1` 跨到 `1.5.3`，包含中间开发版 `1.5.2` 的改动：
 
-## 1.5.0 媒体与稳定性基线
+- RTC 地址入口只接受带主机名的显式 HTTPS，拒绝 userinfo、fragment、非法端口和未终止
+  字符串。RTC 关闭时允许空地址；不再按 SDK 版本降级为 HTTP，校验失败不改写当前配置。
+- SDK 更新为 P4 验证重建与补丁版，包含传输调度、NACK、码率恢复和 TURN 查找栈修正。
+  公开静态库经 `--strip-debug` 处理；运行节、重定位和归档成员保持等价，SDK 行号调试
+  需使用本地保留的原始库。它不是未经修改的官方包。
+- 微信 H264 上行提高到 `640x480@15fps`、目标 `800kbps`，主动呼叫切换到正式版 `0`。
+  设备呼叫和 IPC 保持各自原档位。
+- H264 直编码输出复用持久 PSRAM 工作区；挂断任务使用后台栈，异步页面动作在 LVGL 锁内
+  提交。诊断接口补充媒体停滞、会话和传输观测点。
+- Hosted 增加 Wi-Fi RPC 错误触发重建、SDIO 寄存器快照与包长检查、TX throttle 诊断。
+  当前依赖没有 `esp_hosted_event.h`，事件和心跳恢复分支不参与编译。物理链路故障根因
+  尚未证实，这些恢复与防护不构成根因修复证明。
+
+绑定二维码继续使用 [ThingConnect 设备管理门户](https://demo-open.tange-ai.com/devices)，
+设备内部 JSON 服务发现、业务 API 和 MQTT 保持独立配置。
+
+## 媒体与资源策略
 
 - TiRTC `2.3.0` P4 重建版接入 TGMP 码率反馈。SDK 只给出绝对目标码率，应用控制任务再调整
   H264 编码器；旧的本地队列压力自动降级保持关闭，避免两套控制器争夺码率。
@@ -80,16 +92,17 @@ C6 slave 固件、SDIO 连线和 reset，不要先改 TiRTC 或摄像头代码�
   显示和 AEC 大块工作区使用持久 PSRAM 池，退出后按会话代际清理状态而不是反复申请大块内存。
 - 设备呼叫视频档位为 `384x256@12fps`、`256kbps`；H264 压缩输入池扩展为
   `24 x 256KB`，解码池 4 帧、RGB 输出池 20 帧，自适应播放队列最大深度 16 帧。
-- 微信 VoIP 设备上行使用 `480x320@15fps`、`480kbps` H264；下行仍请求 `640x480` MJPEG，
-  P4 硬件解码后一次 `cover` 到 `480x320`。控制层 5 秒后隐藏，点击视频恢复。
+- 微信 VoIP 设备上行使用 `640x480@15fps`、目标 `800kbps` H264；下行仍请求 `640x480`
+  MJPEG，实际帧可以更小，P4 硬件解码后一次 `cover` 到 `480x320`。控制层 5 秒后隐藏，
+  点击视频恢复。
 - 音频链路补充采集增益、AEC 双讲近端保护和播放优化；设备与微信联系人增加待确认、备注和
   删除流程，二维码预览兼容灰度、RGB565 与 packed YUV420。
 - Wi-Fi 后台恢复、结构化网络时延/抖动/丢包指标以及默认开启的串口回归 CLI，便于从网络、
   APP、呼叫、媒体和资源水位逐层定位第一处异常。
 
-SDK 源码基线为 `tag.v1.5.12`，但当前静态库的嵌入 TGTRP BuildInfo 仍显示
-`tagv1.5.11`。本项目把源码基线、运行时 BuildInfo 和静态库 SHA-256 分开记录，不用一个
-版本字符串替代完整 SDK 身份。
+SDK API 版本、源码 commit、验证补丁和静态库 SHA-256 分开记录，完整身份见
+[版本契约](VERSION.md)。本版本 P4 静态库为 `4,748,802` bytes，SHA-256 为
+`a7a01ffd496a55364c7e4d665ff3884d078147bba96752a965d97befca12e451`。
 
 ## 默认媒体参数
 
@@ -100,8 +113,8 @@ SDK 源码基线为 `tag.v1.5.12`，但当前静态库的嵌入 TGTRP BuildInfo 
 | IPC 上行 | `1280x960@20fps`，`4Mbps`，H264，名义 GOP `40` 帧 / `2s` |
 | 设备呼叫上行 | `384x256@12fps`，`256kbps`，H264，名义 GOP `192` 帧 / `16s` |
 | 设备呼叫下行 | constrained-baseline H264，解码上限 `384x256`，显示到 `480x320` |
-| 微信上行 | `480x320@15fps`，`480kbps`，H264，名义 GOP `30` 帧 / `2s` |
-| 微信下行 | 请求 `640x480` MJPEG，P4 JPEG 硬解后 `cover` 到 `480x320` |
+| 微信上行 | `640x480@15fps`，目标 `800kbps`，H264，名义 GOP `30` 帧 / `2s` |
+| 微信下行 | 请求 `640x480` MJPEG，实际帧可以更小；P4 JPEG 硬解后 `cover` 到 `480x320` |
 | 设备 H264 下行池 | 输入 `24 x 256KB`，decoded `4` 帧，output `20` 帧，均在 PSRAM |
 | AEC | 默认开启 |
 | SDK/TGMP 码率控制 | 默认开启；设备呼叫注册范围 `96-256kbps` |
@@ -109,7 +122,8 @@ SDK 源码基线为 `tag.v1.5.12`，但当前静态库的嵌入 TGTRP BuildInfo 
 
 16 秒是设备呼叫的名义 GOP。流开始、订阅恢复、传输恢复和对端请求仍会触发关键帧，不能把
 名义 GOP 理解成故障时必须等待 16 秒。微信手机端的采集分辨率由微信和服务端决定，P4 源码
-没有配置或证明手机端为 720p。
+没有配置或证明手机端为 720p。表中码率是编码目标，不保证实际吞吐；微信下行没有固定帧率
+或码率声明。
 
 ## 配置与构建
 
@@ -122,6 +136,10 @@ SDK 源码基线为 `tag.v1.5.12`，但当前静态库的嵌入 TGTRP BuildInfo 
 `APP_CONFIG_THING_SERVICE_DISCOVERY_URL`；设备业务 API 使用
 `APP_CONFIG_DEVICE_BINDING_API_BASE`；MQTT fallback 使用 `APP_CONFIG_DEVICE_BINDING_MQTT_URI`。
 修改部署环境时应分别核对，不能用一个地址覆盖多种职责。
+
+RTC 服务地址必须包含小写 `https://` 和有效 host，可带合法端口、路径和查询参数；不允许
+userinfo、fragment、端口 `0` 或越界端口。SDK 负责证书链与主机名校验，TLS 失败不能改用
+HTTP 重试。只有关闭 RTC 时才允许空地址。
 
 进入 ESP-IDF `5.5.4` 环境后执行：
 
@@ -140,14 +158,14 @@ idf.py build
 复位后先确认身份：
 
 ```text
-firmware version: 1.5.1 project=tirtc_esp32p4_device_app ...
+firmware version: 1.5.3 project=tirtc_esp32p4_device_app ...
 system ready: ESP32-P4 TiRTC dashboard
 ```
 
-开发侧已有双设备呼叫、AI、IPC 重复切换和内存恢复记录。最新持久 PSRAM 池调整后，没有
-重新完成微信小程序外部实呼和弱网矩阵；当前连接在 COM7/COM11 上的启明板仍是旧版
-`1.3.2`，也不属于本版本证据。`1.5.1` 只调整绑定入口和版本信息；公开候选已完成一次正式
-干净构建，但没有从该镜像执行目标板烧录、绑定或业务回归。
+`1.5.3` 本次正式构建、应用镜像大小、分区余量和附件哈希待补。此前版本的构建和开发板记录
+不能替代本次证据；本版本尚未完成烧录、HTTPS 正反例、绑定、微信正式版实呼或媒体回归。
+视频测试需要同时保留静态基线与高运动画面对照，分别验证同一设备的上、下行弱网，以及
+跨应用重复切换和长时间运行。
 
 正式 Release 的源码 commit、构建命令、解析依赖、应用镜像、分区余量、完整镜像和 SHA-256
 统一记录在 `release-manifest.json`。构建成功仍需与烧录、C6/SDIO、联网、绑定、媒体和长稳

@@ -36,6 +36,9 @@ static const char TAG[] = "H_SDIO_DRV";
  */
 #define DO_COMBINED_REG_READ (1)
 
+#define SDIO_REG_SNAPSHOT_MAX_ATTEMPTS 3U
+#define SDIO_REG_SNAPSHOT_RETRY_US     200U
+
 /** Constants/Macros **/
 #define TO_SLAVE_QUEUE_SIZE               H_SDIO_TX_Q
 #define FROM_SLAVE_QUEUE_SIZE             H_SDIO_RX_Q
@@ -92,6 +95,8 @@ static void * sdio_bus_lock;
 #define PACKET_LEN_INDEX (ESP_SLAVE_PACKET_LEN_REG - ESP_SLAVE_INT_RAW_REG)
 
 static uint8_t *reg_buf = NULL;
+static uint32_t sdio_reg_snapshot_recovered_count;
+static uint32_t sdio_reg_snapshot_failed_count;
 #endif
 
 /* Create mempool for cache mallocs */
@@ -155,6 +160,9 @@ static queue_handle_t sdio_rx_ready_buf_queue;
 static uint32_t sdio_rx_backpressure_count;
 static uint32_t sdio_rx_backpressure_max_us;
 static int64_t sdio_rx_backpressure_last_log_us;
+static uint32_t sdio_tx_throttle_start_count;
+static uint32_t sdio_tx_throttle_stop_count;
+static int64_t sdio_tx_throttle_start_us;
 
 static void * sdio_rx_buf_thread;
 static void sdio_data_to_rx_buf_task(void const* pvParameters);
@@ -368,6 +376,46 @@ static int sdio_get_tx_buffer_num(uint32_t *tx_num, bool is_lock_needed)
 static int sdio_read_regs(uint8_t * buf)
 {
 	return g_h.funcs->_h_sdio_read_reg(sdio_handle, ESP_SLAVE_INT_RAW_REG, buf, REG_BUF_LEN, ACQUIRE_LOCK);
+}
+
+static bool sdio_regs_are_all_ones(const uint8_t *buf)
+{
+	for (size_t index = 0; index < REG_BUF_LEN; ++index) {
+		if (buf[index] != UINT8_MAX) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/* Do not acknowledge an interrupt using an all-ones bus-error snapshot. */
+static int sdio_read_valid_regs(uint8_t *buf)
+{
+	int ret = ESP_FAIL;
+
+	for (uint32_t attempt = 1U; attempt <= SDIO_REG_SNAPSHOT_MAX_ATTEMPTS; ++attempt) {
+		ret = sdio_read_regs(buf);
+		if (ret == ESP_OK && !sdio_regs_are_all_ones(buf)) {
+			if (attempt > 1U) {
+				sdio_reg_snapshot_recovered_count++;
+				ESP_LOGW(TAG,
+						"SDIO register snapshot recovered: attempts=%lu recovered=%lu",
+						(unsigned long)attempt,
+						(unsigned long)sdio_reg_snapshot_recovered_count);
+			}
+			return ESP_OK;
+		}
+		if (attempt < SDIO_REG_SNAPSHOT_MAX_ATTEMPTS) {
+			g_h.funcs->_h_usleep(SDIO_REG_SNAPSHOT_RETRY_US);
+		}
+	}
+
+	sdio_reg_snapshot_failed_count++;
+	ESP_LOGE(TAG,
+			"SDIO register snapshot invalid after retries: ret=%d failed=%lu",
+			ret,
+			(unsigned long)sdio_reg_snapshot_failed_count);
+	return ESP_FAIL;
 }
 #endif
 
@@ -943,7 +991,7 @@ static void sdio_read_task(void const* pvParameters)
 	uint8_t *rxbuff = NULL;
 	int ret;
 	int rx_buffer_index;
-	uint32_t len_from_slave;
+	uint32_t len_from_slave = 0;
 
 	uint32_t data_left;
 	uint32_t len_to_read;
@@ -1006,8 +1054,7 @@ static void sdio_read_task(void const* pvParameters)
 		SDIO_DRV_LOCK();
 
 #if DO_COMBINED_REG_READ
-		if (sdio_read_regs(reg_buf)) {
-			ESP_LOGE(TAG, "failed to read registers");
+		if (sdio_read_valid_regs(reg_buf) != ESP_OK) {
 
 			SDIO_DRV_UNLOCK();
 			continue;
@@ -1030,46 +1077,65 @@ static void sdio_read_task(void const* pvParameters)
 			continue;
 		}
 #endif
-		sdio_clear_intr(interrupts);
-
 		ESP_LOGV(TAG, "Intr: %08"PRIX32, interrupts);
 
-		/* Check all supported interrupts */
-		if (BIT(SDIO_INT_START_THROTTLE) & interrupts)
-			wifi_tx_throttling = 1;
+		/* Validate packet length before acknowledging the interrupt. */
+		if (BIT(SDIO_INT_NEW_PACKET) & interrupts) {
+#if H_SDIO_HOST_RX_MODE == H_SDIO_ALWAYS_HOST_RX_MAX_TRANSPORT_SIZE
+			len_from_slave = MAX_TRANSPORT_BUFFER_SIZE;
+#else
+#if DO_COMBINED_REG_READ
+			ret = sdio_get_len_from_slave(&len_from_slave, *read_len_index, ACQUIRE_LOCK);
+#else
+			ret = sdio_get_len_from_slave(&len_from_slave, ACQUIRE_LOCK);
+#endif
+			if (ret || !len_from_slave) {
+				ESP_LOGD(TAG, "invalid ret or len_from_slave: %d %ld", ret, len_from_slave);
+				SDIO_DRV_UNLOCK();
+				continue;
+			}
+#endif
+		}
 
-		if (BIT(SDIO_INT_STOP_THROTTLE) & interrupts)
+		ret = sdio_clear_intr(interrupts);
+		if (ret != ESP_OK) {
+			ESP_LOGE(TAG, "failed to clear slave interrupt: %d", ret);
+			SDIO_DRV_UNLOCK();
+			continue;
+		}
+
+		/* Check all supported interrupts */
+		if (BIT(SDIO_INT_START_THROTTLE) & interrupts) {
+			if (!wifi_tx_throttling) {
+				sdio_tx_throttle_start_count++;
+				sdio_tx_throttle_start_us = esp_timer_get_time();
+				ESP_LOGW(TAG,
+					 "ESP-Hosted Wi-Fi TX throttle start: count=%" PRIu32,
+					 sdio_tx_throttle_start_count);
+			}
+			wifi_tx_throttling = 1;
+		}
+
+		if (BIT(SDIO_INT_STOP_THROTTLE) & interrupts) {
+			if (wifi_tx_throttling) {
+				int64_t now_us = esp_timer_get_time();
+				uint32_t duration_ms = sdio_tx_throttle_start_us > 0 ?
+					(uint32_t)((now_us - sdio_tx_throttle_start_us) / 1000LL) : 0;
+
+				sdio_tx_throttle_stop_count++;
+				ESP_LOGW(TAG,
+					 "ESP-Hosted Wi-Fi TX throttle stop: count=%" PRIu32 " duration=%" PRIu32 "ms",
+					 sdio_tx_throttle_stop_count,
+					 duration_ms);
+			}
 			wifi_tx_throttling = 0;
+		}
 
 		if (!(BIT(SDIO_INT_NEW_PACKET) & interrupts)) {
 
 			SDIO_DRV_UNLOCK();
 			continue;
 		}
-
-#if H_SDIO_HOST_RX_MODE == H_SDIO_ALWAYS_HOST_RX_MAX_TRANSPORT_SIZE
-		/* Bypass the check to find the bytes to be read from slave to host
-		 * always assume max transport size to be read.
-		 * slave sdio driver will automatically pad the remaining bytes after
-		 * actual written bytes till requested size from host
-		 * This typically improves throughput for larger packet sizes
-		 **/
-		len_from_slave = MAX_TRANSPORT_BUFFER_SIZE;
-#else
-		/* check the length to be read */
-#if DO_COMBINED_REG_READ
-		ret = sdio_get_len_from_slave(&len_from_slave, *read_len_index, ACQUIRE_LOCK);
-#else
-		ret = sdio_get_len_from_slave(&len_from_slave, ACQUIRE_LOCK);
-#endif
-		if (ret || !len_from_slave) {
-			ESP_LOGD(TAG, "invalid ret or len_from_slave: %d %ld", ret, len_from_slave);
-
-			SDIO_DRV_UNLOCK();
-			continue;
-		}
-#endif
-
 		/* Reserve one of the two stream buffers before starting the DMA read.
 		 * If both batches are still being split, wait instead of consuming and
 		 * then discarding a complete C6-to-P4 transfer. Release the bus while

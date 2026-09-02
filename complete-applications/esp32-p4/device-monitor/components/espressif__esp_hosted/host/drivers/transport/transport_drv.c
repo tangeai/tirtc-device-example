@@ -18,6 +18,7 @@
 
 #include "esp_wifi.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "transport_drv.h"
 #include "esp_hosted_transport.h"
 #include "esp_hosted_transport_init.h"
@@ -47,6 +48,8 @@ transport_channel_t *chan_arr[ESP_MAX_IF];
 volatile uint8_t wifi_tx_throttling;
 static volatile uint32_t s_sta_tx_alloc_drop_count;
 static volatile uint32_t s_ap_tx_alloc_drop_count;
+static volatile uint32_t s_sta_tx_throttle_drop_count;
+static int64_t s_sta_tx_throttle_last_log_us;
 
 #if CONFIG_SPIRAM && CONFIG_SOC_PSRAM_DMA_CAPABLE
 /* One writer can own a block while the SDIO queue holds its configured depth.
@@ -267,9 +270,20 @@ static esp_err_t transport_drv_sta_tx(void *h, void *buffer, size_t len)
 		return ESP_OK;
 
 	if (unlikely(wifi_tx_throttling)) {
+		uint32_t count = ++s_sta_tx_throttle_drop_count;
+		int64_t now_us = esp_timer_get_time();
+
 	#if ESP_PKT_STATS
 		pkt_stats.sta_tx_in_drop++;
 	#endif
+		if (count == 1 ||
+		    now_us - s_sta_tx_throttle_last_log_us >= 1000000LL) {
+			s_sta_tx_throttle_last_log_us = now_us;
+			ESP_LOGW(TAG,
+				 "ESP-Hosted STA TX throttled: drops=%" PRIu32 " len=%u",
+				 count,
+				 (unsigned)len);
+		}
 		errno = -ENOBUFS;
 		//return ESP_ERR_NO_BUFFS;
 #if defined(ESP_ERR_ESP_NETIF_TX_FAILED)

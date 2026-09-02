@@ -65,7 +65,7 @@ git checkout esp32-s3-device-monitor-v1.9.7
 | 平台 | 应用 | 版本 | TiRTC SDK | 来源版本 | 公开 Release |
 | --- | --- | --- | --- | --- | --- |
 | ESP32-S3 | [Device Monitor](complete-applications/esp32-s3/device-monitor/README.md) | `1.9.7` | `2.3.0 mini` | Tag `v1.9.7` / commit `58c2d15` | [`esp32-s3-device-monitor-v1.9.7`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-s3-device-monitor-v1.9.7) |
-| ESP32-P4 | [Device Monitor](complete-applications/esp32-p4/device-monitor/README.md) | `1.5.1` | `2.3.0` 官方源码重建版 | Tag `esp32-p4-device-app-v1.5.1` / commit `8d26a2b` | [`esp32-p4-device-monitor-v1.5.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.5.1) |
+| ESP32-P4 | [Device Monitor](complete-applications/esp32-p4/device-monitor/README.md) | `1.5.3` | `2.3.0` P4 验证重建与补丁版 | Tag `esp32-p4-device-app-v1.5.3` / commit `06583ea` | [`esp32-p4-device-monitor-v1.5.3`](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.5.3) |
 | G32S10X | [Device Monitor](complete-applications/g32s10x/device-monitor/README.md) | `0.1.1` | `2.2.1` | Tag `v0.1.1` / commit `5630152` | [`g32s10x-device-monitor-v0.1.1`](https://github.com/tangeai/tirtc-device-example/releases/tag/g32s10x-device-monitor-v0.1.1) |
 
 八个项目独立使用 SemVer Tag。某个项目更新时，只提升并发布该项目版本；共享 SDK 或公共代码
@@ -92,12 +92,15 @@ AI 对讲和设备互呼，并用预录媒体验证链路；它不依赖完整 U
 不进入 Git 历史。ESP32 固件使用
 [Espressif ESP Tool](https://espressif.github.io/esptool-js/) 按 Release 清单烧录。
 
-ESP32-P4 Device Monitor `1.5.1` 提供源码和
-`esp32p4-tirtc-device-monitor-full-v1.5.1.bin`。绑定弹窗和二维码使用独立的 ThingConnect 设备
-管理门户，设备内部的 JSON 服务发现与业务 API 保持各自职责。媒体能力继承 `1.5.0`：设备视频
-呼叫使用最高 `384x256` 双向 H264，并包含 TGMP 码率反馈、持久 PSRAM 媒体池、跨 APP 生命周期、
-AEC、联系人、Wi-Fi 恢复和串口回归接口。完整镜像只在 GitHub Release 中分发，
-从 `0x0` 烧录；它会清除现有 NVS、Wi-Fi 和绑定信息，具体步骤见
+ESP32-P4 Device Monitor `1.5.3` 的交付内容为源码和
+`esp32p4-tirtc-device-monitor-full-v1.5.3.bin`。相比公开版 `1.5.1`，微信 H264 上行改为
+`640x480@15fps`、目标 `800kbps`，主动呼叫使用微信正式版 `wx_version_type=0`；设备呼叫
+保持 `384x256@12fps`、目标 `256kbps`，IPC 保持 `1280x960@20fps`、目标 `4Mbps`。
+RTC 服务地址必须为带主机名的显式 HTTPS，应用不再按 SDK 版本降级为 HTTP。
+TiRTC `2.3.0` P4 验证重建库包含项目补丁，公开归档移除了 SDK 行号调试信息。
+Hosted 增加 RPC 错误触发重建与 SDIO 异常读数防护；物理链路故障根因仍需实测确认。
+完整镜像只在 GitHub Release 中分发，从 `0x0` 烧录，会清除现有 NVS、Wi-Fi 和绑定信息。
+本版本正式构建与目标板验证状态见[版本与证据清单](docs/VERSIONS_CN.md)，下载步骤见
 [固件下载与校验](docs/RELEASES_CN.md)。
 
 ESP32-S3 Device Monitor `1.9.7` 提供 RTC 双向音频、二维码联系人扫描、小钛、微信 VoIP、

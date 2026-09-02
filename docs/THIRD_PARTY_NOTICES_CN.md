@@ -20,19 +20,25 @@ active-connect `db7290f2404b15f2ab8567dd221853ca2ec054ab` 为功能基础，并�
 `components/tirtc_sdk/VERSION.md`、`VERSION.md`、`SOURCE_PROVENANCE.md` 和 Release
 manifest 为准；SDK 头文件和静态库保留供应方条款，不因本仓 MIT License 改为 MIT。
 
-ESP32-P4 Device Monitor `1.5.1` 继续使用 TiRTC `2.3.0` 官方源码重建版，SDK 文件与 `1.5.0`
-保持一致。Nano 源码为
-`v2.3.0 / 1baf7c95f3ca715c9367b9c998417f647934dc35`，TGWebRTC 源码基线为
-`tag.v1.5.12 / 41c9a25768ffe265c07f17ef78a6439607b19364`；静态库内嵌 TGTRP
-BuildInfo 为 `tagv1.5.11`，两项元数据分开保留。P4 `libTiRTC.a` 大小为
-`1,827,850` bytes，SHA-256 为
-`6dc4d437ea444761ca21e203fc9babb1799bb1f7fc261d7c523248fde0a96e67`。P4 公开包 SDK 6 项文件身份
-以项目 `components/tirtc_sdk/VERSION.md`、`SHA256SUMS.txt` 和 `SOURCE_PROVENANCE.md`
-为准；来源包内未被 P4 链接且含供应方构建路径的 S3 静态库不进入 P4 公开目录。
+ESP32-P4 Device Monitor `1.5.3` 使用 TiRTC `2.3.0` P4 验证重建与补丁版，不是未经修改的
+官方包。Nano 源码为 `13e34c3e3e3dc6776be4713b5c1e3c17bd282766`，TGWebRTC 源码为
+`e39114731ad488c88573d16f0855a1326d97c989`，另含校验标识为
+`e5b3109cc0dee3f0d8958c23a60f69b236d87acb909cac95c4d6bb24812dbbaf` 的补丁集。
+P4 `libTiRTC.a` 大小为 `4,748,802` bytes，SHA-256 为
+`a7a01ffd496a55364c7e4d665ff3884d078147bba96752a965d97befca12e451`。
+公开归档使用 `--strip-debug` 移除调试信息中的构建路径和行号，99 个成员的分配节内容、
+运行符号、重定位和归档符号索引保持等价；SDK 源码行号调试需使用本地保留的原始归档。
+详细文件身份与补丁范围以项目 `components/tirtc_sdk/VERSION.md`、`SHA256SUMS.txt` 和
+`SOURCE_PROVENANCE.md` 为准；未被 P4 链接的 S3 静态库不进入 P4 公开目录。
 
 该项目中的 `components/espressif__esp_h264/` 以 Espressif `esp_h264 1.3.8` 为基线，并
 包含 P4 项目所需的输出边界、参考帧池和码率控制补丁。组件不是整目录逐字节等同上游；
 Espressif 原始许可证文件继续随组件保留。
+
+`components/espressif__esp_hosted/` 同样保留项目补丁，包括 PSRAM streaming RX、SDIO
+寄存器快照检查和 TX throttle 诊断。当前依赖没有 `esp_hosted_event.h`，Hosted 事件与心跳
+恢复分支不参与编译；应用现有恢复由 Wi-Fi RPC 错误触发。组件防护和恢复代码不等同于
+已证明物理 SDIO 故障根因消除。
 
 P4 Device Monitor、S3 Device Monitor 和 S3/P4 最小集成示例复用同一份 TiRTC H264
 协议测试素材 `send_video.h264`。文件大小为 `298,486` bytes，SHA-256 为

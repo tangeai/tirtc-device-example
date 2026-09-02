@@ -129,6 +129,7 @@ typedef struct {
 typedef struct {
     bool enabled;
     tirtc_session_mode_t default_session_mode;
+    /* Required HTTPS URL when enabled; no userinfo, fragment or HTTP fallback. */
     char service_endpoint[TIRTC_SESSION_ENDPOINT_MAX_LEN];
     char device_id[TIRTC_SESSION_DEVICE_ID_MAX_LEN];
     char client_id[TIRTC_SESSION_CLIENT_ID_MAX_LEN];

@@ -732,7 +732,9 @@ esp_err_t app_hangup_call_async(void)
                                                           APP_CALL_HANGUP_TASK_PRIORITY,
                                                           NULL,
                                                           APP_TASK_CORE_BACKGROUND,
-                                                          APP_TASK_STACK_CAPS_CONTROL);
+                                                          /* Hangup must remain schedulable when the
+                                                           * internal heap is under media pressure. */
+                                                          APP_TASK_STACK_CAPS_BACKGROUND);
     if (task_ret != pdPASS) {
         taskENTER_CRITICAL(&s_call_hangup_lock);
         s_call_hangup_queued = false;

@@ -119,6 +119,7 @@ typedef struct {
     uint8_t direct_active_gop;
     uint8_t v4l2_active_gop;
     bool direct_encoder;
+    bool capture_buffer_from_workspace;
     bool capture_streaming;
     bool output_streaming;
 } camera_pipeline_h264_encoder_t;
@@ -167,6 +168,10 @@ static uint64_t s_last_key_frame_request_drop_log_us;
 static camera_pipeline_h264_encoder_t s_reserved_h264 = {
     .fd = -1,
 };
+static uint8_t *s_h264_output_workspace;
+static size_t s_h264_output_workspace_capacity;
+static bool s_h264_output_workspace_in_use;
+static bool s_h264_output_workspace_allocating;
 static video_yuv420_scaler_handle_t s_reserved_call_scaler;
 static camera_pipeline_metrics_t s_metrics = {
     .configured_bitrate_bps = CAMERA_PIPELINE_H264_BITRATE,
@@ -921,6 +926,81 @@ static bool camera_pipeline_h264_get_control(int fd, uint32_t id, int32_t *value
     return true;
 }
 
+static uint8_t *camera_pipeline_h264_output_workspace_acquire(size_t required_bytes)
+{
+    if (required_bytes == 0U) {
+        return NULL;
+    }
+
+    uint8_t *workspace = NULL;
+    size_t allocation_bytes = required_bytes;
+    bool allocate = false;
+
+    if (allocation_bytes < APP_MEDIA_H264_OUTPUT_BUFFER_BYTES) {
+        allocation_bytes = APP_MEDIA_H264_OUTPUT_BUFFER_BYTES;
+    }
+
+    taskENTER_CRITICAL(&s_lock);
+    if (s_h264_output_workspace != NULL &&
+        s_h264_output_workspace_capacity >= required_bytes &&
+        !s_h264_output_workspace_in_use) {
+        s_h264_output_workspace_in_use = true;
+        workspace = s_h264_output_workspace;
+    } else if (s_h264_output_workspace == NULL &&
+               !s_h264_output_workspace_in_use &&
+               !s_h264_output_workspace_allocating) {
+        s_h264_output_workspace_allocating = true;
+        allocate = true;
+    }
+    taskEXIT_CRITICAL(&s_lock);
+
+    if (workspace != NULL || !allocate) {
+        return workspace;
+    }
+
+    uint8_t *new_workspace =
+        app_memory_aligned_alloc_psram(CAMERA_PIPELINE_CACHE_LINE_SIZE,
+                                       allocation_bytes,
+                                       MALLOC_CAP_CACHE_ALIGNED);
+    bool installed = false;
+    taskENTER_CRITICAL(&s_lock);
+    if (new_workspace != NULL &&
+        s_h264_output_workspace == NULL &&
+        !s_h264_output_workspace_in_use) {
+        s_h264_output_workspace = new_workspace;
+        s_h264_output_workspace_capacity = allocation_bytes;
+        s_h264_output_workspace_in_use = true;
+        workspace = new_workspace;
+        installed = true;
+    }
+    s_h264_output_workspace_allocating = false;
+    taskEXIT_CRITICAL(&s_lock);
+
+    if (new_workspace != NULL && !installed) {
+        heap_caps_free(new_workspace);
+    }
+    if (installed) {
+        ESP_LOGI(TAG,
+                 "H264 output workspace reserved: capacity=%u requested=%u",
+                 (unsigned)allocation_bytes,
+                 (unsigned)required_bytes);
+    }
+    return workspace;
+}
+
+static void camera_pipeline_h264_output_workspace_release(uint8_t *workspace)
+{
+    if (workspace == NULL) {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_lock);
+    if (workspace == s_h264_output_workspace) {
+        s_h264_output_workspace_in_use = false;
+    }
+    taskEXIT_CRITICAL(&s_lock);
+}
+
 static void camera_pipeline_h264_close(camera_pipeline_h264_encoder_t *enc)
 {
     if (enc == NULL) {
@@ -946,7 +1026,11 @@ static void camera_pipeline_h264_close(camera_pipeline_h264_encoder_t *enc)
             enc->direct_handle = NULL;
         }
         if (enc->capture_buffer != NULL) {
-            heap_caps_free(enc->capture_buffer);
+            if (enc->capture_buffer_from_workspace) {
+                camera_pipeline_h264_output_workspace_release(enc->capture_buffer);
+            } else {
+                heap_caps_free(enc->capture_buffer);
+            }
             enc->capture_buffer = NULL;
         }
         *enc = (camera_pipeline_h264_encoder_t) {
@@ -1024,16 +1108,17 @@ static esp_err_t camera_pipeline_h264_open(camera_pipeline_h264_encoder_t *enc,
 
     if (CONFIG_APP_RTC_H264_DIRECT_HW_ENCODER) {
         enc->direct_encoder = true;
-        enc->capture_buffer =
-            app_memory_aligned_alloc_psram(CAMERA_PIPELINE_CACHE_LINE_SIZE,
-                                           safe_output_buffer_bytes,
-                                           MALLOC_CAP_CACHE_ALIGNED);
+        enc->capture_buffer = camera_pipeline_h264_output_workspace_acquire(
+            safe_output_buffer_bytes);
         ESP_RETURN_ON_FALSE(enc->capture_buffer != NULL,
                             ESP_ERR_NO_MEM,
                             TAG,
-                            "alloc direct H264 output buffer failed size=%u psram_largest=%u",
+                            "acquire direct H264 output workspace failed size=%u reserved=%u/%u psram_largest=%u",
                             (unsigned)safe_output_buffer_bytes,
+                            s_h264_output_workspace != NULL ? 1U : 0U,
+                            s_h264_output_workspace_in_use ? 1U : 0U,
                             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        enc->capture_buffer_from_workspace = true;
         enc->capture_buffer_size = safe_output_buffer_bytes;
 
         esp_h264_enc_cfg_hw_t config = {

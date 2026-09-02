@@ -16,7 +16,16 @@ static void tirtc_session_handle_network_changed(const tirtc_session_event_t *ev
                 ESP_LOGW(TAG, "rtc disconnect on network down failed: %s", esp_err_to_name(ret));
             }
         }
-        tirtc_session_mark_sdk_network_offline();
+        /* TiRtcStart owns listener threads and sockets. Merely clearing the
+         * application-side started flag lets the next network-up event call
+         * TiRtcStart again without the required TiRtcStop/TiRtcUninit pair,
+         * leaving the old runtime alive and eventually exhausting lwIP
+         * sockets. Reuse the deferred full-reset path so callbacks drain
+         * outside the network callback and restart only after link recovery. */
+        if (!tirtc_session_schedule_deferred_full_reset()) {
+            ESP_LOGE(TAG, "rtc full reset schedule failed on network down");
+            tirtc_session_mark_sdk_network_offline();
+        }
     } else {
         tirtc_session_note_event("network up");
         (void)tirtc_session_prepare_sdk();

@@ -14727,8 +14727,17 @@ static void display_open_system_page_async_cb(void *arg)
 
 static esp_err_t display_open_page_async(lv_async_cb_t callback)
 {
-    return lv_async_call(callback, NULL) == LV_RES_OK ?
-        ESP_OK : ESP_ERR_INVALID_STATE;
+    if (!s_display_initialized || callback == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!lvgl_port_lock(100)) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    /* lv_async_call mutates LVGL's timer list and must share the LVGL lock. */
+    lv_res_t result = lv_async_call(callback, NULL);
+    lvgl_port_unlock();
+    return result == LV_RES_OK ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
 esp_err_t display_open_home_page_async(void)

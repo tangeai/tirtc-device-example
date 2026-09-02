@@ -15,6 +15,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "http_parser.h"
 #include "mbedtls/md.h"
 #include "sdkconfig.h"
 
@@ -5208,42 +5209,25 @@ static esp_err_t tirtc_session_copy_payload(const void *data, size_t data_len, u
     return ESP_OK;
 }
 
-static void tirtc_session_normalize_service_endpoint(tirtc_session_config_t *config)
+static bool tirtc_session_service_endpoint_is_valid(const tirtc_session_config_t *config)
 {
-    const char *sdk_version = TiRtcGetVersion();
-    bool requires_http_endpoint = false;
-
-    if (config == NULL || strncmp(config->service_endpoint, "https://", 8) != 0) {
-        return;
+    size_t length = strnlen(config->service_endpoint, sizeof(config->service_endpoint));
+    if (length == 0) {
+        return !config->enabled;
     }
-    if (sdk_version != NULL) {
-        requires_http_endpoint =
-            strcmp(sdk_version, "v2.2.0") == 0 ||
-            strcmp(sdk_version, "2.2.0") == 0 ||
-            strcmp(sdk_version, "v2.3.0") == 0 ||
-            strcmp(sdk_version, "2.3.0") == 0;
-    }
-    if (!requires_http_endpoint) {
-        return;
+    if (length >= sizeof(config->service_endpoint) ||
+        strncmp(config->service_endpoint, "https://", 8) != 0) {
+        return false;
     }
 
-    char compatible_endpoint[TIRTC_SESSION_ENDPOINT_MAX_LEN] = {0};
-    int written = snprintf(compatible_endpoint,
-                           sizeof(compatible_endpoint),
-                           "http://%s",
-                           config->service_endpoint + 8);
-    if (written <= 0 || written >= (int)sizeof(compatible_endpoint)) {
-        ESP_LOGW(TAG,
-                 "rtc sdk %s endpoint compatibility conversion failed",
-                 sdk_version);
-        return;
-    }
-
-    ESP_LOGW(TAG,
-             "rtc sdk %s does not support HTTPS service endpoints; use %s",
-             sdk_version,
-             compatible_endpoint);
-    strlcpy(config->service_endpoint, compatible_endpoint, sizeof(config->service_endpoint));
+    // Keep TLS authentication in the SDK; never rewrite or downgrade the URL.
+    struct http_parser_url url;
+    http_parser_url_init(&url);
+    return http_parser_parse_url(config->service_endpoint, length, 0, &url) == 0 &&
+           (url.field_set & (1U << UF_HOST)) != 0 &&
+           url.field_data[UF_HOST].len != 0 &&
+           (url.field_set & ((1U << UF_USERINFO) | (1U << UF_FRAGMENT))) == 0 &&
+           ((url.field_set & (1U << UF_PORT)) == 0 || url.port != 0);
 }
 
 static esp_err_t tirtc_session_ensure_platform_ready(void)
@@ -8229,7 +8213,7 @@ static void tirtc_session_worker_task(void *ctx)
 
 esp_err_t tirtc_session_configure(const tirtc_session_config_t *config)
 {
-    tirtc_session_config_t normalized_config;
+    tirtc_session_config_t validated_config;
     bool config_changed = false;
     bool needs_full_reset = false;
     bool sdk_initialized = false;
@@ -8239,8 +8223,11 @@ esp_err_t tirtc_session_configure(const tirtc_session_config_t *config)
         return ESP_ERR_INVALID_ARG;
     }
 
-    normalized_config = *config;
-    tirtc_session_normalize_service_endpoint(&normalized_config);
+    validated_config = *config;
+    if (!tirtc_session_service_endpoint_is_valid(&validated_config)) {
+        ESP_LOGE(TAG, "rtc service endpoint rejected: explicit HTTPS URL with a host is required");
+        return ESP_ERR_INVALID_ARG;
+    }
 
     if (tirtc_connect_is_connecting()) {
         return ESP_ERR_INVALID_STATE;
@@ -8254,10 +8241,10 @@ esp_err_t tirtc_session_configure(const tirtc_session_config_t *config)
     }
     sdk_initialized = s_sdk_initialized;
     sdk_started = s_sdk_started;
-    config_changed = tirtc_session_config_differs(&s_config, &normalized_config);
+    config_changed = tirtc_session_config_differs(&s_config, &validated_config);
     if (config_changed) {
-        s_config = normalized_config;
-        s_session_mode = normalized_config.default_session_mode;
+        s_config = validated_config;
+        s_session_mode = validated_config.default_session_mode;
         needs_full_reset = sdk_initialized || sdk_started;
         tirtc_session_sync_stats_locked();
     }
@@ -8266,10 +8253,10 @@ esp_err_t tirtc_session_configure(const tirtc_session_config_t *config)
     if (needs_full_reset) {
         ESP_LOGI(TAG,
                  "rtc config changed after SDK init: schedule full reset enabled=%d device_id_len=%u client_id_len=%u endpoint=%s",
-                 normalized_config.enabled ? 1 : 0,
-                 (unsigned)strlen(normalized_config.device_id),
-                 (unsigned)strlen(normalized_config.client_id),
-                 normalized_config.service_endpoint);
+                 validated_config.enabled ? 1 : 0,
+                 (unsigned)strlen(validated_config.device_id),
+                 (unsigned)strlen(validated_config.client_id),
+                 validated_config.service_endpoint);
         if (!tirtc_session_schedule_deferred_full_reset()) {
             ESP_LOGW(TAG, "rtc full reset schedule failed after config update");
             return ESP_FAIL;
@@ -8277,10 +8264,10 @@ esp_err_t tirtc_session_configure(const tirtc_session_config_t *config)
     } else if (config_changed) {
         ESP_LOGI(TAG,
                  "rtc config updated before SDK start: enabled=%d device_id_len=%u client_id_len=%u endpoint=%s",
-                 normalized_config.enabled ? 1 : 0,
-                 (unsigned)strlen(normalized_config.device_id),
-                 (unsigned)strlen(normalized_config.client_id),
-                 normalized_config.service_endpoint);
+                 validated_config.enabled ? 1 : 0,
+                 (unsigned)strlen(validated_config.device_id),
+                 (unsigned)strlen(validated_config.client_id),
+                 validated_config.service_endpoint);
     }
 
     return ESP_OK;

@@ -139,6 +139,7 @@ idf_component_register(
                  ${APP_DEBUG_SCREEN_SERVER_INCLUDE_DIRS}
                  ${APP_SERIAL_CALL_CLI_INCLUDE_DIRS}
     REQUIRES driver esp_driver_jpeg esp_driver_ppa esp_event esp_netif esp_wifi nvs_flash esp_timer esp_codec_dev tirtc_sdk esp_lcd lwip esp_hw_support esp_http_client app_update esp_app_format json mbedtls mqtt esp_video esp_h264 esp32_p4_wifi6_touch_lcd_35 espressif__esp_jpeg espressif__esp-sr espressif__quirc spiffs
+    PRIV_REQUIRES http_parser
     WHOLE_ARCHIVE
 )
 

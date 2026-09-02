@@ -4,103 +4,80 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 应用工程 | TiRTC ESP32-P4 Device Monitor |
-| 应用版本 | `1.5.1` |
-| 发布日期 | `2026-08-28` |
-| 来源 Tag | `esp32-p4-device-app-v1.5.1` |
-| 来源 Tag object | `4a0fa821b53551432c8341763cf68a61c81285b5` |
-| 来源 commit | `8d26a2bc5267f6bf1db721730a210ce8bc2f7ccc` |
-| 比较基线 | `esp32-p4-device-app-v1.5.0` / `97331363a0d3c4e6f89b5b93d39561e74087ba2a` |
-| 公开项目 Tag | `esp32-p4-device-monitor-v1.5.1` |
-| 发布范围 | 源码、公开文档和 `0x0` 16 MiB 完整镜像 |
+| 应用版本 / 日期 | `1.5.3` / `2026-09-02` |
+| 来源 Tag | `esp32-p4-device-app-v1.5.3` |
+| 来源 Tag object | `4ab50c48d685d3537c8f9bebdc0b2417ad35338d` |
+| 来源 commit | `06583eaf18d9326b9602684a7c509a3badf7dadc` |
+| 来源 tree | `1acc583f3601448e1656f18716924f70125fe0c7` |
+| 上一公开版本的来源 | `1.5.1` / `8d26a2bc5267f6bf1db721730a210ce8bc2f7ccc` |
+| 安全补丁比较基线 | `1.5.2` / `48faa7b5c6e37dac7bf9f0aaf28d1142bef1f220` |
+| 公开项目 Tag | `esp32-p4-device-monitor-v1.5.3` |
+| 发布内容 | 源码、文档与从 `0x0` 烧录的 16 MiB 完整镜像 |
 | 目标板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |
 | 网络架构 | ESP32-P4 host + ESP32-C6 ESP-Hosted/SDIO slave |
-| ESP-IDF | `5.5.4` |
-| Toolchain | `riscv32-esp-elf-gcc 14.2.0_20260121` |
-| FreeRTOS tick | `1000Hz` |
+| ESP-IDF / 编译器 | `5.5.4` / `riscv32-esp-elf-gcc 14.2.0_20260121` |
 
 ## TiRTC SDK
 
 | 项目 | 内容 |
 | --- | --- |
 | API 版本 | `2.3.0` |
-| 交付性质 | 官方源码重建版，含 P4 ICE/TGTRP 稳定性修复 |
-| Nano source | `v2.3.0` / `1baf7c95f3ca715c9367b9c998417f647934dc35` |
-| TGWebRTC source | `tag.v1.5.12` / `41c9a25768ffe265c07f17ef78a6439607b19364` |
-| 嵌入 TGTRP BuildInfo | `tagv1.5.11` |
-| 官方归档 SHA-256 | `6daa39e04edf552283360f6a7defa6d12de8c8dd8d8094f8a6bbbdbb64a3f190` |
-| P4 `libTiRTC.a` 大小 | `1,827,850` bytes |
-| P4 `libTiRTC.a` MD5 | `7e5fe37e9530bcaffce015583ae8cfb0` |
-| P4 `libTiRTC.a` SHA-256 | `6dc4d437ea444761ca21e203fc9babb1799bb1f7fc261d7c523248fde0a96e67` |
+| 交付性质 | P4 validation rebuild，包含传输与 RTC 线程栈补丁 |
+| Nano source | `13e34c3e3e3dc6776be4713b5c1e3c17bd282766` |
+| TGWebRTC source | `e39114731ad488c88573d16f0855a1326d97c989` |
+| TGWebRTC 补丁集 SHA-256 | `e5b3109cc0dee3f0d8958c23a60f69b236d87acb909cac95c4d6bb24812dbbaf` |
+| P4 库大小 | `4,748,802` bytes |
+| P4 库 MD5 | `fe83d55cfe856807f2775be568a73ec4` |
+| P4 库 SHA-256 | `a7a01ffd496a55364c7e4d665ff3884d078147bba96752a965d97befca12e451` |
+| 脱敏前归档 SHA-256 | `738c969244ab39c2b0eacc21068ecebc9bad736a4a5d713794836605d8e9f982` |
 | `tiRTC.h` SHA-256 | `a53fa3392f71c8fd15c77891a772cc20939b5d253b995b3382486e514c134473` |
 
-`tag.v1.5.12` 是 SDK 重建使用的 TGWebRTC 源码 Tag，`tagv1.5.11` 是当前库运行时嵌入的
-TGTRP BuildInfo。两项来自不同元数据面，本文如实并列；集成时以源码 commit、静态库哈希和
-`components/tirtc_sdk/SHA256SUMS.txt` 共同确定 SDK 身份。
+本次使用 `--strip-debug` 去掉 SDK 调试信息中的个人路径。99 个成员的顺序、代码与数据节、
+运行重定位、归档符号索引和可链接符号保持一致；没有重编 SDK 或修改运行数据。公开库保留
+链接所需符号，但 SDK 内部源码行号调试需要脱敏前归档。完整来源见组件
+[VERSION.md](components/tirtc_sdk/VERSION.md)，公开 6 项校验和见
+[SHA256SUMS.txt](components/tirtc_sdk/SHA256SUMS.txt)。未使用的 S3 库不随 P4 工程分发。
 
-构建契约：
+这份库包含 P4 项目补丁，不能只凭 `2.3.0` 字符串把它当作未经修改的官方原包。
+库中还保留不同下层组件的版本字符串，确定交付身份时应使用上述源码、补丁集和完整归档哈希。
 
-- `CONFIG_FREERTOS_HZ=1000`，FreeRTOS trace/runtime stats 关闭。
-- `CONFIG_LWIP_MAX_SOCKETS=16`。
-- ESP32-C6 通过 ESP-Hosted/SDIO 提供 Wi-Fi；P4 不使用原生 Wi-Fi。
-- `libwebrtc_nosctp.a` 已并入 `libTiRTC.a`，不能重复链接。
-- `TIRTC_VIDEO_JPEG` 用于微信 VoIP MJPEG 下行。
-- SDK 对外回调名为 `on_update_bitrate()`；应用内部 observer 名仍是
-  `on_video_bitrate_required`。
-- SDK/TGMP 码率控制默认开启；旧本地队列压力自动降级默认关闭。
+## 配置与安全
 
-## H264 组件
+- FreeRTOS tick 为 `1000Hz`，trace/runtime stats 关闭，最大 socket 数为 `16`。
+- Wi-Fi 由 C6 的 ESP-Hosted/SDIO 提供；`libwebrtc_nosctp.a` 已合入 TiRTC 库，不能重复链接。
+- RTC 配置只接受带主机名的显式 HTTPS URL。非法地址在修改配置或排队重置之前返回错误；
+  RTC 关闭时允许空地址。SDK 证书或握手错误保持失败，不自动回落 HTTP。
+- SDK 使用必需的服务端证书验证、ESP-IDF CA bundle、hostname 和验证结果检查。
+- P4 主动微信呼叫使用正式小程序 `version_type=0`。
+- SDK/TGMP 码率反馈默认开启，旧本地自动弱网降级关闭，避免两个控制器同时改编码器。
+- 当前依赖不包含 Hosted 事件头文件，事件驱动恢复分支未启用；现行恢复入口是 RPC 错误触发
+  的重建及 SDIO 防护。板级物理故障的根因不由这些防护证明。
 
-`components/espressif__esp_h264/` 以 Espressif `1.3.8`、upstream commit
-`8e86030d` 为基线。三个新增文件与该 commit 的 blob 完全一致；项目同时保留 4 个 P4 硬件
-编码源文件补丁和本地 `idf_component.yml`，用于输出长度边界、参考帧池与码率控制。
-因此准确表述是“Espressif 1.3.8 基线 + P4 项目补丁”，不是整个组件逐字节等同上游。
+RTC 地址约束不等于整机完全没有 HTTP 流量：原有无凭据的 HTTP HEAD 校时兜底仍保留。
 
-## 1.5.1 变更
-
-- 绑定弹窗中的文字网址和二维码使用独立的 ThingConnect 设备管理入口
-  `https://demo-open.tange-ai.com/devices`。
-- JSON 服务发现继续使用 `https://ep-open.tangeopen.com/services`，设备业务 API 继续使用
-  `https://srv-open.tangeopen.com`；本补丁没有改变服务发现或业务 API 契约。
-- TiRTC SDK、第三方组件、媒体档位、分区表和硬件配置保持 `1.5.0` 基线不变。
-
-## 1.5.0 能力基线
-
-- P4 ICE/TGTRP 继续使用有界接收和公平调度；音频抖动单轮最多处理 4 个有序工作项，ICE
-  预算耗尽后让出 1 tick，避免媒体回调长期占用 RTC 线程。
-- SDK/TGMP 反馈经应用控制任务调整编码器；设备呼叫 compact 范围为 `96-256kbps`，连接以
-  正常 `256kbps` 档启动，注册起点为 `224kbps`，收到传输反馈后才调整。
-- 摄像头 USERPTR、H264 reference/deblocking、解码、显示和 AEC 使用持久 PSRAM 池；跨 APP
-  预热和会话代际清理减少连续进入、退出媒体业务时的大块内存碎片。
-- 设备呼叫、微信联系人、二维码、铃声和呼叫 UI 完成一轮交互收口；二维码扫描预览支持
-  灰度、RGB565 和 packed YUV420。
-- 网络测试提供结构化时延、抖动和丢包率；ESP-Hosted Wi-Fi 后台恢复和串口回归 CLI 默认启用。
-
-## 默认媒体参数
+## 媒体与组件
 
 | 场景 | 参数 |
 | --- | --- |
-| IPC 上行 | `1280x960@20fps`，`4Mbps`，H264，GOP `40` / `2s` |
-| 设备呼叫上行 | `384x256@12fps`，`256kbps`，H264，GOP `192` / `16s` |
-| 设备呼叫下行 | constrained-baseline H264；解码 `384x256`，显示 `480x320` |
-| 微信上行 | `480x320@15fps`，`480kbps`，H264，GOP `30` / `2s` |
-| 微信下行 | 请求 `640x480` MJPEG，P4 JPEG 硬解后 `cover` 到 `480x320` |
-| H264 输入/输出池 | 输入 `24 x 256KB`；decoded `4` 帧；output `20` 帧；playout 深度上限 `16` |
+| IPC 上行 | `1280x960@20fps`，目标 `4Mbps`，H264，GOP `40` |
+| 设备呼叫上行 | `384x256@12fps`，目标 `256kbps`，H264，GOP `192` |
+| 设备呼叫下行 | constrained-baseline H264，解码 `384x256`，显示 `480x320` |
+| 微信上行 | `640x480@15fps`，目标 `800kbps`，H264，GOP `30` |
+| 微信下行 | 请求 `640x480` MJPEG，按实际来帧解码后 `cover` 到 `480x320` |
+| H264 输入/输出池 | 输入 `24 x 256KB`；decoded `4` 帧；output `20` 帧；playout 上限 `16` |
 | 控制层自动隐藏 | `5s`，点击视频恢复 |
 
-## 证据边界
+码率是目标值，实际发送量取决于画面、编码器和传输反馈。
+H264 组件保持 Espressif `1.3.8` / `8e86030d` 基线及已有 P4 输出边界、参考帧池和码率控制补丁。
 
-来源 Tag 工作树、版本入口、源 SDK 7 项 SHA-256、P4 库哈希、凭据范围和 Git diff 已完成
-静态核对。统一公开候选已完成唯一一次 ESP-IDF `5.5.4`、`--no-ccache` 干净构建：
-`1837/1837` 个步骤，warning/error/ICE 均为 0；应用镜像 `6,955,776` bytes，SHA-256
-`1542c19052ae9bdb8804e38916c54f928e405ac06e6ae796faa5d46cd7c7e515`，分区剩余
-`580,864` bytes（`7.71%`）；16 MiB 完整镜像 SHA-256
-`019eed4e047f9d1a1809c5fa0e441b94d2a509fe83c885e5eafc21adb89c0a7a`。
+## 本次变化与验证
 
-最新持久池修改后尚未重新完成微信外部实呼和弱网矩阵；COM7/COM11 上的启明板是旧版
-`1.3.2`，不属于本版本证据。上面的正式构建证明候选可以编译和链接；本轮没有烧录或真机
-验证，不能据此宣称绑定门户、网络或媒体已在目标板验收。
+相对上一公开版 `1.5.1`，本版包含微信上行档位、C6 RPC/SDIO 防护、摄像头和显示资源调整，
+以及 `1.5.3` 的 HTTPS 策略和 SDK 调试信息脱敏。精确来源差异为 26 个文件，1227 行新增、
+128 行删除；其中安全补丁自身为 12 个文件，包含两个可复用维护测试脚本。
 
-微信小程序 VoIP 和外部 IPC/H5 对端本轮没有重新完成人工端到端验证。
+主机侧已通过 24 项实际 RTC C 函数与 IDF URL parser 测试，覆盖地址原样保留、非法输入拒绝
+及拒绝时无配置/重置副作用。归档等价性与 SDK 校验是独立的静态证据。
 
-构建、烧录、C6/SDIO、联网、绑定、真实媒体和长期运行是不同证据层，不能互相替代。
+正式构建及固件结果由本次 Release 的 `release-manifest.json` 记录；烧录、P4 TLS 正反向握手、
+峰值内存与跨应用运行需在目标板分别验证。主机 URL 测试不模拟 TLS，也不替代真机握手。

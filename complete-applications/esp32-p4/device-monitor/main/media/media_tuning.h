@@ -39,12 +39,13 @@
 #define APP_MEDIA_CALL_VIDEO_MIN_QP                     34U
 #define APP_MEDIA_CALL_VIDEO_MAX_QP                     51U
 
-/* WeChat negotiates a fixed supported edge length. Keep its uplink at the
- * native landscape surface instead of inheriting the P4-to-P4 decoder guard. */
-#define APP_MEDIA_WECHAT_VIDEO_WIDTH                    480U
-#define APP_MEDIA_WECHAT_VIDEO_HEIGHT                   320U
+/* WeChat uplink is encoded by the P4 hardware encoder and decoded remotely,
+ * so it does not need to inherit the P4-to-P4 software-decoder guard. Keep a
+ * standard 4:3 VGA profile while retaining the documented 15 fps ceiling. */
+#define APP_MEDIA_WECHAT_VIDEO_WIDTH                    640U
+#define APP_MEDIA_WECHAT_VIDEO_HEIGHT                   480U
 #define APP_MEDIA_WECHAT_VIDEO_FPS                      15U
-#define APP_MEDIA_WECHAT_VIDEO_BITRATE_BPS              480000U
+#define APP_MEDIA_WECHAT_VIDEO_BITRATE_BPS              800000U
 #define APP_MEDIA_WECHAT_VIDEO_MIN_QP                   30U
 #define APP_MEDIA_WECHAT_VIDEO_MAX_QP                   46U
 /* H264 encoder and transport protection. */

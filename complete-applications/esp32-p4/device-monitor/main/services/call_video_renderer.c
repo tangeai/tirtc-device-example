@@ -757,6 +757,38 @@ static esp_err_t call_video_prepare_h264_access_unit(const uint8_t *data,
     return ESP_OK;
 }
 
+#if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
+static void call_video_log_small_rejected_au(const uint8_t *data, size_t data_len)
+{
+    if (data == NULL || data_len == 0U || data_len > 128U) {
+        return;
+    }
+
+    for (size_t offset = 0U; offset < data_len; offset += 16U) {
+        const size_t chunk_len = data_len - offset < 16U ? data_len - offset : 16U;
+        char line[(16U * 3U) + 1U] = {0};
+        size_t written = 0U;
+
+        for (size_t index = 0U; index < chunk_len; ++index) {
+            int ret = snprintf(line + written,
+                               sizeof(line) - written,
+                               "%02X%s",
+                               data[offset + index],
+                               index + 1U == chunk_len ? "" : " ");
+            if (ret <= 0 || (size_t)ret >= sizeof(line) - written) {
+                break;
+            }
+            written += (size_t)ret;
+        }
+        ESP_LOGW(TAG,
+                 "H264 rejected AU bytes: offset=%u/%u data=%s",
+                 (unsigned)offset,
+                 (unsigned)data_len,
+                 line);
+    }
+}
+#endif
+
 static uint32_t call_video_input_queue_depth(void);
 
 static bool call_video_stop_requested(void)
@@ -1796,6 +1828,9 @@ static esp_err_t call_video_decode_slot(esp_h264_dec_handle_t decoder,
                      slot->data_len > tail + 1U ? slot->data[tail + 1U] : 0U,
                      slot->data_len > tail + 2U ? slot->data[tail + 2U] : 0U,
                      slot->data_len > tail + 3U ? slot->data[tail + 3U] : 0U);
+#if CONFIG_APP_MEDIA_PERIODIC_DIAGNOSTICS
+            call_video_log_small_rejected_au(slot->data, slot->data_len);
+#endif
             return ESP_FAIL;
         }
         input.raw_data.buffer += input.consume;

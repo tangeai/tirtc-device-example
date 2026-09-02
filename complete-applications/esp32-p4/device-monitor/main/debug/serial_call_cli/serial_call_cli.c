@@ -16,9 +16,13 @@
 #include "app_memory_policy.h"
 #include "app_task_affinity.h"
 #include "audio_device.h"
+#include "call_video_renderer.h"
+#include "camera_pipeline.h"
 #include "device_call.h"
 #include "display.h"
 #include "media_sink.h"
+#include "rtc_transport.h"
+#include "wifi.h"
 #include "wechat_voip_service.h"
 
 static const char *TAG = "serial_call_cli";
@@ -64,6 +68,8 @@ static void serial_call_cli_print_help(void)
     serial_call_cli_writef("+HELP:AT+CALL=<id>|AT+CALLVIDEO=<id>|AT+CALLVIDEO=FIRST|AT+CALL?");
     serial_call_cli_writef("+HELP:AT+WXCALL=FIRST|AT+WX?|AT+WXANSWER|AT+WXHANGUP");
     serial_call_cli_writef("+HELP:AT+ANSWER|AT+REJECT|AT+HANGUP");
+    serial_call_cli_writef("+HELP:AT+VIDEO=ON|OFF|AT+MEDIA?");
+    serial_call_cli_writef("+HELP:AT+WIFI=<ssid>,<password>");
     serial_call_cli_writef("+HELP:AT+MEM?|AT+AUDIO?");
     serial_call_cli_writef("OK");
 }
@@ -195,6 +201,57 @@ static void serial_call_cli_print_audio(void)
     serial_call_cli_writef("OK");
 }
 
+static void serial_call_cli_print_media(void)
+{
+    camera_pipeline_metrics_t camera = {0};
+    call_video_renderer_stats_t renderer = {0};
+    rtc_transport_stats_t rtc = {0};
+
+    camera_pipeline_get_metrics(&camera);
+    call_video_renderer_get_stats(&renderer);
+    rtc_transport_get_stats(&rtc);
+
+    serial_call_cli_writef(
+        "+MEDIA:call=%u,send=%u,camera=%u,%ux%u@%u,measured=%u.%u/%uk,drop=%u,enc_fail=%u",
+        rtc.call_active ? 1U : 0U,
+        rtc.local_video_send_enabled ? 1U : 0U,
+        camera.running ? 1U : 0U,
+        (unsigned)camera.width,
+        (unsigned)camera.height,
+        (unsigned)camera.target_fps,
+        (unsigned)(camera.measured_fps_x10 / 10U),
+        (unsigned)(camera.measured_fps_x10 % 10U),
+        (unsigned)camera.measured_bitrate_kbps,
+        (unsigned)camera.dropped_frames,
+        (unsigned)camera.encode_failures);
+    serial_call_cli_writef(
+        "+MEDIA_UP:frames=%u,bytes=%u,q=%u,free=%u,fail=%u,sendbuf=%u/%u",
+        (unsigned)rtc.tx_video_frames,
+        (unsigned)rtc.tx_video_bytes,
+        (unsigned)rtc.local_video_tx_queue_len,
+        (unsigned)rtc.local_video_tx_free_slots,
+        (unsigned)rtc.tx_failures,
+        (unsigned)rtc.send_buffer_used,
+        (unsigned)rtc.send_buffer_limit);
+    serial_call_cli_writef(
+        "+MEDIA_DOWN:run=%u,wait_key=%u,rx=%u,decode=%u,convert=%u,show=%u,q=%u/%u,drop=%u/%u,fail=%u/%u,disc=%u,overflow=%u",
+        renderer.running ? 1U : 0U,
+        renderer.waiting_for_key_frame ? 1U : 0U,
+        (unsigned)renderer.received_frames,
+        (unsigned)renderer.decoded_frames,
+        (unsigned)renderer.converted_frames,
+        (unsigned)renderer.presented_frames,
+        (unsigned)renderer.queue_depth,
+        (unsigned)renderer.conversion_queue_depth,
+        (unsigned)renderer.dropped_frames,
+        (unsigned)renderer.conversion_dropped_frames,
+        (unsigned)renderer.decode_failures,
+        (unsigned)renderer.conversion_failures,
+        (unsigned)renderer.discontinuities,
+        (unsigned)renderer.input_overflows);
+    serial_call_cli_writef("OK");
+}
+
 static void serial_call_cli_process_line(const char *line)
 {
     esp_err_t ret = ESP_OK;
@@ -233,6 +290,14 @@ static void serial_call_cli_process_line(const char *line)
         serial_call_cli_print_memory();
     } else if (strcmp(line, "AT+AUDIO?") == 0) {
         serial_call_cli_print_audio();
+    } else if (strcmp(line, "AT+MEDIA?") == 0) {
+        serial_call_cli_print_media();
+    } else if (strcmp(line, "AT+VIDEO=ON") == 0) {
+        ret = app_set_local_video_enabled(true);
+        serial_call_cli_writef("+VIDEO:enabled=1,ret=%s", esp_err_to_name(ret));
+    } else if (strcmp(line, "AT+VIDEO=OFF") == 0) {
+        ret = app_set_local_video_enabled(false);
+        serial_call_cli_writef("+VIDEO:enabled=0,ret=%s", esp_err_to_name(ret));
     } else if (strcmp(line, "AT+CALLVIDEO=FIRST") == 0) {
         ret = serial_call_cli_call_first_device_contact();
         serial_call_cli_writef("+CALL:target=FIRST,type=video,ret=%s",
@@ -266,6 +331,23 @@ static void serial_call_cli_process_line(const char *line)
     } else if (strcmp(line, "AT+HANGUP") == 0) {
         ret = app_hangup_call_async();
         serial_call_cli_writef("+HANGUP:ret=%s", esp_err_to_name(ret));
+    } else if (strncmp(line, "AT+WIFI=", strlen("AT+WIFI=")) == 0) {
+        char credentials[SERIAL_CALL_CLI_LINE_SIZE] = {0};
+        strlcpy(credentials, line + strlen("AT+WIFI="), sizeof(credentials));
+        char *password = strchr(credentials, ',');
+        if (password == NULL) {
+            serial_call_cli_writef("+WIFI:ret=%s", esp_err_to_name(ESP_ERR_INVALID_ARG));
+        } else {
+            *password++ = '\0';
+            size_t ssid_len = strlen(credentials);
+            size_t password_len = strlen(password);
+            if (ssid_len == 0U || ssid_len > 32U || password_len > WIFI_PASSWORD_MAX_LEN) {
+                serial_call_cli_writef("+WIFI:ret=%s", esp_err_to_name(ESP_ERR_INVALID_ARG));
+            } else {
+                ret = app_connect_wifi(credentials, password);
+                serial_call_cli_writef("+WIFI:ssid=%s,ret=%s", credentials, esp_err_to_name(ret));
+            }
+        }
     } else {
         serial_call_cli_writef("ERROR,UNKNOWN_COMMAND");
     }

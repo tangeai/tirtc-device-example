@@ -1,113 +1,85 @@
 # 源码来源与公开边界
 
-本文记录 ESP32-P4 Device Monitor `1.5.1` 的开发来源、公开筛选和验证边界。开发者可以据此
-确认代码从哪里来，也能区分源码一致性、构建证据和目标板运行证据。
+本页说明 ESP32-P4 Device Monitor `1.5.3` 从哪个源码快照整理而来，以及公开包做了哪些变换。
 
-## 来源快照
-
-| 项目 | 内容 |
-| --- | --- |
-| 应用版本 | `1.5.1` |
-| 来源 Tag | `esp32-p4-device-app-v1.5.1` |
-| Tag object | `4a0fa821b53551432c8341763cf68a61c81285b5` |
-| 来源 commit | `8d26a2bc5267f6bf1db721730a210ce8bc2f7ccc` |
-| 来源 tree | `03e8f4708f69a96df13b8115376351075e5adf78` |
-| 比较基线 | `esp32-p4-device-app-v1.5.0` / `97331363a0d3c4e6f89b5b93d39561e74087ba2a` |
-| 公开项目 Tag | `esp32-p4-device-monitor-v1.5.1` |
-| 公开路径 | `complete-applications/esp32-p4/device-monitor/` |
-| 目标板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |
-| ESP-IDF | `5.5.4` |
-
-来源 `1.5.0..1.5.1` 只有 1 个 release commit，精确范围为 6 个文件、12 行新增和 6 行删除。
-本补丁把绑定弹窗中的文字网址和二维码改为独立的 ThingConnect 设备管理入口，并同步四处应用
-版本。TiRTC SDK、媒体参数、网络架构、分区表和硬件配置均保持 `1.5.0` 基线不变。
-
-来源树共有 `1,208` 个文件、`102,917,698` bytes。按路径排序并使用
-`sha256  /path\n` 规范化后的清单 SHA-256 为
-`49601b87701041c678367863a41c66c36fc81ed380634b44840e13f7e2c4328a`。排除下述 3 项后，
-保留来源为 `1,205` 个文件、`97,904,533` bytes，规范化清单 SHA-256 为
-`6e9621387687724ca1c1fe22bb0c2e6bceed7a3f23a2435f29cc1f5ddc556ca1`。
-
-## 公开筛选
-
-来源 Tag 有 `1,208` 个文件。统一仓：
-
-- 保留 `1,205` 个来源路径。
-- 其中 `1,191` 个路径与来源 Tag 的 Git blob 字节完全一致。
-- 14 个路径按公开仓职责维护：项目 README、VERSION、媒体架构、SDK 校验清单、9 份
-  ESP-Hosted 文档，以及 1 份 ESP-LVGL 测试 README。
-- 额外维护 `SOURCE_PROVENANCE.md` 和 `docs/GETTING_STARTED_CN.md` 两份对外文档。
-
-未纳入的三个来源文件：
-
-- `.clangd`：开发机编辑器索引配置。
-- `sdkconfig`：生成配置；可复用默认值由 `sdkconfig.defaults` 提供。
-- `components/tirtc_sdk/lib/esp32s3/libTiRTC.a`：P4 工程不链接的 S3 静态库，且归档包含供应方
-  构建路径；公开 P4 包只保留目标平台库。
-
-ESP-Hosted 的 4 份协议文档保留统一仓已修正的相对链接；两份上游示例 README 把
-供应方 Linux 构建日志路径改为 `<esp-hosted-source>/...`。这些变换只处理文档可读性和
-公开卫生；组件 README、设计说明和 P4 功能评估板说明另修正了失效的目录锚点，不改变组件
-源码。ESP-LVGL 测试 README 只修正两个大小写错误的目录锚点。项目 README、VERSION 和
-媒体架构则按统一仓风格重写，并以
-`1.5.1` 代码常量为事实源。
-
-以下内容始终排除：
-
-- 开发仓 Git 元数据、内部协作资料和本机 IDE 配置。
-- `build*/`、`managed_components/`、`dependencies.lock`、日志和缓存。
-- `firmware/`、`release_assets/`、BIN、ELF、MAP 和压缩包。
-- 真实 Wi-Fi、设备密钥、access key、token 和个人配置。
-
-完整镜像只作为 GitHub Release 资产分发，不进入 Git 历史。
-
-## TiRTC SDK 字节契约
+## 唯一来源
 
 | 项目 | 内容 |
 | --- | --- |
-| API 版本 | `2.3.0` |
-| Nano source | `v2.3.0` / `1baf7c95f3ca715c9367b9c998417f647934dc35` |
-| TGWebRTC source | `tag.v1.5.12` / `41c9a25768ffe265c07f17ef78a6439607b19364` |
-| 嵌入 TGTRP BuildInfo | `tagv1.5.11` |
-| P4 `libTiRTC.a` 大小 | `1,827,850` bytes |
-| P4 library MD5 | `7e5fe37e9530bcaffce015583ae8cfb0` |
-| P4 library SHA-256 | `6dc4d437ea444761ca21e203fc9babb1799bb1f7fc261d7c523248fde0a96e67` |
+| 来源 Tag | `esp32-p4-device-app-v1.5.3` |
+| Tag object | `4ab50c48d685d3537c8f9bebdc0b2417ad35338d` |
+| 来源 commit | `06583eaf18d9326b9602684a7c509a3badf7dadc` |
+| 来源 tree | `1acc583f3601448e1656f18716924f70125fe0c7` |
+| 上一公开版本来源 | `esp32-p4-device-app-v1.5.1` / `8d26a2bc5267f6bf1db721730a210ce8bc2f7ccc` |
+| 安全修复父提交 | `esp32-p4-device-app-v1.5.2` / `48faa7b5c6e37dac7bf9f0aaf28d1142bef1f220` |
+| 公开 Tag | `esp32-p4-device-monitor-v1.5.3` |
+| 公开项目路径 | `complete-applications/esp32-p4/device-monitor/` |
 
-来源 SDK 7 项校验和已逐项核对；公开 P4 包删除 S3 库条目后保留 6 项。当前 P4 归档没有命中 Linux、Windows 或 WSL 的
-个人用户目录，也没有命中真实凭据。TGWebRTC 源 Tag 与库内 TGTRP BuildInfo 字符串不同，因此公开资料
-同时记录两者；仅写“TGTRP 1.5.12”会掩盖实际运行时元数据。
+从上一公开来源 `1.5.1` 到本版共有 26 个文件变化、1227 行新增和 128 行删除。来源 Tag 固定了
+功能代码、版本、SDK 和配置；开发仓之后的任何未提交内容都不属于这个版本。
 
-P4 重建保留以下项目修复：ICE callback 有界接收、RTC 调度让步、NACK scratch heap 化、
-真实容量传递和有界弱网恢复。完整身份由源码 commit、SDK 文件清单和静态库哈希共同确定。
+## 文件映射
 
-## H264 组件边界
+来源快照包含 `1,210` 个文件、`106,759,995` bytes；按路径排序的 `sha256  path\n` 清单摘要为：
 
-H264 组件以 Espressif `1.3.8`、commit `8e86030d` 为基线。三个新增文件与官方 commit
-逐字节一致；组件另有 4 个 P4 编码源文件补丁和本地 manifest 差异，覆盖输出溢出保护、
-persistent reference pool 和码率控制。公开仓保留这些代码，不把组件误写成“完整上游原件”。
-组件自己的许可证文件继续随源码保留。
+`343e6d36d293b4fdc19f02e27cf61b2935aeb26c4a6167f48bb604be1057c2f1`
+
+公开保留 `1,207` 个来源路径、`101,743,573` bytes；在公开文档改写前，对应来源清单摘要为：
+
+`2a3f83781a99650c1e284b6880108fa8fce7ce209efbe4f9d92a0aaaec7860e3`
+
+公开映射保持明确：
+
+- `1,193` 个来源文件直接保留 Git blob 字节，不改业务或构建逻辑。
+- 14 个来源路径由公开仓维护：项目 README、VERSION、媒体架构、SDK 校验清单、9 份
+  ESP-Hosted 文档及 1 份 ESP-LVGL 测试 README。
+- 额外提供本页和入门说明 `docs/GETTING_STARTED_CN.md`，因此公开项目共有 `1,209` 个文件。
+- 组件文档的既有变换限于相对链接、目录锚点和个人路径，不改变组件源码。
+
+以下 3 个来源文件明确排除：
+
+| 文件 | 原因 |
+| --- | --- |
+| `.clangd` | 开发机编辑器索引配置 |
+| `sdkconfig` | 生成配置；公开构建从 `sdkconfig.defaults` 展开 |
+| `components/tirtc_sdk/lib/esp32s3/libTiRTC.a` | P4 不使用的 S3 静态库 |
+
+公开 SDK 的 `SHA256SUMS.txt` 因此从来源 7 项变为 6 项。S3 开发库没有被修改或删除。
+开发仓 Git 历史、凭据、IDE 配置、构建目录、日志、生成依赖锁和固件均不随源码导入。
+完整 BIN 只放在 GitHub Releases，不进入 Git 历史。
+
+## SDK 契约
+
+本版 SDK 为 TiRTC `2.3.0` P4 validation rebuild，含项目补丁。Nano source 为
+`13e34c3e3e3dc6776be4713b5c1e3c17bd282766`；TGWebRTC source 为
+`e39114731ad488c88573d16f0855a1326d97c989`，另有补丁集摘要
+`e5b3109cc0dee3f0d8958c23a60f69b236d87acb909cac95c4d6bb24812dbbaf`。
+
+`1.5.3` 开发源已对 P4 库完成 `--strip-debug`，发布仓直接使用该 Tag 内的库，没有再次改写。
+
+| 归档 | 大小 | SHA-256 |
+| --- | --- | --- |
+| 脱敏前 | `14,815,866` bytes | `738c969244ab39c2b0eacc21068ecebc9bad736a4a5d713794836605d8e9f982` |
+| Tag 内公开库 | `4,748,802` bytes | `a7a01ffd496a55364c7e4d665ff3884d078147bba96752a965d97befca12e451` |
+
+99 个归档成员的顺序、2803 个 allocated sections、51554 个运行重定位和 1304 个归档符号
+索引条目保持等价。处理移除了个人路径和 SDK 源码行号调试信息，未重编 SDK，未修改代码或
+运行数据。校验工具随项目 `tools/check_sdk_debug_strip.py` 提供。
+
+RTC 配置使用 IDF URL parser 接受明确的 HTTPS 地址，原有按 SDK 版本降级 HTTP 的分支已移除。
+SDK 的服务端证书、CA bundle、hostname 与验证结果检查保留；连接失败不能通过明文重试掩盖。
+这项变更不涵盖设备原有的无凭据 HTTP HEAD 校时兜底。
 
 ## 构建与运行证据
 
-唯一正式构建以 repository tree `997d02622474578e10d94c1c56ffdf44aefad75b` 为输入；该 tree
-由公开可达的 build-input checkpoint `7cf7cc441dfc1a16d5c075a623713d4cbbb74002` 固定。构建使用
-ESP-IDF `5.5.4`、GCC `14.2.0_20260121` 和 `--no-ccache`，完成
-`1837/1837` 个步骤，编译 warning、error 和 ICE 均为 0。应用镜像为 `6,955,776` bytes，
-SHA-256 为 `1542c19052ae9bdb8804e38916c54f928e405ac06e6ae796faa5d46cd7c7e515`；最小 APP 分区
-剩余 `580,864` bytes（`7.71%`）。`0x0` 16 MiB 完整镜像 SHA-256 为
-`019eed4e047f9d1a1809c5fa0e441b94d2a509fe83c885e5eafc21adb89c0a7a`，没有复用 `1.5.0` 资产。
+公开正式构建从本次候选的确定 Git 提交执行，使用 ESP-IDF `5.5.4`、GCC
+`14.2.0_20260121`、独立生成配置和 `--no-ccache`。构建标识、配置、解析依赖、命令、结果及
+固件哈希由 Release 的 `release-manifest.json` 统一记录。若构建后补充文档结果，manifest 会
+验证编译输入仍与原构建提交一致，不把另一次源码状态的 BIN 混入本版。
 
-构建完成后只更新公开 Markdown 中的正式构建、固件和 Release 证据；代码、配置、SDK、分区表
-和依赖输入均未改变。`release-manifest.json` 记录 build-input commit、最终公开 commit/Tag、
-编译输入等价性、解析依赖、生成配置、完整镜像分段和所有 SHA-256。
+24 项主机测试直接编译实际 RTC 配置函数与 IDF URL parser，SDK/RTOS 副作用使用 stub。
+它证明地址策略及拒绝时的状态行为，不证明 P4 上的 TLS 握手。设备端验收应分别检查有效证书
+建连、错误主机名和不可信证书拒绝、失败无 HTTP 回退，以及 TLS 内存峰值和跨应用恢复。
 
-开发侧已有双设备呼叫、AI、IPC 重复切换和内存恢复记录，但 `1.5.1` 只调整绑定门户和版本，
-没有重新完成精确 Tag 的目标板回归。这些记录不能替代：
-
-- 从正式 Release 镜像烧录 P4，并确认 C6 ESP-Hosted/SDIO、Wi-Fi、绑定和平台在线。
-- IPC、设备互呼、微信 VoIP、AI Chat、AEC 和长时间运行。
-- 微信小程序 VoIP 与外部 IPC/H5 对端本轮的端到端人工回归。
-- 每次退出后摄像头、音频、解码池、显示和 TiRTC 连接均可被下一会话重新获取。
-
-静态校验能证明公开源码、版本记录和 SDK 文件相互一致；干净构建能证明候选可编译；烧录、
-联网、真实媒体和长稳仍需目标板分别验证。
+开发侧已有的业务测试只按原测试条件引用。构建、烧录、TLS 握手、真实音视频和长时间运行
+属于不同证据层；公开说明不把其中一种写成另一种。

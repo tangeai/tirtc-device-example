@@ -93,6 +93,12 @@ esp_err_t rtc_transport_stop(void)
 
 esp_err_t rtc_transport_disconnect(void)
 {
+    /* Application teardown is intentionally idempotent. A page can own the
+     * logical RTC resource before network/bootstrap has initialized TiRTC, so
+     * releasing that page must not call into an uninitialized session. */
+    if (tirtc_session_get_state() == TIRTC_SESSION_STATE_STOPPED) {
+        return ESP_OK;
+    }
     return tirtc_session_disconnect();
 }
 

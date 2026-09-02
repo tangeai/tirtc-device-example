@@ -145,6 +145,10 @@ CONFIG_ESP_HOSTED_SDIO_PIN_D3=17
 CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_STREAMING_MODE=y
 CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE=20
 CONFIG_ESP_HOSTED_SDIO_RX_Q_SIZE=20
+# TiRTC/KCP must preserve control and acknowledgement datagrams during short
+# C6 Wi-Fi queue bursts. Use the existing blocking host SDIO queue as
+# backpressure instead of ESP-Hosted's synchronous host-side packet dropping.
+# CONFIG_ESP_HOSTED_HOST_TO_ESP_WIFI_DATA_THROTTLE is not set
 # ESP-Hosted's P4+C6 profile uses deeper receive/aggregation queues than the
 # ESP-IDF defaults. Keep static TX buffers for deterministic internal-RAM use,
 # while moving eligible Wi-Fi/lwIP allocations to PSRAM via

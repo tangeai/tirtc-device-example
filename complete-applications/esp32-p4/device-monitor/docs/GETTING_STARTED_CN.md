@@ -8,13 +8,13 @@ P4+C6 前置检查、构建、烧录、首次联网和基础功能确认。项�
 
 | 项目 | 本版本要求 |
 | --- | --- |
-| 应用 | TiRTC ESP32-P4 Device Monitor `1.5.1` |
+| 应用 | TiRTC ESP32-P4 Device Monitor `1.5.3` |
 | 目标板 | Waveshare ESP32-P4-WIFI6-Touch-LCD-3.5 |
 | 主芯片 | ESP32-P4 |
 | 网络芯片 | ESP32-C6，运行 ESP-Hosted slave |
 | P4 与 C6 链路 | 4-bit、40 MHz SDIO |
 | ESP-IDF | `5.5.4` |
-| TiRTC SDK | `2.3.0` 官方源码重建版，含 P4 传输稳定性修复 |
+| TiRTC SDK | `2.3.0` P4 验证重建与补丁版，公开归档已移除行号调试信息 |
 | Flash | `16MB` |
 | 网络 | 2.4 GHz Wi-Fi，可访问 TiRTC/ThingConnect 服务 |
 | 交付形式 | 源码与 `0x0` 完整烧录镜像 |
@@ -45,7 +45,7 @@ P4 负责 UI、摄像头、音频、编解码和 TiRTC 应用；C6 只负责 Wi-
 ```powershell
 git clone https://github.com/tangeai/tirtc-device-example.git
 cd tirtc-device-example
-git checkout esp32-p4-device-monitor-v1.5.1
+git checkout esp32-p4-device-monitor-v1.5.3
 cd complete-applications/esp32-p4/device-monitor
 ```
 
@@ -57,10 +57,10 @@ Select-String -Path CMakeLists.txt -Pattern 'PROJECT_VER'
 Select-String -Path components/tirtc_sdk/include/tiRTC.h -Pattern 'TIRTC_VERSION_'
 ```
 
-预期应用版本为 `1.5.1`，TiRTC SDK API 版本为 `2.3.0`。SDK 使用 Nano `v2.3.0` 与
-TGWebRTC `tag.v1.5.12` 源码基线，并包含 P4 ICE/TGTRP 稳定性修复。库内 TGTRP BuildInfo
-仍显示 `tagv1.5.11`；不能只看一个版本字符串替换静态库。完整 commit 和哈希见
-[VERSION.md](../VERSION.md)。
+预期应用版本为 `1.5.3`，TiRTC SDK API 版本为 `2.3.0`。SDK 是包含 P4 传输调度、NACK、
+码率恢复和 TURN 查找栈修正的验证重建版，不能只凭 API 版本号与官方包互换。公开库经过
+`--strip-debug` 处理，运行节、重定位和归档成员保持等价；SDK 内部源码行号调试需使用
+本地保留的原始库。完整 commit、补丁身份与哈希见 [VERSION.md](../VERSION.md)。
 
 ## 4. 安装并进入 ESP-IDF 5.5.4
 
@@ -142,6 +142,11 @@ idf.py build
 这四个入口职责不同，不能互换。修改产品环境时要分别核对，不要把 API 或 MQTT 地址生成到
 面向用户的绑定二维码里。
 
+RTC 地址单独执行入口校验：使用带 host 的小写 `https://`，可带合法端口、路径和查询参数；
+userinfo、fragment、端口 `0` 或越界端口、未终止字符串会被拒绝。RTC 关闭时允许空地址。
+应用不会再按 SDK 版本改写为 HTTP；TLS 证书链、主机名或校验结果失败时，保留错误并排查
+时间、证书和服务配置，不改用明文地址绕过认证。
+
 ### 6.2 源码配置：只改产品策略
 
 运行开关位于：
@@ -160,6 +165,9 @@ idf.py menuconfig
 旧本地队列压力自动弱网降级、逐帧日志和 LAN 调试服务器默认关闭。没有明确验证目标时，
 先保留默认值。
 
+P4 微信主动呼叫默认使用正式版 `wx_version_type=0`，配置项为
+`APP_CONFIG_WECHAT_VOIP_ACTIVE_CALL_VERSION_TYPE`。本次不改变 S3 的体验版 `2` 配置。
+
 不要提交真实 Wi-Fi 密码、device secret、access key、token 或平台账号。即使只是临时联调，
 也优先使用屏幕配置和 NVS。
 
@@ -167,10 +175,10 @@ idf.py menuconfig
 
 ### 7.1 快速体验：烧录 Release 完整镜像
 
-从 [`esp32-p4-device-monitor-v1.5.1` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.5.1) 下载以下三个文件：
+从 [`esp32-p4-device-monitor-v1.5.3` Release](https://github.com/tangeai/tirtc-device-example/releases/tag/esp32-p4-device-monitor-v1.5.3) 下载以下三个文件：
 
 ```text
-esp32p4-tirtc-device-monitor-full-v1.5.1.bin
+esp32p4-tirtc-device-monitor-full-v1.5.3.bin
 release-manifest.json
 SHA256SUMS.txt
 ```
@@ -181,7 +189,7 @@ SHA256SUMS.txt
 PowerShell 可执行：
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\esp32p4-tirtc-device-monitor-full-v1.5.1.bin
+Get-FileHash -Algorithm SHA256 .\esp32p4-tirtc-device-monitor-full-v1.5.3.bin
 ```
 
 然后：
@@ -222,7 +230,7 @@ Windows 端口示例为 `COM7`，Linux 示例为 `/dev/ttyACM0`；请使用电�
 复位后先看固件身份：
 
 ```text
-firmware version: 1.5.1 project=tirtc_esp32p4_device_app ...
+firmware version: 1.5.3 project=tirtc_esp32p4_device_app ...
 system ready: ESP32-P4 TiRTC dashboard
 ```
 
@@ -282,18 +290,20 @@ binding verification code ready: mqtt subscribed
 - IPC 的 P4 上行是 `1280x960@20fps`、`4Mbps` H264，GOP 为 `40` 帧 / `2s`。
 - 设备呼叫上行是 `384x256@12fps`、`256kbps` H264，名义 GOP 为 `192` 帧 / `16s`；
   流开始、订阅恢复和对端请求仍会触发关键帧。
-- 微信上行是 `480x320@15fps`、`480kbps` H264，名义 GOP 为 `30` 帧 / `2s`。
-- 微信服务端到 P4 的下行请求是 `640x480` MJPEG，P4 硬解后居中 `cover` 到 `480x320`。
+- 微信上行是 `640x480@15fps`、目标 `800kbps` H264，名义 GOP 为 `30` 帧 / `2s`。
+- 微信服务端到 P4 的下行请求是 `640x480` MJPEG，实际帧可以更小，P4 硬解后居中
+  `cover` 到 `480x320`；下行未固定帧率或码率。
 - 本工程没有配置或证明微信手机端为 720p；手机采集档位由微信和服务端决定。
 
-一次看到首帧还不够。继续观察帧率、码率、音频连续性、队列压力，再连续进入/退出场景，
-确认摄像头、音频、显示和连接都能被下一次会话重新获取。
+这些码率是编码目标，不是吞吐保证。先用静态画面记录基线，再让摄像头拍摄持续高运动内容，
+观察帧率、码率、编码耗时、音频连续性和队列压力。弱网分别覆盖同一设备的入站和出站，
+再连续进入/退出场景，确认摄像头、音频、显示和连接都能被下一次会话重新获取。
 
-## 10. 用 1.5.1 的状态和日志定位第一处异常
+## 10. 用 1.5.3 的状态和日志定位第一处异常
 
-1.5.1 继承 1.5.0 的 NVS 与 RTC 生命周期门禁、TGMP 码率、持久 PSRAM 池、SDIO/Wi-Fi 恢复、
-AEC、解码/显示队列和结构化网络指标。遇到绑定失败、重复连接或媒体停滞时，先找最早停止
-推进的一层，不要直接擦除 NVS、反复重启、降分辨率或关闭功能。
+1.5.3 保留 NVS 与 RTC 生命周期、TGMP 码率、持久 PSRAM 池、AEC、解码/显示队列和结构化
+网络指标，并补充 HTTPS 地址校验、RPC 恢复与 SDIO 诊断。遇到绑定失败、重复连接或媒体
+停滞时，先找最早停止推进的一层，不要直接擦除 NVS、反复重启、降分辨率或关闭功能。
 
 ### 10.1 NVS 和绑定重置
 
@@ -323,6 +333,9 @@ worker 打开 namespace、写入或删除、commit、关闭 handle，再通知�
 
 连续切换 AI Chat、设备呼叫和微信呼叫时，应看到每一轮连接先完整关闭，下一轮才开始提交。
 如果 SDK 已收到提交却始终没有回调，需要保留时间线；仅看到 UI 返回不能证明 attempt 已释放。
+
+出现 `rtc service endpoint rejected` 时，配置尚未交给 SDK。先核对地址格式、RTC enabled
+状态和服务发现结果；这与 SDK 进入 TLS 后的证书认证失败是两个阶段。
 
 ### 10.3 摄像头和上行节拍
 
@@ -389,6 +402,17 @@ worker 是否唤醒、会话 generation 是否仍有效，再看 SDK 返回值�
 Wi-Fi 密码、device secret、token 或 access key，但状态和呼叫命令可能显示对端 `device_id`
 或联系人运行状态。采集串口日志前应按测试对象授权处理，外发日志时先脱敏设备标识。
 
+### 10.9 Hosted RPC 与 SDIO
+
+Wi-Fi 连接、断开或配置 RPC 返回错误时，网络 owner 可以请求重建 Hosted 和 STA netif。
+依次记录 `recovery scheduled`、`recovery begin`、具体失败步骤、`recovery complete`，
+随后继续确认 got-IP、MQTT 和 TiRTC 恢复。`recovery complete` 本身不证明已经重新联网。
+
+SDIO 驱动会拒绝全 `0xff` 寄存器快照，在确认中断前检查读数和包长，并保留有限重试、失败
+计数与 TX throttle 起止/丢包日志。当前依赖不提供 `esp_hosted_event.h`，因此 Hosted 事件
+与心跳恢复分支不参与编译，不能按“心跳会自动恢复”设计测试预期。异常读数的物理根因
+尚未证实；应保留触发前后的供电、连线、C6 状态、SDIO 与 RPC 时间线。
+
 ## 11. 常见问题
 
 | 现象 | 先检查 | 下一步 |
@@ -405,7 +429,9 @@ Wi-Fi 密码、device secret、token 或 access key，但状态和呼叫命令�
 | AI/呼叫快速切换后一直 busy | active/closing connection、WHIP attempt、session generation | 先确认上一连接完成幂等关闭，过期任务没有继续提交 |
 | 同一句柄反复出现关闭日志 | stale-closing 回调和 disconnect pending | 记录第一次 shutdown；重复请求应被忽略或幂等完成，不应再次销毁 SDK 句柄 |
 | IPC 远端黑屏 | 摄像头启动、H264 首帧、订阅状态 | 按 camera -> encoder -> TiRTC -> subscriber 分段看首帧 |
-| 微信视频黑屏 | 先分清上行还是下行 | 上行查 `480x320` H264；下行查 `640x480` MJPEG 请求、首包和 JPEG 解码 |
+| 微信视频黑屏 | 先分清上行还是下行 | 上行查 `640x480` H264；下行查 `640x480` MJPEG 请求、实际帧尺寸、首包和 JPEG 解码 |
+| RTC 地址在配置时被拒绝 | `rtc service endpoint rejected` | 核对显式 HTTPS、host、端口及禁用 RTC 的空地址规则，不改用 HTTP |
+| Hosted 显示恢复完成但未联网 | RPC 错误、重建步骤、got-IP | 继续核对 C6/SDIO、Wi-Fi 与 DHCP，不能把重建完成当作业务恢复 |
 | 微信画面比例不对 | 服务端实际下发尺寸和方向 | 记录实际 MJPEG 尺寸；不要按“720p”假设修改 P4 缩放 |
 | 通话有明显回声 | AEC 是否 active、reference 是否有效 | 有同步录音证据后再调整 `APP_AUDIO_AEC_REF_DELAY_MS` |
 | 设备视频周期卡一下 | GOP、`avg_gap_us`、`video tx liveness` | 先确认设备呼叫名义 GOP 为 192 帧，并检查强制 IDR、采集、队列和 SDK 哪一段先停 |
@@ -435,15 +461,12 @@ Wi-Fi 密码、device secret、token 或 access key，但状态和呼叫命令�
 
 ## 13. 这份发布已经证明到哪里
 
-公开源码固定到来源 Tag 和 commit，应用/SDK 版本及静态库哈希已有记录。正式候选已使用
-ESP-IDF `5.5.4`、`--no-ccache` 完成唯一一次干净构建，`1837/1837` 个步骤通过且编译 warning、
-error、ICE 均为 0。应用镜像为 `6,955,776` bytes，最小 APP 分区剩余 `580,864` bytes
-（`7.71%`）；实际烧录分段、完整镜像和 SHA-256 写入 `release-manifest.json`。16 MiB 完整
-镜像只作为 GitHub Release 资产，不进入 Git 历史。
+`1.5.3` 开发来源、应用/SDK 身份与媒体默认参数已列明。本次公开版本的正式构建结果、
+应用大小、APP 分区余量和附件哈希待补，不能复用 `1.5.1` 的通过结果。构建完成后，实际
+烧录分段、16 MiB 完整镜像和 SHA-256 将记录在同一 Release 的 `release-manifest.json`。
+完整镜像只作为 GitHub Release 资产，不进入 Git 历史。
 
-干净构建证明候选能在记录的环境中完成编译和链接。烧录成功、C6/SDIO 可用、平台在线、
-音视频首帧和长稳结果仍要按上面的步骤在目标板上分别确认。这样记录问题时，大家能立刻知道
-证据停在哪一层，不必从头猜。开发侧已有双设备呼叫、AI、IPC 重复切换和内存恢复记录；
-最新持久池修改后，微信小程序外部实呼和弱网矩阵没有重新完成。COM7/COM11 上的启明板仍是
-旧版 `1.3.2`，不能当作 `1.5.1` 证据。精确 Release 固件仍应分别核对烧录、C6/SDIO、
-联网、绑定、媒体和长稳。
+本版本尚未执行目标板烧录、C6/SDIO、联网绑定、微信正式版实呼、媒体和长稳回归。HTTPS
+还需分别验证有效证书成功、错误证书和错误主机名失败；主机 URL 校验不代替 TLS 真机验证。
+视频回归需包含静态/高运动对照、同设备双向弱网和跨应用重复切换。构建、连接成功、媒体
+首帧和长时间稳定运行各自记录，任何一项通过都不替代其他证据。

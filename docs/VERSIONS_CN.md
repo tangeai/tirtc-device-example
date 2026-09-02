@@ -13,7 +13,7 @@
 | 最小系统例子 | ESP32-S3 最小系统例子 | `0.8.0` | `2.2.1` | 独立开发目录快照 | `esp32-s3-minimal-system-v0.8.0` |
 | 最小系统例子 | ESP32-P4 最小系统例子 | `0.2.0` | `2.3.0` | 独立开发目录快照 | `esp32-p4-minimal-system-v0.2.0` |
 | 完整应用 | ESP32-S3 Device Monitor | `1.9.7` | `2.3.0 mini` | `v1.9.7` / `58c2d15` / tree `206b237` | `esp32-s3-device-monitor-v1.9.7` |
-| 完整应用 | ESP32-P4 Device Monitor | `1.5.1` | `2.3.0` 官方源码重建版 | `esp32-p4-device-app-v1.5.1` / `8d26a2bc5267f6bf1db721730a210ce8bc2f7ccc` | `esp32-p4-device-monitor-v1.5.1` |
+| 完整应用 | ESP32-P4 Device Monitor | `1.5.3` | `2.3.0` P4 验证重建与补丁版 | `esp32-p4-device-app-v1.5.3` / `06583eaf18d9326b9602684a7c509a3badf7dadc` | `esp32-p4-device-monitor-v1.5.3` |
 | 完整应用 | G32S10X Device Monitor | `0.1.1` | `2.2.1` | `v0.1.1` / `5630152` | `g32s10x-device-monitor-v0.1.1` |
 
 ESP32-S3 最小系统例子的开发目录没有可公开引用的 Git 历史。当前版本保留其 `88` 文件核心源码
@@ -43,17 +43,24 @@ TiRTC SDK 以 `db7290f` 为功能基础，另含 `13e34c3` 的 HTTPS 服务端�
 复活已结束房间，并把 `45` 秒响铃与 `40` 秒 P2P 建连分开计时。SDK 的 ICE UDP 与 TGTRP
 音频抖动处理增加有界公平调度，避免一次网络回调长期占用 RTC 调度线程。
 
-ESP32-P4 Device Monitor `1.5.1` 的开发来源为 annotated Tag
-`esp32-p4-device-app-v1.5.1`、Tag object
-`4a0fa821b53551432c8341763cf68a61c81285b5`、commit
-`8d26a2bc5267f6bf1db721730a210ce8bc2f7ccc`、tree
-`03e8f4708f69a96df13b8115376351075e5adf78`。本补丁把绑定弹窗和二维码切换到独立用户门户
-`https://demo-open.tange-ai.com/devices`；设备内部服务发现和业务 API 保持独立。TiRTC API 版本为 `2.3.0`，Nano 源码为
-`v2.3.0 / 1baf7c95f3ca715c9367b9c998417f647934dc35`，TGWebRTC 源码基线为
-`tag.v1.5.12 / 41c9a25768ffe265c07f17ef78a6439607b19364`。当前静态库内嵌的
-TGTRP BuildInfo 仍为 `tagv1.5.11`，因此源码基线和运行时 BuildInfo 分开记录；P4
-`libTiRTC.a` 为 `1,827,850` bytes，SHA-256 为
-`6dc4d437ea444761ca21e203fc9babb1799bb1f7fc261d7c523248fde0a96e67`。
+ESP32-P4 Device Monitor `1.5.3` 的开发来源为 Tag `esp32-p4-device-app-v1.5.3`、commit
+`06583eaf18d9326b9602684a7c509a3badf7dadc`、tree
+`1acc583f3601448e1656f18716924f70125fe0c7`。公开更新以 `1.5.1` 为比较基线，包含开发版
+`1.5.2` 的媒体、SDK 与网络改动，以及 `1.5.3` 的 HTTPS 地址策略和 SDK 调试信息清理。
+P4 微信主动呼叫使用正式版 `wx_version_type=0`；S3 的体验版 `wx_version_type=2` 保持不变。
+
+TiRTC API 版本为 `2.3.0`，Nano 源码为 `13e34c3e3e3dc6776be4713b5c1e3c17bd282766`，
+TGWebRTC 源码为 `e39114731ad488c88573d16f0855a1326d97c989`，另含校验标识为
+`e5b3109cc0dee3f0d8958c23a60f69b236d87acb909cac95c4d6bb24812dbbaf` 的补丁集。
+该库是 P4 验证重建与补丁版，不能仅凭 `2.3.0` 版本号视为未经修改的官方包。
+P4 `libTiRTC.a` 为 `4,748,802` bytes，SHA-256 为
+`a7a01ffd496a55364c7e4d665ff3884d078147bba96752a965d97befca12e451`。
+`--strip-debug` 只移除 SDK 调试信息；99 个成员的分配节内容、运行符号、重定位和归档符号
+索引保持等价，SDK 内部源码行号调试需使用本地保留的原始库。
+
+RTC 配置入口要求带主机名的显式 `https://` 地址，拒绝 userinfo、fragment、非法端口和
+未终止字符串。RTC 关闭时允许空地址；校验失败不替换当前配置，也不触发 SDK 重置。
+应用不再按 SDK 版本改写为 HTTP，SDK 保留证书链、主机名和校验结果检查。
 
 ## 构建与交付证据
 
@@ -65,7 +72,7 @@ TGTRP BuildInfo 仍为 `tagv1.5.11`，因此源码基线和运行时 BuildInfo �
 | S3 最小系统例子 `0.8.0` | 目录快照、SDK、媒体来源、图片脱敏、凭据和公开路径已核对 | ESP-IDF `5.5.4` 的 4 MB 配置干净构建通过；app 大小见 Release manifest | 源码与 `0x0` 4 MB 完整镜像 |
 | P4 最小系统例子 `0.2.0` | 目录快照、SDK、C6/C61 Hosted 兼容配置、媒体和凭据已核对 | ESP-IDF `5.5.4` 的 4 MB 配置干净构建通过；app 大小见 Release manifest | 源码与 `0x0` 4 MB 完整镜像 |
 | S3 Device Monitor `1.9.7` | 来源 Tag/commit/tree、SDK HTTPS 认证与有界公平调度、公开筛选和凭据范围已核对 | 已从公开代码导入提交执行唯一 ESP-IDF `5.5.4`、GCC `14.2.0_20260121`、`--no-ccache` 正式干净构建，完成 `1767/1767` 且 compiler warning/error/ICE 均为 0；app `7,613,216` 字节、SHA-256 `49349c1e1755ae5265e3ddea6f57166ccf60b90cdca7d1a1a004539f4faf43ff`、分区剩余 `185,568` 字节（`2.38%`） | 源码、16 MB 完整镜像与 OTA app；容量余量较紧 |
-| P4 Device Monitor `1.5.1` | 来源 Tag/commit/tree、P4 公开包 SDK 6 项哈希、绑定门户与设备端点职责、凭据范围已核对 | 已完成唯一 ESP-IDF `5.5.4`、GCC `14.2.0_20260121`、`--no-ccache` 正式干净构建，完成 `1837/1837` 且编译 warning/error/ICE 均为 0；app `6,955,776` 字节、SHA-256 `1542c19052ae9bdb8804e38916c54f928e405ac06e6ae796faa5d46cd7c7e515`、分区剩余 `580,864` 字节（`7.71%`） | 源码与 `0x0` 16 MB 完整镜像 |
+| P4 Device Monitor `1.5.3` | 开发来源与 HTTPS/媒体/Hosted 编译边界已按源码核对；公开筛选、SDK 哈希和静态检查以本次发布记录为准 | 待本次 ESP-IDF `5.5.4` 正式干净构建；app 大小、分区余量和构建诊断待补，不沿用 `1.5.1` 结果 | 计划交付源码、`0x0` 16 MiB 完整镜像、SHA256SUMS 和 manifest |
 | G32S10X Device Monitor `0.1.1` | 来源 Tag、SDK、君正覆盖层、文件系统打包范围已核对 | 固件构建通过；文件系统在同一 SDK 树恢复打包，发布树与构建树为 `compile-input-equivalent` | 源码、主固件与两个 YAFFS 镜像 |
 
 本次最小系统项目改名没有改变功能代码、SDK、媒体或板级配置。S3 与 P4 仍分别从最终公开
@@ -86,6 +93,11 @@ SDK 的证书链、hostname 和 verify flags 处理已核对到源码、对象�
 目标板上的有效证书成功、错误证书或错误主机名失败测试，也没有本版本绑定、MQTT 和 RTC 业务
 回归；这些运行证据不能由静态检查或构建结果替代。
 
+P4 `1.5.3` 尚未完成正式公开构建或目标板回归。需要分别验证有效 HTTPS 成功、无效证书与
+错误主机名失败、微信正式版实呼、IPC/设备呼叫/AI 切换、动态画面双向弱网和长时间运行。
+Hosted 当前依赖没有 `esp_hosted_event.h`，事件与心跳恢复分支不参与编译；可用路径为 Wi-Fi
+RPC 错误触发 Hosted 重建与 SDIO 异常读数防护。此处不声明物理链路故障根因已经修复。
+
 ## P4 媒体参数
 
 媒体方向以设备端为观察点：
@@ -93,9 +105,12 @@ SDK 的证书链、hostname 和 verify flags 处理已核对到源码、对象�
 - IPC 上行：`1280x960@20fps`、`4Mbps` H264。
 - 设备呼叫上行：`384x256@12fps`、`256kbps` H264；设备下行解码上限同为
   `384x256`，显示到 `480x320`。
-- 微信设备上行：`480x320@15fps`、`480kbps` H264。
-- 微信下行：请求 `640x480` MJPEG，由 P4 硬件 JPEG 解码后以 `cover` 显示到
-  `480x320` 屏幕。
+- 微信设备上行：`640x480@15fps`、目标 `800kbps` H264。
+- 微信下行：请求 `640x480` MJPEG，服务端实际帧可以更小；由 P4 硬件 JPEG 解码后以
+  `cover` 显示到 `480x320` 屏幕，下行未固定帧率或码率。
+
+这些是源码默认档位，码率为编码目标，不是实际网络吞吐保证。SDK/TGMP 码率反馈默认开启，
+旧本地队列压力自动弱网调节关闭，只有应用控制任务负责把 SDK 目标应用到编码器。
 
 P4 固件没有配置或证明微信客户端侧 `720p` 原始采集分辨率。网页、小程序或手机端的采集参数
 属于对端能力，不能从设备固件的上行编码配置推导。

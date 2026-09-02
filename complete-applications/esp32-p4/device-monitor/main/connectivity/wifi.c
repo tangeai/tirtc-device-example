@@ -8,6 +8,7 @@
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
+#include "esp_hosted.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
@@ -21,14 +22,26 @@
 
 #include "platform_storage.h"
 
+#if __has_include("esp_hosted_event.h")
+#include "esp_hosted_event.h"
+#define WIFI_HOSTED_EVENT_RECOVERY_SUPPORTED 1
+#else
+#define WIFI_HOSTED_EVENT_RECOVERY_SUPPORTED 0
+#endif
+
 static const char *TAG = "wifi_mgr";
 
 #define WIFI_CONNECTED_BIT      BIT0
 #define WIFI_FAIL_BIT           BIT1
 #define WIFI_SCAN_DONE_BIT      BIT2
+#define WIFI_HOSTED_UP_BIT      BIT3
 #define WIFI_MAX_RETRIES        8
 #define WIFI_WAIT_MS            22000
 #define WIFI_BACKGROUND_RECOVERY_INTERVAL_MS 30000U
+#define WIFI_HOSTED_HEARTBEAT_INTERVAL_SEC 5
+#define WIFI_HOSTED_HEARTBEAT_TIMEOUT_MS 20000U
+#define WIFI_HOSTED_RECOVERY_RETRY_MS 5000U
+#define WIFI_HOSTED_RECOVERY_TASK_STACK_SIZE (6 * 1024)
 #define WIFI_INVALID_RSSI       (-127)
 #define WIFI_NVS_NAMESPACE      "wifi"
 #define WIFI_NVS_KEY_SSID       "ssid"
@@ -46,6 +59,17 @@ static const char *TAG = "wifi_mgr";
 #define WIFI_SCAN_TASK_PRIORITY 5
 #define WIFI_SCAN_TASK_CORE 1
 
+typedef enum {
+    WIFI_HOSTED_RECOVERY_NONE = 0,
+    WIFI_HOSTED_RECOVERY_TRANSPORT_FAILURE,
+    WIFI_HOSTED_RECOVERY_TRANSPORT_DOWN,
+    WIFI_HOSTED_RECOVERY_UNEXPECTED_CP_INIT,
+    WIFI_HOSTED_RECOVERY_HEARTBEAT_TIMEOUT,
+    WIFI_HOSTED_RECOVERY_DISCONNECT_RPC,
+    WIFI_HOSTED_RECOVERY_CONNECT_RPC,
+    WIFI_HOSTED_RECOVERY_CONFIG_RPC,
+} wifi_hosted_recovery_reason_t;
+
 static EventGroupHandle_t s_wifi_event_group;
 static esp_netif_t *s_wifi_sta_netif;
 static wifi_status_t s_wifi_status;
@@ -58,6 +82,16 @@ static bool s_wifi_resume_connect_after_scan;
 static bool s_wifi_pending_explicit;
 static bool s_wifi_release_requested;
 static bool s_wifi_reconfig_in_progress;
+static bool s_wifi_hosted_runtime_initialized;
+static bool s_wifi_hosted_recovery_requested;
+static bool s_wifi_hosted_recovery_in_progress;
+static bool s_wifi_hosted_heartbeat_configured;
+static bool s_wifi_hosted_seen_cp_init;
+static uint32_t s_wifi_hosted_last_heartbeat_ms;
+static uint32_t s_wifi_hosted_recovery_due_ms;
+static uint32_t s_wifi_hosted_recovery_attempts;
+static esp_err_t s_wifi_hosted_recovery_error;
+static wifi_hosted_recovery_reason_t s_wifi_hosted_recovery_reason;
 static uint32_t s_wifi_connect_started_ms;
 static TickType_t s_wifi_connect_started_tick;
 static uint32_t s_wifi_background_recovery_due_ms;
@@ -73,6 +107,10 @@ static TaskHandle_t s_wifi_scan_task;
 static TaskHandle_t s_wifi_connect_watchdog_task;
 static portMUX_TYPE s_wifi_lock = portMUX_INITIALIZER_UNLOCKED;
 
+#if WIFI_HOSTED_EVENT_RECOVERY_SUPPORTED
+static esp_event_handler_instance_t s_wifi_hosted_event_instance;
+#endif
+
 typedef enum {
     WIFI_SCAN_RESUME_NONE = 0,
     WIFI_SCAN_RESUME_CONNECT,
@@ -85,6 +123,10 @@ static void wifi_connect_watchdog_task(void *ctx);
 static void wifi_scan_task(void *ctx);
 static wifi_scan_resume_action_t wifi_finish_scan_state_locked(void);
 static void wifi_resume_connect_if_needed(wifi_scan_resume_action_t action);
+static void wifi_request_hosted_recovery(wifi_hosted_recovery_reason_t reason, esp_err_t error);
+static esp_err_t wifi_recover_hosted_transport(wifi_hosted_recovery_reason_t reason,
+                                               esp_err_t trigger_error,
+                                               uint32_t attempt);
 
 static uint32_t wifi_uptime_ms(void)
 {
@@ -95,6 +137,118 @@ static bool wifi_deadline_reached(uint32_t now_ms, uint32_t deadline_ms)
 {
     return deadline_ms != 0U && (int32_t)(now_ms - deadline_ms) >= 0;
 }
+
+static const char *wifi_hosted_recovery_reason_name(wifi_hosted_recovery_reason_t reason)
+{
+    switch (reason) {
+    case WIFI_HOSTED_RECOVERY_TRANSPORT_FAILURE:
+        return "transport-failure";
+    case WIFI_HOSTED_RECOVERY_TRANSPORT_DOWN:
+        return "transport-down";
+    case WIFI_HOSTED_RECOVERY_UNEXPECTED_CP_INIT:
+        return "unexpected-cp-init";
+    case WIFI_HOSTED_RECOVERY_HEARTBEAT_TIMEOUT:
+        return "heartbeat-timeout";
+    case WIFI_HOSTED_RECOVERY_DISCONNECT_RPC:
+        return "disconnect-rpc";
+    case WIFI_HOSTED_RECOVERY_CONNECT_RPC:
+        return "connect-rpc";
+    case WIFI_HOSTED_RECOVERY_CONFIG_RPC:
+        return "config-rpc";
+    case WIFI_HOSTED_RECOVERY_NONE:
+    default:
+        return "none";
+    }
+}
+
+static void wifi_request_hosted_recovery(wifi_hosted_recovery_reason_t reason, esp_err_t error)
+{
+    bool scheduled = false;
+    const uint32_t now_ms = wifi_uptime_ms();
+
+    taskENTER_CRITICAL(&s_wifi_lock);
+    if (s_wifi_initialized && s_wifi_config.enabled && !s_wifi_release_requested &&
+        !s_wifi_hosted_recovery_in_progress) {
+        if (!s_wifi_hosted_recovery_requested) {
+            s_wifi_hosted_recovery_requested = true;
+            s_wifi_hosted_recovery_reason = reason;
+            s_wifi_hosted_recovery_error = error;
+            s_wifi_hosted_recovery_due_ms = now_ms;
+            scheduled = true;
+        }
+    }
+    taskEXIT_CRITICAL(&s_wifi_lock);
+
+    if (!scheduled) {
+        return;
+    }
+
+    ESP_LOGW(TAG,
+             "ESP-Hosted recovery scheduled: reason=%s error=%s",
+             wifi_hosted_recovery_reason_name(reason),
+             esp_err_to_name(error));
+    if (s_wifi_connect_watchdog_task != NULL) {
+        xTaskNotifyGive(s_wifi_connect_watchdog_task);
+    }
+}
+
+#if WIFI_HOSTED_EVENT_RECOVERY_SUPPORTED
+static void wifi_hosted_event_handler(void *arg,
+                                      esp_event_base_t event_base,
+                                      int32_t event_id,
+                                      void *event_data)
+{
+    (void)arg;
+    (void)event_data;
+
+    if (event_base != ESP_HOSTED_EVENT) {
+        return;
+    }
+
+    if (event_id == ESP_HOSTED_EVENT_TRANSPORT_UP) {
+        if (s_wifi_event_group != NULL) {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_HOSTED_UP_BIT);
+        }
+        return;
+    }
+
+    if (event_id == ESP_HOSTED_EVENT_CP_HEARTBEAT) {
+        const uint32_t now_ms = wifi_uptime_ms();
+        taskENTER_CRITICAL(&s_wifi_lock);
+        s_wifi_hosted_last_heartbeat_ms = now_ms;
+        taskEXIT_CRITICAL(&s_wifi_lock);
+        return;
+    }
+
+    if (event_id == ESP_HOSTED_EVENT_CP_INIT) {
+        bool unexpected = false;
+        taskENTER_CRITICAL(&s_wifi_lock);
+        unexpected = s_wifi_hosted_seen_cp_init && s_wifi_initialized &&
+                     !s_wifi_hosted_recovery_in_progress && !s_wifi_release_requested;
+        s_wifi_hosted_seen_cp_init = true;
+        taskEXIT_CRITICAL(&s_wifi_lock);
+        if (unexpected) {
+            wifi_request_hosted_recovery(WIFI_HOSTED_RECOVERY_UNEXPECTED_CP_INIT, ESP_FAIL);
+        }
+        return;
+    }
+
+    if (event_id == ESP_HOSTED_EVENT_TRANSPORT_FAILURE) {
+        wifi_request_hosted_recovery(WIFI_HOSTED_RECOVERY_TRANSPORT_FAILURE, ESP_FAIL);
+        return;
+    }
+
+    if (event_id == ESP_HOSTED_EVENT_TRANSPORT_DOWN) {
+        bool expected = false;
+        taskENTER_CRITICAL(&s_wifi_lock);
+        expected = s_wifi_hosted_recovery_in_progress || s_wifi_release_requested;
+        taskEXIT_CRITICAL(&s_wifi_lock);
+        if (!expected) {
+            wifi_request_hosted_recovery(WIFI_HOSTED_RECOVERY_TRANSPORT_DOWN, ESP_FAIL);
+        }
+    }
+}
+#endif
 
 static bool wifi_disconnect_is_authentication_failure(uint8_t reason)
 {
@@ -329,12 +483,66 @@ static void wifi_connect_watchdog_task(void *ctx)
     (void)ctx;
 
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
         wifi_mark_connect_timeout_if_needed();
 
         bool recover = false;
+        bool heartbeat_timed_out = false;
+        bool hosted_recover = false;
         char current_ssid[sizeof(s_wifi_status.ssid)] = {0};
+        wifi_hosted_recovery_reason_t hosted_reason = WIFI_HOSTED_RECOVERY_NONE;
+        esp_err_t hosted_error = ESP_OK;
+        uint32_t hosted_attempt = 0U;
         const uint32_t now_ms = wifi_uptime_ms();
+
+        taskENTER_CRITICAL(&s_wifi_lock);
+#if WIFI_HOSTED_EVENT_RECOVERY_SUPPORTED
+        heartbeat_timed_out = s_wifi_hosted_heartbeat_configured &&
+                              s_wifi_hosted_last_heartbeat_ms != 0U &&
+                              !s_wifi_hosted_recovery_in_progress &&
+                              !s_wifi_release_requested &&
+                              (uint32_t)(now_ms - s_wifi_hosted_last_heartbeat_ms) >=
+                                  WIFI_HOSTED_HEARTBEAT_TIMEOUT_MS;
+#endif
+        taskEXIT_CRITICAL(&s_wifi_lock);
+
+        if (heartbeat_timed_out) {
+            wifi_request_hosted_recovery(WIFI_HOSTED_RECOVERY_HEARTBEAT_TIMEOUT,
+                                         ESP_ERR_TIMEOUT);
+        }
+
+        taskENTER_CRITICAL(&s_wifi_lock);
+        if (s_wifi_hosted_recovery_requested && !s_wifi_hosted_recovery_in_progress &&
+            wifi_deadline_reached(now_ms, s_wifi_hosted_recovery_due_ms)) {
+            hosted_recover = true;
+            s_wifi_hosted_recovery_requested = false;
+            s_wifi_hosted_recovery_in_progress = true;
+            hosted_reason = s_wifi_hosted_recovery_reason;
+            hosted_error = s_wifi_hosted_recovery_error;
+            hosted_attempt = ++s_wifi_hosted_recovery_attempts;
+        }
+        taskEXIT_CRITICAL(&s_wifi_lock);
+
+        if (hosted_recover) {
+            esp_err_t hosted_ret = wifi_recover_hosted_transport(hosted_reason,
+                                                                  hosted_error,
+                                                                  hosted_attempt);
+            if (hosted_ret != ESP_OK) {
+                const uint32_t retry_due_ms = wifi_uptime_ms() + WIFI_HOSTED_RECOVERY_RETRY_MS;
+                taskENTER_CRITICAL(&s_wifi_lock);
+                s_wifi_hosted_recovery_requested = true;
+                s_wifi_hosted_recovery_reason = hosted_reason;
+                s_wifi_hosted_recovery_error = hosted_ret;
+                s_wifi_hosted_recovery_due_ms = retry_due_ms;
+                taskEXIT_CRITICAL(&s_wifi_lock);
+                ESP_LOGE(TAG,
+                         "ESP-Hosted recovery failed: attempt=%lu ret=%s retry_ms=%u",
+                         (unsigned long)hosted_attempt,
+                         esp_err_to_name(hosted_ret),
+                         (unsigned)WIFI_HOSTED_RECOVERY_RETRY_MS);
+            }
+            continue;
+        }
 
         taskENTER_CRITICAL(&s_wifi_lock);
         if (s_wifi_status.started && s_wifi_status.configured &&
@@ -363,9 +571,7 @@ static void wifi_connect_watchdog_task(void *ctx)
         }
 
         ESP_LOGW(TAG, "wifi background recovery start failed: %s", esp_err_to_name(ret));
-        taskENTER_CRITICAL(&s_wifi_lock);
-        wifi_arm_background_recovery_locked(wifi_uptime_ms(), s_wifi_status.disconnect_reason);
-        taskEXIT_CRITICAL(&s_wifi_lock);
+        wifi_request_hosted_recovery(WIFI_HOSTED_RECOVERY_CONNECT_RPC, ret);
     }
 }
 
@@ -567,6 +773,257 @@ static void wifi_build_sta_config(wifi_config_t *wifi_cfg, const char *ssid, con
     }
 }
 
+static void wifi_post_hosted_netif_down(void)
+{
+    wifi_event_sta_disconnected_t disconnected = {0};
+    disconnected.reason = WIFI_REASON_CONNECTION_FAIL;
+
+    esp_err_t ret = esp_event_post(WIFI_EVENT,
+                                   WIFI_EVENT_STA_DISCONNECTED,
+                                   &disconnected,
+                                   sizeof(disconnected),
+                                   pdMS_TO_TICKS(250));
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "ESP-Hosted recovery disconnect event failed: %s", esp_err_to_name(ret));
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    ret = esp_event_post(WIFI_EVENT,
+                         WIFI_EVENT_STA_STOP,
+                         NULL,
+                         0,
+                         pdMS_TO_TICKS(250));
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "ESP-Hosted recovery stop event failed: %s", esp_err_to_name(ret));
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+}
+
+static esp_err_t wifi_configure_hosted_heartbeat(void)
+{
+#if WIFI_HOSTED_EVENT_RECOVERY_SUPPORTED
+    esp_err_t ret = esp_hosted_configure_heartbeat(true, WIFI_HOSTED_HEARTBEAT_INTERVAL_SEC);
+    const uint32_t now_ms = wifi_uptime_ms();
+    taskENTER_CRITICAL(&s_wifi_lock);
+    s_wifi_hosted_heartbeat_configured = ret == ESP_OK;
+    s_wifi_hosted_last_heartbeat_ms = ret == ESP_OK ? now_ms : 0U;
+    taskEXIT_CRITICAL(&s_wifi_lock);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "ESP-Hosted heartbeat setup failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ESP_LOGI(TAG,
+             "ESP-Hosted heartbeat monitor ready: interval=%us timeout=%ums",
+             WIFI_HOSTED_HEARTBEAT_INTERVAL_SEC,
+             (unsigned)WIFI_HOSTED_HEARTBEAT_TIMEOUT_MS);
+#endif
+    return ESP_OK;
+}
+
+static esp_err_t wifi_recover_hosted_transport(wifi_hosted_recovery_reason_t reason,
+                                               esp_err_t trigger_error,
+                                               uint32_t attempt)
+{
+    wifi_config_t wifi_cfg = {0};
+    char pending_ssid[sizeof(s_wifi_pending_ssid)] = {0};
+    char pending_password[sizeof(s_wifi_pending_password)] = {0};
+    bool configured = false;
+    bool auto_connect = false;
+    esp_err_t ret = ESP_OK;
+
+    taskENTER_CRITICAL(&s_wifi_lock);
+    configured = s_wifi_pending_ssid[0] != '\0' || s_wifi_saved_ssid[0] != '\0';
+    auto_connect = s_wifi_config.auto_connect;
+    strlcpy(pending_ssid, s_wifi_pending_ssid, sizeof(pending_ssid));
+    strlcpy(pending_password, s_wifi_pending_password, sizeof(pending_password));
+    s_wifi_reconfig_in_progress = true;
+    s_wifi_status.connected = false;
+    s_wifi_status.rssi = WIFI_INVALID_RSSI;
+    s_wifi_status.ip_addr[0] = '\0';
+    s_wifi_background_recovery_due_ms = 0U;
+    taskEXIT_CRITICAL(&s_wifi_lock);
+
+    if (configured) {
+        wifi_build_sta_config(&wifi_cfg, pending_ssid, pending_password);
+    }
+
+    wifi_cancel_connect_timeout();
+    if (s_wifi_event_group != NULL) {
+        xEventGroupClearBits(s_wifi_event_group,
+                             WIFI_CONNECTED_BIT | WIFI_FAIL_BIT | WIFI_SCAN_DONE_BIT |
+                                 WIFI_HOSTED_UP_BIT);
+    }
+
+    ESP_LOGW(TAG,
+             "ESP-Hosted recovery begin: attempt=%lu reason=%s trigger=%s",
+             (unsigned long)attempt,
+             wifi_hosted_recovery_reason_name(reason),
+             esp_err_to_name(trigger_error));
+
+    wifi_post_hosted_netif_down();
+
+    taskENTER_CRITICAL(&s_wifi_lock);
+    s_wifi_status.started = false;
+    s_wifi_scan_in_progress = false;
+    s_wifi_scan_snapshot.in_progress = false;
+    s_wifi_manual_scan_active = false;
+    s_wifi_resume_connect_after_scan = false;
+    s_wifi_hosted_heartbeat_configured = false;
+    s_wifi_hosted_last_heartbeat_ms = 0U;
+    taskEXIT_CRITICAL(&s_wifi_lock);
+
+    if (s_wifi_sta_netif != NULL) {
+        esp_netif_destroy_default_wifi(s_wifi_sta_netif);
+        s_wifi_sta_netif = NULL;
+    }
+
+    if (s_wifi_hosted_runtime_initialized) {
+        ret = (esp_err_t)esp_hosted_deinit();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "ESP-Hosted deinit failed: %s", esp_err_to_name(ret));
+            goto failed;
+        }
+        s_wifi_hosted_runtime_initialized = false;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+    ret = (esp_err_t)esp_hosted_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ESP-Hosted init failed: %s", esp_err_to_name(ret));
+        goto failed;
+    }
+    s_wifi_hosted_runtime_initialized = true;
+
+    taskENTER_CRITICAL(&s_wifi_lock);
+    s_wifi_hosted_seen_cp_init = false;
+    taskEXIT_CRITICAL(&s_wifi_lock);
+
+#if WIFI_HOSTED_EVENT_RECOVERY_SUPPORTED
+    ret = (esp_err_t)esp_hosted_connect_to_slave();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ESP-Hosted reconnect failed: %s", esp_err_to_name(ret));
+        goto failed;
+    }
+    EventBits_t hosted_bits = xEventGroupWaitBits(s_wifi_event_group,
+                                                   WIFI_HOSTED_UP_BIT,
+                                                   pdFALSE,
+                                                   pdFALSE,
+                                                   pdMS_TO_TICKS(10000));
+    if ((hosted_bits & WIFI_HOSTED_UP_BIT) == 0U) {
+        ret = ESP_ERR_TIMEOUT;
+        ESP_LOGE(TAG, "ESP-Hosted reconnect timed out waiting for transport up");
+        goto failed;
+    }
+
+    /* The host transport can fail while the C6 Wi-Fi runtime remains alive.
+     * Reconnect the transport first, then reset the remote Wi-Fi owner before
+     * issuing another esp_wifi_init(). Otherwise a recoverable host-side fault
+     * can turn into a duplicate remote initialization failure. */
+    ret = esp_wifi_deinit();
+    if (ret != ESP_OK && ret != ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGE(TAG,
+                 "ESP-Hosted recovery remote Wi-Fi deinit failed: %s",
+                 esp_err_to_name(ret));
+        goto failed;
+    }
+#else
+    ret = esp_hosted_slave_reset();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ESP-Hosted slave reset failed: %s", esp_err_to_name(ret));
+        goto failed;
+    }
+#endif
+
+    s_wifi_sta_netif = esp_netif_create_default_wifi_sta();
+    if (s_wifi_sta_netif == NULL) {
+        ret = ESP_ERR_NO_MEM;
+        ESP_LOGE(TAG, "ESP-Hosted recovery STA netif allocation failed");
+        goto failed;
+    }
+
+    wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ret = esp_wifi_init(&init_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ESP-Hosted recovery esp_wifi_init failed: %s", esp_err_to_name(ret));
+        goto failed;
+    }
+    (void)wifi_configure_hosted_heartbeat();
+
+    ret = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ESP-Hosted recovery Wi-Fi mode failed: %s", esp_err_to_name(ret));
+        goto failed;
+    }
+    ret = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ESP-Hosted recovery Wi-Fi storage failed: %s", esp_err_to_name(ret));
+        goto failed;
+    }
+    ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ESP-Hosted recovery Wi-Fi config failed: %s", esp_err_to_name(ret));
+        goto failed;
+    }
+    wifi_apply_startup_sta_tuning();
+    ret = esp_wifi_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ESP-Hosted recovery Wi-Fi start failed: %s", esp_err_to_name(ret));
+        goto failed;
+    }
+    wifi_disable_power_save();
+
+    taskENTER_CRITICAL(&s_wifi_lock);
+    s_wifi_status.started = true;
+    s_wifi_status.configured = configured;
+    s_wifi_status.connected = false;
+    s_wifi_status.retry_count = 0;
+    s_wifi_status.disconnect_reason = 0;
+    s_wifi_status.rssi = WIFI_INVALID_RSSI;
+    s_wifi_status.ip_addr[0] = '\0';
+    s_wifi_reconfig_in_progress = false;
+    s_wifi_hosted_recovery_in_progress = false;
+    s_wifi_hosted_recovery_reason = WIFI_HOSTED_RECOVERY_NONE;
+    s_wifi_hosted_recovery_error = ESP_OK;
+    s_wifi_hosted_recovery_attempts = 0U;
+    taskEXIT_CRITICAL(&s_wifi_lock);
+
+    if (configured && auto_connect) {
+        ret = esp_wifi_connect();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "ESP-Hosted recovery Wi-Fi connect failed: %s", esp_err_to_name(ret));
+            goto failed_after_state;
+        }
+        wifi_note_connect_started();
+    }
+
+    ESP_LOGI(TAG,
+             "ESP-Hosted recovery complete: reconnect=%d stack_free=%u",
+             configured && auto_connect,
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    return ESP_OK;
+
+failed_after_state:
+    taskENTER_CRITICAL(&s_wifi_lock);
+    s_wifi_hosted_recovery_in_progress = true;
+    s_wifi_reconfig_in_progress = true;
+    taskEXIT_CRITICAL(&s_wifi_lock);
+
+failed:
+    if (s_wifi_sta_netif != NULL) {
+        esp_netif_destroy_default_wifi(s_wifi_sta_netif);
+        s_wifi_sta_netif = NULL;
+    }
+    taskENTER_CRITICAL(&s_wifi_lock);
+    s_wifi_status.started = false;
+    s_wifi_status.connected = false;
+    s_wifi_status.rssi = WIFI_INVALID_RSSI;
+    s_wifi_status.ip_addr[0] = '\0';
+    s_wifi_reconfig_in_progress = false;
+    s_wifi_hosted_recovery_in_progress = false;
+    taskEXIT_CRITICAL(&s_wifi_lock);
+    return ret;
+}
+
 static void wifi_refresh_rssi(void)
 {
     if (!s_wifi_initialized) {
@@ -660,6 +1117,7 @@ static void wifi_resume_connect_if_needed(wifi_scan_resume_action_t action)
     esp_err_t ret = esp_wifi_connect();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "resume wifi connect after scan failed: %s", esp_err_to_name(ret));
+        wifi_request_hosted_recovery(WIFI_HOSTED_RECOVERY_CONNECT_RPC, ret);
     } else {
         wifi_note_connect_started();
     }
@@ -994,6 +1452,7 @@ static void wifi_event_handler(void *arg,
             esp_err_t ret = esp_wifi_connect();
             if (ret != ESP_OK) {
                 ESP_LOGW(TAG, "wifi reconnect failed: %s", esp_err_to_name(ret));
+                wifi_request_hosted_recovery(WIFI_HOSTED_RECOVERY_CONNECT_RPC, ret);
             } else {
                 wifi_note_connect_started();
             }
@@ -1221,6 +1680,18 @@ esp_err_t wifi_prepare(const wifi_driver_config_t *config)
     s_wifi_event_group = xEventGroupCreateWithCaps(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     ESP_RETURN_ON_FALSE(s_wifi_event_group != NULL, ESP_ERR_NO_MEM, TAG, "wifi event group alloc failed");
 
+#if WIFI_HOSTED_EVENT_RECOVERY_SUPPORTED
+    if (s_wifi_hosted_event_instance == NULL) {
+        ESP_RETURN_ON_ERROR(esp_event_handler_instance_register(ESP_HOSTED_EVENT,
+                                                                ESP_EVENT_ANY_ID,
+                                                                wifi_hosted_event_handler,
+                                                                NULL,
+                                                                &s_wifi_hosted_event_instance),
+                            TAG,
+                            "register ESP-Hosted event handler failed");
+    }
+#endif
+
     if (s_wifi_connect_timer == NULL) {
         const esp_timer_create_args_t timer_args = {
             .callback = wifi_connect_timeout_cb,
@@ -1240,6 +1711,8 @@ esp_err_t wifi_prepare(const wifi_driver_config_t *config)
 
     wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&init_cfg), TAG, "esp_wifi_init failed");
+    s_wifi_hosted_runtime_initialized = true;
+    (void)wifi_configure_hosted_heartbeat();
     ESP_RETURN_ON_ERROR(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL),
                         TAG,
                         "register wifi event handler failed");
@@ -1279,7 +1752,7 @@ esp_err_t wifi_prepare(const wifi_driver_config_t *config)
     if (s_wifi_connect_watchdog_task == NULL) {
         BaseType_t watchdog_ok = xTaskCreatePinnedToCoreWithCaps(wifi_connect_watchdog_task,
                                                                  "wifi_watchdog",
-                                                                 3 * 1024,
+                                                                 WIFI_HOSTED_RECOVERY_TASK_STACK_SIZE,
                                                                  NULL,
                                                                  WIFI_SCAN_TASK_PRIORITY,
                                                                  &s_wifi_connect_watchdog_task,
@@ -1306,6 +1779,7 @@ esp_err_t wifi_prepare(const wifi_driver_config_t *config)
     if (connect_ret != ESP_OK) {
         ESP_LOGW(TAG, "wifi connect start failed: %s", esp_err_to_name(connect_ret));
         xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        wifi_request_hosted_recovery(WIFI_HOSTED_RECOVERY_CONNECT_RPC, connect_ret);
         return connect_ret;
     }
     wifi_note_connect_started();
@@ -1436,6 +1910,7 @@ esp_err_t app_wifi_driver_connect(const char *ssid, const char *password)
             s_wifi_reconfig_in_progress = false;
             taskEXIT_CRITICAL(&s_wifi_lock);
             ESP_LOGW(TAG, "wifi disconnect before reconnect failed: %s", esp_err_to_name(disconnect_ret));
+            wifi_request_hosted_recovery(WIFI_HOSTED_RECOVERY_DISCONNECT_RPC, disconnect_ret);
             return disconnect_ret;
         }
         if (was_connecting) {
@@ -1459,6 +1934,7 @@ esp_err_t app_wifi_driver_connect(const char *ssid, const char *password)
         s_wifi_reconfig_in_progress = false;
         taskEXIT_CRITICAL(&s_wifi_lock);
         ESP_LOGE(TAG, "wifi config update failed: %s", esp_err_to_name(set_ret));
+        wifi_request_hosted_recovery(WIFI_HOSTED_RECOVERY_CONFIG_RPC, set_ret);
         return set_ret;
     }
 
@@ -1469,6 +1945,7 @@ esp_err_t app_wifi_driver_connect(const char *ssid, const char *password)
         taskEXIT_CRITICAL(&s_wifi_lock);
         ESP_LOGW(TAG, "wifi connect start failed: %s", esp_err_to_name(connect_ret));
         xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        wifi_request_hosted_recovery(WIFI_HOSTED_RECOVERY_CONNECT_RPC, connect_ret);
         return connect_ret;
     }
     taskENTER_CRITICAL(&s_wifi_lock);

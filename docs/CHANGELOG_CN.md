@@ -1,5 +1,33 @@
 # 版本变更记录
 
+## 2026.09.02：ESP32-P4 Device Monitor 1.5.3
+
+- 开发来源固定为 Tag `esp32-p4-device-app-v1.5.3`、commit
+  `06583eaf18d9326b9602684a7c509a3badf7dadc`、tree
+  `1acc583f3601448e1656f18716924f70125fe0c7`。本次公开更新以 `1.5.1` 为比较基线，包含
+  开发版 `1.5.2` 与 `1.5.3` 的变化，不单独补发公开 `1.5.2`。
+- RTC 配置入口使用 URL parser 校验显式 HTTPS 和非空 host，拒绝 userinfo、fragment、
+  非法端口及未终止字符串；RTC 关闭时允许空地址。校验失败保留原配置且不触发 SDK 重置。
+  删除按 TiRTC SDK 版本把 HTTPS 改成 HTTP 的旧兼容分支，TLS 失败保留失败语义。
+- TiRTC SDK 使用 `2.3.0` P4 验证重建与补丁版，包含 ICE/TGTRP 有界调度、NACK 容量、码率
+  恢复和 TURN 查找栈修正。公开归档经 `--strip-debug` 移除 SDK 行号调试信息，99 个成员
+  的分配节内容、运行符号、重定位和归档符号索引保持等价；不是未经修改的官方包。
+- P4 静态库为 `4,748,802` bytes，SHA-256 为
+  `a7a01ffd496a55364c7e4d665ff3884d078147bba96752a965d97befca12e451`。
+- 微信 H264 上行从 `480x320@15fps`、目标 `480kbps` 调整为 `640x480@15fps`、目标
+  `800kbps`，主动呼叫使用正式版 `wx_version_type=0`。下行仍请求 `640x480` MJPEG，
+  实际帧可以更小，P4 硬解后一次 `cover` 到 `480x320`。
+- 设备呼叫保持 `384x256@12fps`、目标 `256kbps`，IPC 保持 `1280x960@20fps`、目标
+  `4Mbps`。SDK/TGMP 码率反馈默认开启，旧本地自动弱网调节保持关闭。
+- H264 直编码输出复用持久 PSRAM 工作区；异步挂断任务使用后台栈，异步页面动作在 LVGL
+  锁内提交。串口回归接口与媒体停滞诊断补充会话和传输观测点。
+- Wi-Fi 连接、断开或配置 RPC 错误可触发 Hosted 重建；SDIO 在确认中断前检查寄存器快照和
+  包长，并记录 TX throttle。当前依赖没有 `esp_hosted_event.h`，事件与心跳恢复分支被
+  编译关闭；这些防护不证明物理故障根因已经消除。
+- 计划交付 `0x0` 16 MiB 完整镜像、`SHA256SUMS.txt` 和 `release-manifest.json`。本次正式
+  构建结果、app 大小、分区余量和附件哈希待补；`1.5.1` 的通过结果不作为本版本证据。
+  尚未执行本版本烧录、HTTPS 真机正反例、微信实呼、双向弱网或长稳回归。
+
 ## 2026.08.28：ESP32-S3 Device Monitor 1.9.7
 
 - 开发来源固定为 annotated Tag `v1.9.7`、Tag object

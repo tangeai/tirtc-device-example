@@ -2,16 +2,28 @@
 
 | Item | Value |
 | --- | --- |
-| Package channel | Official 2.3.0 source rebuild with P4 transport stability fixes |
+| Package channel | 2.3.0 P4 validation rebuild with transport and RTC-thread stack fixes |
 | TiRTC version | 2.3.0 |
 | Target | ESP32-P4 / FreeRTOS / ESP-IDF |
 | ESP-IDF | 5.5.4 |
 | Toolchain | riscv32-esp-elf-gcc-14.2.0_20260121 |
-| Nano source | `v2.3.0` / `1baf7c95f3ca715c9367b9c998417f647934dc35` |
-| TGWebRTC source | `tag.v1.5.12` / `41c9a25768ffe265c07f17ef78a6439607b19364` |
+| Nano source | `13e34c3e3e3dc6776be4713b5c1e3c17bd282766` with P4 TGWebRTC archive `2229474ecb8a03ab2a7144acb529decd7dc206f328dd4ecdbb1ef308a691a86d` |
+| TGWebRTC source | `e39114731ad488c88573d16f0855a1326d97c989` plus validation patch set `e5b3109cc0dee3f0d8958c23a60f69b236d87acb909cac95c4d6bb24812dbbaf` |
 | Official archive SHA-256 | `6daa39e04edf552283360f6a7defa6d12de8c8dd8d8094f8a6bbbdbb64a3f190` |
-| Integrated library SHA-256 | `6dc4d437ea444761ca21e203fc9babb1799bb1f7fc261d7c523248fde0a96e67` |
-| Build date | 2026-08-26 |
+| Pre-strip library SHA-256 | `738c969244ab39c2b0eacc21068ecebc9bad736a4a5d713794836605d8e9f982` |
+| Integrated library SHA-256 | `a7a01ffd496a55364c7e4d665ff3884d078147bba96752a965d97befca12e451` |
+| Build date | 2026-08-31 |
+| Debug-info sanitization date | 2026-09-02 |
+
+The integrated P4 archive was processed with `riscv32-esp-elf-strip --strip-debug`.
+All 99 members retain identical allocated section contents, live symbols,
+relocations and archive symbol lookup. No source rebuild or runtime data edit
+was performed. The original archive remains in the prior local source Tag;
+source-line debugging inside the SDK requires that original archive.
+
+RTC endpoints must remain HTTPS. This archive contains required certificate
+verification, the ESP-IDF CA bundle, hostname verification and verification-result
+checks. Application code must propagate connection errors without HTTP fallback.
 
 ## Build Contract
 
@@ -68,6 +80,12 @@ application uses ESP32-C6 Wi-Fi over ESP-Hosted SDIO, so it keeps
   forever; the controller retries after 3 seconds, raises a clean-window target
   by at most 40 percent, and caps the minimum-bitrate recovery hold at 12
   seconds. Congested feedback cannot consume a pending recovery probe.
+- Replace the TURN allocation binary-search keys with lightweight address keys.
+  This reduces the P4 stack frames of the relay and address lookup functions
+  from 3792 bytes to 32 and 48 bytes without changing lookup ordering.
+- Keep the P4 signal RTC thread at 8 KiB and reserve 12 KiB for connection RTC
+  threads. The larger connection stack is a validation margin in addition to
+  the TURN lookup root-cause fix.
 
 ## Bitrate Adaptation Contract
 
@@ -81,6 +99,6 @@ application uses ESP32-C6 Wi-Fi over ESP-Hosted SDIO, so it keeps
   applying the target to its encoder, frame rate, or resolution policy.
 - The API is TGTRP-specific in this SDK. Unsupported transports or invalid
   parameters return `TIRTC_E_INVALID_PARAMETER`.
-- Automatic application-side adaptation remains disabled by default through
-  `CONFIG_APP_RTC_SDK_VIDEO_ADAPT_ENABLE`; enable it only for the target test or
-  product policy.
+- SDK bitrate feedback is enabled by default through
+  `CONFIG_APP_RTC_SDK_VIDEO_ADAPT_ENABLE`; the separate legacy local automatic
+  downgrade policy remains disabled so only one controller adjusts the encoder.

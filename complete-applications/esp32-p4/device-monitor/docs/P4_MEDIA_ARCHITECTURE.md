@@ -3,12 +3,13 @@
 本文档说明摄像头、音频、TiRTC、显示和内存的所有权。目标是让每条媒体链路只有一个生命周期
 所有者，运行时不通过跨层补丁争抢硬件或连接句柄。
 
-本文对应应用版本 `1.5.1` 和 TiRTC SDK `2.3.0` 官方源码重建版。版本来源见
+本文对应应用版本 `1.5.3` 和 TiRTC SDK `2.3.0` P4 验证重建与补丁版。版本来源见
 [SOURCE_PROVENANCE.md](../SOURCE_PROVENANCE.md)，项目入口见 [README.md](../README.md)。
 环境、构建、烧录和首次启动见 [GETTING_STARTED_CN.md](GETTING_STARTED_CN.md)。
-下列参数描述当前源码设计和默认配置。`1.5.1` 只拆分绑定门户与设备 API 的配置职责，媒体实现
-和默认参数完整继承 `1.5.0`：P4 ICE/TGTRP、跨 APP 生命周期、摄像头/H264 持久池、音频/AEC、
-下行播放队列和 ESP-Hosted 恢复均未改变。构建通过不单独构成烧录、联网、媒体运行或长稳证明。
+下列参数描述当前源码设计和默认配置。相比公开 `1.5.1`，本版本更新微信 VGA 上行、H264
+输出工作区、SDK 传输与栈补丁、Hosted RPC 恢复，并要求 RTC 服务地址保持 HTTPS。
+SDK 公开归档只移除调试信息，运行节、重定位和归档成员保持等价；SDK 行号调试需使用原始库。
+这些源码与归档结论不构成烧录、联网、媒体运行或长稳证明。
 
 本文中的上行和下行均以 P4 设备为参照：`P4 设备 -> 服务端` 为上行，
 `服务端 -> P4 设备` 为下行。微信客户端采集端的原始分辨率不由本工程配置。
@@ -50,6 +51,10 @@ P4 使用 capability-based allocation，不把所有 heap 当作可互换内存�
 这些资源在服务发现、绑定、MQTT、TiRTC 和 UI 分配长期内存前占位，并由跨 APP 媒体所有权
 统一复用。视频大块留在 PSRAM，内部 RAM 只承担硬件必须的描述符和实时控制。业务退出时
 清理会话代际、队列和引用，不通过反复释放、重建大块池制造碎片。
+
+直编码 H264 输出工作区也由 camera pipeline 持久持有，按所需容量取得独占使用权，关闭
+编码器时归还使用权而不释放大块 PSRAM。工作区被占用或分配失败时保留失败语义，不另建
+并发编码所有者。
 
 RTC 视频发送池使用固定 PSRAM slot；音频发送和播放缓冲也使用独立固定池。队列只保存描述符
 和 slot index，不保存大 payload。后台网络、媒体和 UI task 使用 PSRAM stack；
@@ -105,7 +110,7 @@ value 复制到控制内存后，由 internal-RAM task 串行执行 `open -> set
   微信上行为 `30` 帧 / `2s`。流开始、订阅恢复、传输恢复和对端请求仍会强制关键帧。
 
 设备间呼叫从 P4 发送 `384x256@12fps`、`256kbps` H264；微信 VoIP 使用独立的
-`480x320@15fps`、`480kbps` H264 档位。退出通话后恢复 IPC 正常档位。
+`640x480@15fps`、目标 `800kbps` H264 档位。退出通话后恢复 IPC 正常档位。
 
 ## 视频下行
 
@@ -154,6 +159,9 @@ value 复制到控制内存后，由 internal-RAM task 串行执行 `open -> set
 
 ## 微信会话 worker
 
+P4 主动呼叫默认携带正式版 `wx_version_type=0`。该设置由微信服务配置持有，S3 的体验版
+`2` 不随本次 P4 发布改变。
+
 微信会话把可能阻塞 SDK 或网络的拒绝、断开等操作放入固定 work worker 串行执行。接听路径
 使用独立常驻 worker：大栈只在启动时从 PSRAM 分配一次，每次接听请求用递增序号隔离；请求
 被取消或被新请求替代后，旧 worker 结果不能提交到当前会话。业务状态仍由会话 generation
@@ -181,6 +189,10 @@ value 复制到控制内存后，由 internal-RAM task 串行执行 `open -> set
 - 无效句柄、远端关闭和 teardown 在协议层与应用层闭环，UI 不直接释放连接。
 
 ### RTC/WHIP 连接生命周期
+
+RTC 配置先使用 URL parser 检查服务地址：要求显式 `https://` 与非空 host，拒绝 userinfo、
+fragment、非法端口和未终止字符串。RTC 关闭时允许空地址；拒绝配置不会改写现有状态或
+触发 SDK 重置。应用不再按 SDK 版本降级到 HTTP，证书链、主机名和校验结果仍由 SDK 检查。
 
 连接状态由 `tirtc_session` 在 critical section 中统一持有。当前实现把“可以发起新连接”定义为：
 网络在线、SDK 已初始化且已启动、没有 prepare/start/stop、没有 active connection、没有
@@ -219,6 +231,21 @@ TGMP 注册起点为 `224kbps`，收到传输反馈后才调整。IPC 和微信�
 SDK/TGMP 控制器默认开启；拥塞降码率立即生效，恢复升码率需经过稳定等待并分级上调。
 旧的本地队列压力自动降级默认关闭，避免两个控制器竞争。
 
+## Hosted 与 SDIO 恢复边界
+
+网络 owner 在 Wi-Fi 连接、断开或配置 RPC 返回错误时请求 Hosted 重建，记录触发原因、
+重建步骤和失败返回值。Hosted/STA netif 重建后仍要等待 got-IP，再由上层分别恢复 MQTT、
+TiRTC 和业务连接；重建完成日志不代表业务已经恢复。
+
+当前依赖没有 `esp_hosted_event.h`，`WIFI_HOSTED_EVENT_RECOVERY_SUPPORTED` 为 `0`。
+传输事件、C6 心跳与心跳超时恢复分支不参与编译，不能把源码中保留的条件分支当作本次
+固件能力。
+
+SDIO 读取全 `0xff` 寄存器快照时最多重试 3 次，间隔 `200us`；读数和包长通过检查后才
+确认中断，清中断失败也保留错误。TX throttle 起止、持续时间与丢包计数用于区分发送节流
+和媒体停顿。这些是防护与恢复机制；异常读数的物理根因尚未证实，仍需供电、C6/SDIO 和
+故障注入证据。
+
 ## 媒体参数事实源
 
 运行时媒体策略集中在：
@@ -237,8 +264,8 @@ SDK/TGMP 控制器默认开启；拥塞降码率立即生效，恢复升码率�
 | --- | --- |
 | P4 设备 -> 服务端（IPC） | `1280x960@20fps`, `4Mbps`，GOP `40` 帧 / `2s` |
 | P4 设备 -> 服务端（设备呼叫） | `384x256@12fps`, `256kbps`，TGMP `96-256kbps`，名义 GOP `192` 帧 / `16s` |
-| P4 设备 -> 服务端（微信 VoIP） | `480x320@15fps`, `480kbps`，GOP `30` 帧 / `2s` |
-| 服务端 -> P4 设备（微信 VoIP） | 请求 `640x480` MJPEG，显示到 `480x320` |
+| P4 设备 -> 服务端（微信 VoIP） | `640x480@15fps`，目标 `800kbps`，GOP `30` 帧 / `2s` |
+| 服务端 -> P4 设备（微信 VoIP） | 请求 `640x480` MJPEG，实际帧可以更小，`cover` 到 `480x320` |
 | H264 downlink input | `24 x 256KB` PSRAM slot |
 | H264 decoded/output | decoded `4` 个、output `20` 个 RGB565 slot；playout 深度上限 `16` |
 | H264 output buffer | `1MB` |
@@ -248,6 +275,8 @@ SDK/TGMP 控制器默认开启；拥塞降码率立即生效，恢复升码率�
 | Legacy local auto adaptation | 关闭 |
 | Wait subscribe before capture | 关闭 |
 | Direct LCD with auto-hidden controls | 开启 |
+
+码率均为编码目标，不是实测吞吐保证。微信 MJPEG 下行没有固定帧率或码率声明。
 
 ## 失败边界
 
@@ -261,10 +290,9 @@ SDK/TGMP 控制器默认开启；拥塞降码率立即生效，恢复升码率�
 
 ## 建议验证
 
-公开候选已使用 ESP-IDF `5.5.4`、`--no-ccache` 完成唯一一次干净构建，`1837/1837` 个步骤
-通过且编译 warning、error、ICE 均为 0。应用镜像为 `6,955,776` bytes，最小 APP 分区剩余
-`580,864` bytes（`7.71%`）；实际烧录分段和完整镜像 SHA-256 写入 `release-manifest.json`。
-16 MiB 完整镜像只作为 GitHub Release 资产，不进入 Git 历史。完成构建仍不改变以下目标板验证要求：
+本次 `1.5.3` 正式构建结果、app 大小、分区余量和附件哈希待补。此前 `1.5.1` 的构建与
+真机记录不作为本版本证据。16 MiB 完整镜像只作为 GitHub Release 资产，不进入 Git 历史；
+实际烧录分段和哈希以本次 manifest 为准。目标板验证至少包括：
 
 1. 检查横屏显示和触摸坐标。
 2. 检查绑定、正式 MQTT 和 TiRTC 上线。
@@ -272,10 +300,15 @@ SDK/TGMP 控制器默认开启；拥塞降码率立即生效，恢复升码率�
 4. 快速切换 AI Chat、设备呼叫和微信呼叫，确认同一时刻只有一个 WHIP attempt，过期回调
    不会再次销毁 closing connection，重复 disconnect 保持幂等。
 5. 分别检查 IPC、设备呼叫、微信 VoIP 和 AI Chat。
-6. 对微信 VoIP 分别确认 P4 设备发送的 `480x320` H264 和服务端下发的 MJPEG 均有首帧证据，
-   并记录服务端实际下发分辨率。
+6. 对微信正式版 VoIP 分别确认 P4 设备发送的 `640x480` H264 和服务端下发的 MJPEG 均有
+   首帧证据，并记录服务端实际下发分辨率。
 7. 保持每个主要场景至少 5 分钟，观察 fps、bitrate、queue、DMA largest block、持久 PSRAM
    pool 和 AEC；单独确认设备呼叫 `384x256@12fps` 弱网恢复。
 8. 每个场景连续进入和退出至少 10 次，确认无残留资源和连接句柄。
 9. 对 H264 下行做连续呼叫和故障注入，确认 persistent reference/deblocking pool 没有跨会话
    残留，记录 decode 超过 `2s` 时原调用是否返回、decoder 是否能从新 IDR 重建。
+10. 用静态画面与持续高运动画面做对照，覆盖同一设备入站/出站弱网，记录编码耗时、帧大小、
+    码率、发送队列和内存水位；不能用静态场景证明高运动压力下的余量。
+11. 分别验证有效 HTTPS 成功、错误证书与错误主机名失败，以及无效 URL 被入口拒绝。
+12. 触发 Wi-Fi RPC 错误与 SDIO 异常，核对首个错误、重建步骤、got-IP 和业务恢复，不把重试
+    后暂时恢复当作物理故障根因修复。
