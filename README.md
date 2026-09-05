@@ -13,7 +13,7 @@
 
 四章开发者指南位于新仓顶层 `docs/`，可从[乐鑫版指南](https://github.com/tangeai/xiaotai-esp32/blob/main/docs/README_CN.md)或[君正版指南](https://github.com/tangeai/xiaotai-ingenic/blob/main/docs/README_CN.md)连续阅读。[探鸽 + 启明独立仓](https://github.com/tangeai/tirtc-device-qiming)继续保留自身板卡特色和发布入口。
 
-本仓归档保留历史源码、Tag 和 Release，原下载链接继续用于追溯。此次迁移保持原固件字节；新仓各项目 Release 中的 `release-manifest.json` 记录新旧源码映射与原构建来源。新开发请使用上方入口，不再以本仓 `main` 作为更新来源。
+本仓保留历史源码、Tag 和 Release，原下载链接继续用于追溯。此次迁移保持原固件字节；新仓各项目 Release 中的 `release-manifest.json` 记录新旧源码映射与原构建来源。新开发请使用上方入口，不再以本仓 `main` 作为更新来源。
 
 以下内容为迁移前的历史说明。
 
