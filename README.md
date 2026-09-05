@@ -1,5 +1,24 @@
 # TiRTC 设备端示例
 
+## 新仓入口
+
+设备工程已按芯片平台迁入以下仓库，后续版本在对应新仓发布：
+
+| 平台 | 源码与文档 | 固件下载 |
+| --- | --- | --- |
+| ESP32-S3、ESP32-P4，以及独立目录中的启明 P4 | [小钛 ESP32](https://github.com/tangeai/xiaotai-esp32) | [项目 Releases](https://github.com/tangeai/xiaotai-esp32/releases) |
+| 君正 G32S10X | [小钛君正](https://github.com/tangeai/xiaotai-ingenic) | [项目 Releases](https://github.com/tangeai/xiaotai-ingenic/releases) |
+
+三个入口继续保留：最小 TiRTC 集成、最小系统例子、完整应用。君正尚未提供最小系统工程，具体可用版本以新仓项目表为准。
+
+四章开发者指南位于新仓顶层 `docs/`，可从[乐鑫版指南](https://github.com/tangeai/xiaotai-esp32/blob/main/docs/README_CN.md)或[君正版指南](https://github.com/tangeai/xiaotai-ingenic/blob/main/docs/README_CN.md)连续阅读。[探鸽 + 启明独立仓](https://github.com/tangeai/tirtc-device-qiming)继续保留自身板卡特色和发布入口。
+
+本仓归档保留历史源码、Tag 和 Release，原下载链接继续用于追溯。此次迁移保持原固件字节；新仓各项目 Release 中的 `release-manifest.json` 记录新旧源码映射与原构建来源。新开发请使用上方入口，不再以本仓 `main` 作为更新来源。
+
+以下内容为迁移前的历史说明。
+
+---
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![ESP32-S3](https://img.shields.io/badge/Platform-ESP32--S3-000000?logo=espressif)](sdk-integration-examples/esp32-s3)
 [![ESP32-P4](https://img.shields.io/badge/Platform-ESP32--P4-E7352C?logo=espressif)](sdk-integration-examples/esp32-p4)
